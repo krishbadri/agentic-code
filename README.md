@@ -9,7 +9,24 @@
   <em>Get help fast → <a href="https://discord.gg/roocode">Join Discord</a> • Prefer async? → <a href="https://www.reddit.com/r/RooCode/">Join r/RooCode</a></em>
 </p>
 
-# Roo Code
+# Agentic Code
+
+> Research-Grade Transactional Agentic Programming System
+
+## 🚀 Quick Start for Users
+
+**New to Agentic Code?** See the **[User Installation Guide](USER_GUIDE.md)** for complete setup instructions.
+
+**Quick Install:**
+
+1. Clone: `git clone https://github.com/krishbadri/agentic-code.git`
+2. Install: `pnpm install && pnpm build && pnpm vsix`
+3. Install VSIX: `code --install-extension bin/agentic-cline-*.vsix`
+4. Set up PostgreSQL and start Control-Plane (see [USER_GUIDE.md](USER_GUIDE.md))
+
+---
+
+# Roo Code (Original)
 
 > Your AI-Powered Dev Team, Right in Your Editor
 
@@ -35,7 +52,7 @@
 - [简体中文](locales/zh-CN/README.md)
 - [繁體中文](locales/zh-TW/README.md)
 - ...
-  </details>
+    </details>
 
 ---
 
