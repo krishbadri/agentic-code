@@ -1,0 +1,37 @@
+{
+	"name": "@agentic-code/control-plane",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"bin": {
+		"control-plane": "dist/src/cli.js"
+	},
+	"scripts": {
+		"dev": "tsx --watch src/cli.ts dev",
+		"start": "node dist/src/cli.js start",
+		"build": "tsc -p tsconfig.json",
+		"test": "vitest run",
+		"dev:oneshot": "tsx src/cli.ts dev"
+	},
+	"dependencies": {
+		"@fastify/compress": "^7.0.0",
+		"@fastify/cors": "^8.0.0",
+		"@fastify/formbody": "^7.0.0",
+		"@fastify/swagger": "^8.14.0",
+		"@fastify/swagger-ui": "^4.1.0",
+		"@modelcontextprotocol/sdk": "^1.12.0",
+		"fastify": "^4.28.1",
+		"get-port": "^7.0.0",
+		"pg": "^8.13.1",
+		"uuid": "^9.0.1",
+		"zod": "^3.25.61",
+		"zod-to-json-schema": "^3.23.5"
+	},
+	"devDependencies": {
+		"@agentic-code/config-typescript": "workspace:^",
+		"@types/pg": "^8.15.5",
+		"tsx": "^4.19.1",
+		"typescript": "^5.6.3",
+		"vitest": "^3.2.4"
+	}
+}

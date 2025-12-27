@@ -1,0 +1,10 @@
+{
+	"extends": "@agentic-code/config-typescript/base.json",
+	"compilerOptions": {
+		"outDir": "dist",
+		"types": ["node"],
+		"module": "NodeNext",
+		"target": "ES2020"
+	},
+	"include": ["src/**/*"]
+}

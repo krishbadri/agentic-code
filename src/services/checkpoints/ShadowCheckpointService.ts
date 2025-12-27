@@ -85,7 +85,7 @@ export abstract class ShadowCheckpointService extends EventEmitter {
 		}
 
 		await fs.mkdir(this.checkpointsDir, { recursive: true })
-		const git = simpleGit(this.checkpointsDir)
+		const git = simpleGit(this.checkpointsDir, { binary: "git" })
 		const gitVersion = await git.version()
 		this.log(`[${this.constructor.name}#create] git = ${gitVersion}`)
 
@@ -391,7 +391,7 @@ export abstract class ShadowCheckpointService extends EventEmitter {
 	}) {
 		const workspaceRepoDir = this.workspaceRepoDir({ globalStorageDir, workspaceDir })
 		const branchName = `roo-${taskId}`
-		const git = simpleGit(workspaceRepoDir)
+		const git = simpleGit(workspaceRepoDir, { binary: "git" })
 		const success = await this.deleteBranch(git, branchName)
 
 		if (success) {

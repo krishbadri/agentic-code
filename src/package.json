@@ -1,9 +1,9 @@
 {
-	"name": "roo-cline",
+	"name": "agentic-cline",
 	"displayName": "%extension.displayName%",
 	"description": "%extension.description%",
-	"publisher": "RooVeterinaryInc",
-	"version": "3.28.18",
+	"publisher": "AgenticCode",
+	"version": "3.28.62",
 	"icon": "assets/icons/icon.png",
 	"galleryBanner": {
 		"color": "#617A91",
@@ -14,13 +14,13 @@
 		"node": "20.19.2"
 	},
 	"author": {
-		"name": "Roo Code"
+		"name": "Agentic Code"
 	},
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/RooCodeInc/Roo-Code"
+		"url": "https://github.com/agentic-code/agentic-code"
 	},
-	"homepage": "https://roocode.com",
+	"homepage": "https://agentic-code.dev",
 	"categories": [
 		"AI",
 		"Chat",
@@ -42,12 +42,16 @@
 		"sonnet",
 		"ai",
 		"llama",
-		"roo code",
-		"roocode"
+		"agentic code",
+		"agenticcode"
 	],
 	"activationEvents": [
-		"onLanguage",
-		"onStartupFinished"
+		"onStartupFinished",
+		"onCommand:roo.startControlPlaneHere",
+		"onCommand:roo.commitTransaction",
+		"onCommand:roo-cline.saveCheckpoint",
+		"onCommand:roo-cline.rollbackCheckpoint",
+		"onCommand:roo-cline.suggestRollback"
 	],
 	"main": "./dist/extension.js",
 	"contributes": {
@@ -70,6 +74,16 @@
 			]
 		},
 		"commands": [
+			{
+				"command": "roo-cline.saveCheckpoint",
+				"title": "Roo: Save Checkpoint",
+				"icon": "$(save)"
+			},
+			{
+				"command": "roo.startControlPlaneHere",
+				"title": "Start Control-Plane Here",
+				"category": "Roo"
+			},
 			{
 				"command": "roo-cline.plusButtonClicked",
 				"title": "%command.newTask.title%",
@@ -179,6 +193,23 @@
 				"command": "roo-cline.toggleAutoApprove",
 				"title": "%command.toggleAutoApprove.title%",
 				"category": "%configuration.title%"
+			},
+			{
+				"command": "roo.commitTransaction",
+				"title": "Commit Transaction",
+				"category": "Roo"
+			},
+			{
+				"command": "roo-cline.rollbackCheckpoint",
+				"title": "Rollback to Checkpoint",
+				"category": "Roo",
+				"icon": "$(history)"
+			},
+			{
+				"command": "roo-cline.suggestRollback",
+				"title": "Suggest Rollback",
+				"category": "Roo",
+				"icon": "$(lightbulb)"
 			}
 		],
 		"menus": {
@@ -224,6 +255,16 @@
 			],
 			"view/title": [
 				{
+					"command": "roo-cline.saveCheckpoint",
+					"group": "navigation@0",
+					"when": "view == roo-cline.SidebarProvider"
+				},
+				{
+					"command": "roo.startControlPlaneHere",
+					"group": "navigation@5",
+					"when": "view == roo-cline.SidebarProvider"
+				},
+				{
 					"command": "roo-cline.plusButtonClicked",
 					"group": "navigation@1",
 					"when": "view == roo-cline.SidebarProvider"
@@ -261,6 +302,11 @@
 				{
 					"command": "roo-cline.popoutButtonClicked",
 					"group": "overflow@4",
+					"when": "view == roo-cline.SidebarProvider"
+				},
+				{
+					"command": "roo.commitTransaction",
+					"group": "overflow@5",
 					"when": "view == roo-cline.SidebarProvider"
 				}
 			],
@@ -307,6 +353,13 @@
 				}
 			]
 		},
+		"chatParticipants": [
+			{
+				"id": "claude-code",
+				"label": "Claude Code",
+				"when": "false"
+			}
+		],
 		"keybindings": [
 			{
 				"command": "roo-cline.addToContext",
@@ -337,6 +390,59 @@
 		"configuration": {
 			"title": "%configuration.title%",
 			"properties": {
+				"roo.controlPlane.rootPath": {
+					"type": "string",
+					"default": "",
+					"description": "Absolute path to the Agentic-Code monorepo root that contains apps/control-plane. Used to launch the Control-Plane."
+				},
+				"roo.cpPortOverride": {
+					"type": "number",
+					"default": 0,
+					"description": "If set (>0), use this Control-Plane port instead of auto-starting."
+				},
+				"roo.experimental.transactionalMode": {
+					"type": "boolean",
+					"default": false,
+					"description": "Enable Control-Plane transactional mode (routes edits/terminal/checkpoints through local daemon)."
+				},
+				"roo-cline.experimental.transactionalMode": {
+					"type": "boolean",
+					"default": false,
+					"description": "Alias of roo.experimental.transactionalMode for compatibility."
+				},
+				"roo.experimental.plannerMode": {
+					"type": "boolean",
+					"default": true,
+					"description": "Enable multi-agent planner mode (analyzes tasks and executes sub-transactions in parallel). This is the core feature that enables the multi-agent framework."
+				},
+				"roo-cline.experimental.plannerMode": {
+					"type": "boolean",
+					"default": true,
+					"description": "Alias of roo.experimental.plannerMode for compatibility."
+				},
+				"roo.autoCheckpoint.enabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Automatically checkpoint after edits when transactional mode is enabled."
+				},
+				"roo.autoCheckpoint.patchBytes": {
+					"type": "number",
+					"default": 8192,
+					"minimum": 0,
+					"description": "Approximate bytes threshold to trigger auto checkpoint."
+				},
+				"roo.autoCheckpoint.filesTouched": {
+					"type": "number",
+					"default": 5,
+					"minimum": 1,
+					"description": "Files touched threshold to trigger auto checkpoint."
+				},
+				"roo.autoCheckpoint.elapsedMs": {
+					"type": "number",
+					"default": 90000,
+					"minimum": 0,
+					"description": "Time threshold to trigger auto checkpoint."
+				},
 				"roo-cline.allowedCommands": {
 					"type": "array",
 					"items": {
@@ -458,10 +564,10 @@
 		"@mistralai/mistralai": "^1.9.18",
 		"@modelcontextprotocol/sdk": "1.12.0",
 		"@qdrant/js-client-rest": "^1.14.0",
-		"@roo-code/cloud": "workspace:^",
-		"@roo-code/ipc": "workspace:^",
-		"@roo-code/telemetry": "workspace:^",
-		"@roo-code/types": "workspace:^",
+		"@agentic-code/cloud": "workspace:^",
+		"@agentic-code/ipc": "workspace:^",
+		"@agentic-code/telemetry": "workspace:^",
+		"@agentic-code/types": "workspace:^",
 		"@vscode/codicons": "^0.0.36",
 		"async-mutex": "^0.5.0",
 		"axios": "^1.12.0",
@@ -524,9 +630,9 @@
 		"zod": "^3.25.61"
 	},
 	"devDependencies": {
-		"@roo-code/build": "workspace:^",
-		"@roo-code/config-eslint": "workspace:^",
-		"@roo-code/config-typescript": "workspace:^",
+		"@agentic-code/build": "workspace:^",
+		"@agentic-code/config-eslint": "workspace:^",
+		"@agentic-code/config-typescript": "workspace:^",
 		"@types/clone-deep": "^4.0.4",
 		"@types/debug": "^4.1.12",
 		"@types/diff": "^5.2.1",

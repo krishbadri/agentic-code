@@ -12,9 +12,9 @@ import {
 	type TelemetrySetting,
 	TelemetryEventName,
 	UserSettingsConfig,
-} from "@roo-code/types"
-import { CloudService } from "@roo-code/cloud"
-import { TelemetryService } from "@roo-code/telemetry"
+} from "@agentic-code/types"
+import { CloudService } from "@agentic-code/cloud"
+import { TelemetryService } from "@agentic-code/telemetry"
 
 import { type ApiMessage } from "../task-persistence/apiMessages"
 import { saveTaskMessages } from "../task-persistence"
@@ -2321,6 +2321,34 @@ export const webviewMessageHandler = async (
 		case "cloudButtonClicked": {
 			// Navigate to the cloud tab.
 			provider.postMessageToWebview({ type: "action", action: "cloudButtonClicked" })
+			break
+		}
+		case "action": {
+			// Handle custom checkpoint actions
+			const actionMessage = message as { action?: string; hash?: string }
+			if (actionMessage.action === "saveCheckpoint") {
+				try {
+					const currentCline = provider.getCurrentTask()
+					if (currentCline) {
+						const { checkpointSaveManual } = await import("../checkpoints/index")
+						await checkpointSaveManual(currentCline)
+						await provider.postMessageToWebview({ type: "state" } as any)
+					}
+				} catch (e) {
+					console.error("[webviewMessageHandler] Failed to save checkpoint:", e)
+				}
+			} else if (actionMessage.action === "rollbackCheckpoint" && actionMessage.hash) {
+				try {
+					const currentCline = provider.getCurrentTask()
+					if (currentCline) {
+						const { rollbackToCheckpointManual } = await import("../checkpoints/index")
+						await rollbackToCheckpointManual(currentCline, actionMessage.hash)
+						await provider.postMessageToWebview({ type: "state" } as any)
+					}
+				} catch (e) {
+					console.error("[webviewMessageHandler] Failed to rollback:", e)
+				}
+			}
 			break
 		}
 		case "rooCloudSignIn": {

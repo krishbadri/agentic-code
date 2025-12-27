@@ -9,7 +9,7 @@ import {
 	type ShareVisibility,
 	type QueuedMessage,
 	marketplaceItemSchema,
-} from "@roo-code/types"
+} from "@agentic-code/types"
 
 import { Mode } from "./modes"
 
@@ -229,6 +229,7 @@ export interface WebviewMessage {
 		| "editQueuedMessage"
 		| "dismissUpsell"
 		| "getDismissedUpsells"
+		| "action" // Custom checkpoint actions (saveCheckpoint, rollbackCheckpoint)
 	text?: string
 	editedMessageContent?: string
 	tab?: "settings" | "history" | "mcp" | "modes" | "chat" | "marketplace" | "cloud"
@@ -247,6 +248,8 @@ export interface WebviewMessage {
 	alwaysAllow?: boolean
 	isEnabled?: boolean
 	mode?: Mode
+	action?: string
+	hash?: string
 	promptMode?: PromptMode
 	customPrompt?: PromptComponent
 	dataUrls?: string[]

@@ -49,3 +49,6 @@ logs
 
 # Qdrant
 qdrant_storage/
+
+# Control-Plane worktrees (temporary Git worktrees for transactions)
+apps/control-plane/.cp/worktrees/

@@ -22,5 +22,6 @@ export * from "./terminal.js"
 export * from "./tool.js"
 export * from "./type-fu.js"
 export * from "./vscode.js"
+export * from "./sub-transaction.js"
 
 export * from "./providers/index.js"

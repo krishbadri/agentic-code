@@ -12,7 +12,7 @@ import { formatResponse } from "../../core/prompts/responses"
 import { diagnosticsToProblemsString, getNewDiagnostics } from "../diagnostics"
 import { ClineSayTool } from "../../shared/ExtensionMessage"
 import { Task } from "../../core/task/Task"
-import { DEFAULT_WRITE_DELAY_MS } from "@roo-code/types"
+import { DEFAULT_WRITE_DELAY_MS } from "@agentic-code/types"
 
 import { DecorationController } from "./DecorationController"
 
@@ -198,6 +198,67 @@ export class DiffViewProvider {
 		userEdits: string | undefined
 		finalContent: string | undefined
 	}> {
+		// If transactional mode is enabled, route to Control-Plane REST
+		const cfg = vscode.workspace.getConfiguration()
+		const transactional =
+			cfg.get<boolean>("roo.experimental.transactionalMode") ||
+			cfg.get<boolean>("roo-cline.experimental.transactionalMode")
+		if (transactional && this.relPath && this.newContent !== undefined) {
+			const txId = await vscode.commands.executeCommand<string>("roo.internal.getCurrentTxId")
+			const port =
+				vscode.workspace.getConfiguration().get<number>("roo.cpPortOverride") ||
+				(await vscode.commands.executeCommand<number>("roo.internal.getCpPort"))
+			if (txId) {
+				// Use apply for diffs (modify) or write for create
+				const isCreate = this.editType === "create"
+				if (isCreate) {
+					if (port) {
+						const res = await fetch(`http://127.0.0.1:${port}/tx/${txId}/write`, {
+							method: "POST",
+							headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
+							body: JSON.stringify({
+								file_path: this.relPath,
+								content_base64: Buffer.from(this.newContent).toString("base64"),
+							}),
+						})
+						if (!res.ok) throw new Error(await res.text())
+						await vscode.commands.executeCommand("roo.internal.recordEdit", {
+							patchBytes: Buffer.byteLength(this.newContent, "utf8"),
+							filePath: this.relPath,
+						})
+						await vscode.commands.executeCommand("roo.internal.maybeAutoCheckpoint")
+						return {
+							newProblemsMessage: undefined,
+							userEdits: this.userEdits,
+							finalContent: this.newContent,
+						}
+					}
+				} else {
+					// Generate unified diff from originalContent -> newContent
+					const patch = formatResponse.createPrettyPatch(
+						this.relPath,
+						this.originalContent || "",
+						this.newContent,
+					)
+					if (port) {
+						const res = await fetch(`http://127.0.0.1:${port}/tx/${txId}/apply`, {
+							method: "POST",
+							headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
+							body: JSON.stringify({ file_path: this.relPath, patch }),
+						})
+						if (!res.ok) throw new Error(await res.text())
+						await vscode.commands.executeCommand("roo.internal.recordEdit", {
+							patchBytes: Buffer.byteLength(patch, "utf8"),
+							filePath: this.relPath,
+						})
+					}
+					await vscode.commands.executeCommand("roo.internal.maybeAutoCheckpoint")
+					return { newProblemsMessage: undefined, userEdits: this.userEdits, finalContent: this.newContent }
+				}
+			}
+		}
+
+		// existing implementation writes to FS; keep as default path
 		if (!this.relPath || !this.newContent || !this.activeDiffEditor) {
 			return { newProblemsMessage: undefined, userEdits: undefined, finalContent: undefined }
 		}
@@ -657,6 +718,36 @@ export class DiffViewProvider {
 		userEdits: string | undefined
 		finalContent: string | undefined
 	}> {
+		// If transactional mode is enabled, route to Control-Plane REST
+		const cfg = vscode.workspace.getConfiguration()
+		const transactional =
+			cfg.get<boolean>("roo.experimental.transactionalMode") ||
+			cfg.get<boolean>("roo-cline.experimental.transactionalMode")
+		if (transactional) {
+			const txId = await vscode.commands.executeCommand<string>("roo.internal.getCurrentTxId")
+			const port =
+				vscode.workspace.getConfiguration().get<number>("roo.cpPortOverride") ||
+				(await vscode.commands.executeCommand<number>("roo.internal.getCpPort"))
+			if (txId) {
+				const res = await fetch(`http://127.0.0.1:${port}/tx/${txId}/write`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
+					body: JSON.stringify({
+						file_path: relPath,
+						content_base64: Buffer.from(content).toString("base64"),
+					}),
+				})
+				if (!res.ok) throw new Error(await res.text())
+				await vscode.commands.executeCommand("roo.internal.recordEdit", {
+					patchBytes: Buffer.byteLength(content, "utf8"),
+					filePath: relPath,
+				})
+				await vscode.commands.executeCommand("roo.internal.maybeAutoCheckpoint")
+				return { newProblemsMessage: undefined, userEdits: this.userEdits, finalContent: content }
+			}
+		}
+
+		// existing implementation writes to FS; keep as default path
 		const absolutePath = path.resolve(this.cwd, relPath)
 
 		// Get diagnostics before editing the file

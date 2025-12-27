@@ -1,4 +1,5 @@
 import { Uri, Webview } from "vscode"
+import { Package } from "../../shared/package"
 /**
  * A helper function which will get the webview URI of a given file or resource.
  *
@@ -11,5 +12,9 @@ import { Uri, Webview } from "vscode"
  * @returns A URI pointing to the file/resource
  */
 export function getUri(webview: Webview, extensionUri: Uri, pathList: string[]) {
-	return webview.asWebviewUri(Uri.joinPath(extensionUri, ...pathList))
+	const base = webview.asWebviewUri(Uri.joinPath(extensionUri, ...pathList))
+	const url = base.toString()
+	const cacheBuster = `v=${encodeURIComponent(Package.version)}`
+	const separator = url.includes("?") ? "&" : "?"
+	return Uri.parse(url + separator + cacheBuster)
 }

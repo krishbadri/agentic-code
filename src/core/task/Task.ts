@@ -35,9 +35,9 @@ import {
 	isInteractiveAsk,
 	isResumableAsk,
 	QueuedMessage,
-} from "@roo-code/types"
-import { TelemetryService } from "@roo-code/telemetry"
-import { CloudService, BridgeOrchestrator } from "@roo-code/cloud"
+} from "@agentic-code/types"
+import { TelemetryService } from "@agentic-code/telemetry"
+import { CloudService, BridgeOrchestrator } from "@agentic-code/cloud"
 
 // api
 import { ApiHandler, ApiHandlerCreateMessageMetadata, buildApiHandler } from "../../api"
@@ -145,7 +145,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	readonly taskId: string
 	readonly rootTaskId?: string
 	readonly parentTaskId?: string
-	childTaskId?: string
+	childTaskId?: string // Kept for backward compatibility with single-child tasks
+	childTaskIds: string[] = [] // Support multiple children for planner mode
 
 	readonly instanceId: string
 	readonly metadata: TaskMetadata
@@ -265,10 +266,37 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	consecutiveMistakeCountForApplyDiff: Map<string, number> = new Map()
 	toolUsage: ToolUsage = {}
 
+	// Tool Call History for Replay (P3)
+	toolCallHistory: {
+		toolName: string
+		input: Record<string, unknown>
+		timestamp: number
+		checkpointBefore?: string
+	}[] = []
+
+	// Model Call History for Reproducibility (P3)
+	modelCallHistory: {
+		modelId: string
+		promptHash: string // SHA256 of system prompt + messages
+		messageCount: number
+		timestamp: number
+		durationMs?: number
+	}[] = []
+
 	// Checkpoints
 	enableCheckpoints: boolean
 	checkpointService?: RepoPerTaskCheckpointService
 	checkpointServiceInitializing = false
+
+	// Sub-Transactions (semantic units of atomicity)
+	currentSubTransaction?: import("../checkpoints/types").SubTransaction
+	subTransactions: import("../checkpoints/types").SubTransaction[] = []
+
+	// Planner mode
+	plan?: import("../planner/types").Plan
+	worktreePath?: string
+	agentType?: "coder" | "tester" | "reviewer" | "general"
+	subTransactionId?: string // Maps child task to sub-transaction ID
 
 	// Task Bridge
 	enableBridge: boolean
@@ -327,6 +355,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.rootTaskId = historyItem ? historyItem.rootTaskId : rootTask?.taskId
 		this.parentTaskId = historyItem ? historyItem.parentTaskId : parentTask?.taskId
 		this.childTaskId = undefined
+		this.childTaskIds = []
 
 		this.metadata = {
 			task: historyItem ? historyItem.task : task,
@@ -1215,6 +1244,54 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		await this.say("text", task, images)
 		this.isInitialized = true
 
+		// Check if planner mode is enabled (read from configuration)
+		const cfg = vscode.workspace.getConfiguration()
+		const plannerMode =
+			cfg.get<boolean>("roo.experimental.plannerMode") || cfg.get<boolean>("roo-cline.experimental.plannerMode")
+
+		if (plannerMode && task) {
+			try {
+				const { PlannerAgent } = await import("../planner/PlannerAgent")
+				const { PlanExecutor } = await import("../planner/PlanExecutor")
+
+				const planner = new PlannerAgent(this)
+				const plan = await planner.generatePlan(task)
+				this.plan = plan
+
+				const executor = new PlanExecutor(this)
+				const result = await executor.executePlan(plan)
+
+				if (result.success) {
+					await this.say("text", "Plan executed successfully. All sub-transactions completed.")
+				} else {
+					await this.say(
+						"text",
+						`Plan execution completed with failures. Failed sub-transactions: ${result.failedSubTransactions?.join(", ") || "unknown"}`,
+					)
+				}
+
+				// Planner mode execution complete
+				return
+			} catch (error) {
+				const errorMessage = error instanceof Error ? error.message : String(error)
+				this.providerRef.deref()?.log(`[Task#startTask] Planner mode failed: ${errorMessage}`)
+				// Clean up any parent transaction that may have been created
+				const provider = this.providerRef.deref()
+				const parentTxId = provider?.context?.globalState.get<string>("roo.current_tx_id")
+				if (parentTxId) {
+					try {
+						const { PlanExecutor } = await import("../planner/PlanExecutor")
+						const executor = new PlanExecutor(this)
+						await (executor as any).cleanupParentTransaction(parentTxId)
+					} catch (cleanupError) {
+						// Ignore cleanup errors
+					}
+				}
+				// Fall through to normal execution
+			}
+		}
+
+		// Normal execution (existing flow)
 		let imageBlocks: Anthropic.ImageBlockParam[] = formatResponse.imageBlocks(images)
 
 		// Task starting
@@ -1622,7 +1699,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		if (newTask) {
 			this.isPaused = true // Pause parent.
-			this.childTaskId = newTask.taskId
+			this.childTaskId = newTask.taskId // Backward compatibility
+			this.childTaskIds.push(newTask.taskId) // Add to array
 
 			await provider.handleModeSwitch(mode) // Set child's mode.
 			await delay(500) // Allow mode change to take effect.
@@ -1651,7 +1729,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 	public async completeSubtask(lastMessage: string) {
 		this.isPaused = false
-		this.childTaskId = undefined
+		this.childTaskId = undefined // Backward compatibility
+		// Note: childTaskIds array is managed by removeChildTaskId() method
 
 		this.emit(RooCodeEventName.TaskUnpaused, this.taskId)
 
@@ -1678,11 +1757,189 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 	}
 
+	/**
+	 * Remove a child task ID from the array (used when child completes)
+	 */
+	public removeChildTaskId(childTaskId: string): void {
+		const index = this.childTaskIds.indexOf(childTaskId)
+		if (index > -1) {
+			this.childTaskIds.splice(index, 1)
+		}
+		// Also clear single childTaskId if it matches (backward compatibility)
+		if (this.childTaskId === childTaskId) {
+			this.childTaskId = undefined
+		}
+	}
+
+	/**
+	 * Spawn multiple child tasks from a plan's sub-transactions
+	 */
+	public async spawnChildTasks(plan: {
+		subTransactions: import("@agentic-code/types").SubTransaction[]
+	}): Promise<Task[]> {
+		const provider = this.providerRef.deref()
+		if (!provider) {
+			throw new Error("Provider not available")
+		}
+
+		const children: Task[] = []
+		for (const subTx of plan.subTransactions) {
+			try {
+				const child = await provider.createTask(
+					subTx.prompt,
+					undefined,
+					this, // parent
+					{
+						initialTodos: [],
+					},
+				)
+				if (child) {
+					// Set agent type and sub-transaction ID
+					child.agentType = subTx.agentType
+					child.subTransactionId = subTx.id
+					this.childTaskIds.push(child.taskId)
+					children.push(child)
+				}
+			} catch (error) {
+				const errorMessage = error instanceof Error ? error.message : String(error)
+				provider.log(`[Task.spawnChildTasks] Failed to create child task for ${subTx.id}: ${errorMessage}`)
+				// Continue with next sub-transaction
+			}
+		}
+		return children
+	}
+
+	/**
+	 * Wait for all child tasks to complete
+	 */
+	public async waitForAllChildren(): Promise<Map<string, import("../planner/types").ChildResult>> {
+		return this.waitForChildren(this.childTaskIds)
+	}
+
+	/**
+	 * Wait for specific child tasks to complete
+	 */
+	public async waitForChildren(childIds: string[]): Promise<Map<string, import("../planner/types").ChildResult>> {
+		const results = new Map<string, import("../planner/types").ChildResult>()
+		const provider = this.providerRef.deref()
+		if (!provider) {
+			return results
+		}
+
+		const TIMEOUT_MS = 30 * 60 * 1000 // 30 minutes
+
+		await Promise.all(
+			childIds.map(async (childId) => {
+				const startTime = Date.now()
+				const child = provider.getTaskById(childId)
+				if (!child) {
+					results.set(childId, { success: false, error: "Child task not found" })
+					return
+				}
+
+				// Wait for task to start if it hasn't yet
+				if (child.taskStatus === TaskStatus.None) {
+					await delay(1000) // Give task time to start
+					// Re-check status
+					if (child.taskStatus === TaskStatus.None) {
+						// Task never started, mark as failed
+						results.set(childId, { success: false, error: "Task never started" })
+						return
+					}
+				}
+
+				// Wait for child to complete (check status) - handle all active states
+				while (
+					(child.taskStatus === TaskStatus.Running ||
+						child.taskStatus === TaskStatus.Interactive ||
+						child.taskStatus === TaskStatus.Resumable) &&
+					!child.abandoned &&
+					!child.abort &&
+					Date.now() - startTime < TIMEOUT_MS
+				) {
+					await delay(500)
+				}
+
+				// Check for timeout
+				if (Date.now() - startTime >= TIMEOUT_MS) {
+					results.set(childId, {
+						success: false,
+						error: "Task timeout after 30 minutes",
+						worktreePath: child.worktreePath,
+						checkpointHash: child.checkpointService?.baseHash,
+					})
+					return
+				}
+
+				// Check if task completed successfully
+				// Note: TaskStatus.None means task never started, Idle means completed normally
+				const success = !child.abandoned && !child.abort && child.taskStatus === TaskStatus.Idle
+
+				results.set(childId, {
+					success,
+					worktreePath: child.worktreePath,
+					checkpointHash: child.checkpointService?.baseHash,
+					error: !success ? "Task failed or was aborted" : undefined,
+				})
+			}),
+		)
+
+		return results
+	}
+
+	/**
+	 * Find a child task by ID
+	 */
+	public async findChildTask(taskId: string): Promise<Task | undefined> {
+		const provider = this.providerRef.deref()
+		if (!provider) {
+			return undefined
+		}
+		return provider.getTaskById(taskId)
+	}
+
+	/**
+	 * Merge child task results (worktrees) into parent
+	 * This is a placeholder - actual merging logic will be in PlanExecutor
+	 */
+	public async mergeChildResults(results: Map<string, import("../planner/types").ChildResult>): Promise<void> {
+		// Actual merging logic delegated to PlanExecutor
+		// This method exists for interface completeness
+	}
+
 	// Task Loop
 
 	private async initiateTaskLoop(userContent: Anthropic.Messages.ContentBlockParam[]): Promise<void> {
 		// Kicks off the checkpoints initialization process in the background.
-		getCheckpointService(this)
+		const checkpointServicePromise = getCheckpointService(this)
+
+		// Initialize sub-transaction once checkpoint service is ready
+		checkpointServicePromise
+			.then(async (service) => {
+				if (service && this.enableCheckpoints) {
+					try {
+						const { SubTransactionManager } = await import("../checkpoints/SubTransactionManager")
+						const manager = new SubTransactionManager(this)
+
+						// Get current HEAD as baseCheckpoint
+						const simpleGit = (await import("simple-git")).default
+						const workspaceDir = this.cwd || getWorkspacePath()
+						if (workspaceDir) {
+							const git = simpleGit(workspaceDir, { binary: "git" })
+							const baseCheckpoint = await git.revparse(["HEAD"])
+							await manager.createSubTransaction(baseCheckpoint)
+						}
+					} catch (error) {
+						const provider = this.providerRef.deref()
+						provider?.log(
+							`[Task#initiateTaskLoop] Failed to initialize sub-transaction: ${error instanceof Error ? error.message : String(error)}`,
+						)
+					}
+				}
+			})
+			.catch(() => {
+				// Ignore errors - checkpoint service may not be available
+			})
 
 		let nextUserContent = userContent
 		let includeFileDetails = true
@@ -2414,7 +2671,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				throw new Error("Provider not available")
 			}
 
-			return SYSTEM_PROMPT(
+			// Get base system prompt first
+			const baseSystemPrompt = SYSTEM_PROMPT(
 				provider.context,
 				this.cwd,
 				(this.api.getModel().info.supportsComputerUse ?? false) && (browserToolEnabled ?? true),
@@ -2442,6 +2700,16 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				undefined, // todoList
 				this.api.getModel().id,
 			)
+
+			// If agent type is set, combine agent-specific prompt with base prompt
+			if (this.agentType && this.agentType !== "general") {
+				const { getAgentPrompt } = await import("../planner/AgentSpecialization")
+				const agentPrompt = getAgentPrompt(this.agentType)
+				// Prepend agent-specific instructions to base prompt with proper formatting
+				return `${agentPrompt}\n\n---\n\n${baseSystemPrompt}`
+			}
+
+			return baseSystemPrompt
 		})()
 	}
 
@@ -2691,8 +2959,14 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			this.skipPrevResponseIdOnce = false
 		}
 
+		// P3 Reproducibility: Log model call start time
+		const modelCallStartTime = Date.now()
+
 		const stream = this.api.createMessage(systemPrompt, cleanConversationHistory, metadata)
 		const iterator = stream[Symbol.asyncIterator]()
+
+		// P3 Reproducibility: Log the model call for research analysis
+		this.logModelCall(this.api.getModel().id, systemPrompt, cleanConversationHistory, modelCallStartTime)
 
 		try {
 			// Awaiting first chunk to see if it will throw an error.
@@ -2835,6 +3109,146 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 
 		this.toolUsage[toolName].attempts++
+	}
+
+	/**
+	 * Log a tool call with its full input for replay purposes (P3).
+	 * This captures the complete tool invocation for reproducibility research.
+	 * Also persists to Control-Plane database if available.
+	 */
+	public logToolCall(toolName: string, input: Record<string, unknown>, checkpointBefore?: string) {
+		const timestamp = Date.now()
+		this.toolCallHistory.push({
+			toolName,
+			input,
+			timestamp,
+			checkpointBefore,
+		})
+
+		// Log for debugging/research
+		this.providerRef.deref()?.log(`[Task#logToolCall] ${toolName} with ${Object.keys(input).length} params`)
+
+		// Persist to Control-Plane if available (fire and forget)
+		this.persistToolCallToControlPlane(toolName, input, checkpointBefore).catch(() => {
+			// Ignore errors - persistence is best-effort
+		})
+	}
+
+	/**
+	 * Persist tool call to Control-Plane database
+	 */
+	private async persistToolCallToControlPlane(
+		toolName: string,
+		input: Record<string, unknown>,
+		checkpointBefore?: string,
+	): Promise<void> {
+		const provider = this.providerRef.deref()
+		if (!provider) return
+
+		const cpPort = provider.context?.globalState.get<number>("roo.cpPort")
+		const txId = provider.context?.globalState.get<string>("roo.current_tx_id")
+
+		if (!cpPort || !txId) return
+
+		try {
+			await fetch(`http://127.0.0.1:${cpPort}/tx/${txId}/tool-call`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"X-Actor-Id": "human",
+				},
+				body: JSON.stringify({
+					sub_tx_id: this.subTransactionId,
+					tool_name: toolName,
+					args_json: input,
+					checkpoint_before: checkpointBefore,
+				}),
+			})
+		} catch {
+			// Ignore network errors - persistence is best-effort
+		}
+	}
+
+	/**
+	 * Get the full tool call history for this task (P3 replay).
+	 */
+	public getToolCallHistory() {
+		return this.toolCallHistory
+	}
+
+	/**
+	 * Log a model API call for reproducibility research (P3).
+	 * Captures model ID and a hash of the prompt for reproducibility without storing full prompts.
+	 * Also persists to Control-Plane database if available.
+	 */
+	public logModelCall(modelId: string, systemPrompt: string, messages: unknown[], startTime: number) {
+		// Create a simple hash of the prompt content for reproducibility tracking
+		// Uses a deterministic string representation
+		const promptContent = JSON.stringify({ systemPrompt, messageCount: messages.length })
+		const promptHash = crypto.createHash("sha256").update(promptContent).digest("hex")
+
+		const durationMs = Date.now() - startTime
+
+		this.modelCallHistory.push({
+			modelId,
+			promptHash: promptHash.slice(0, 16), // Keep short version in memory
+			messageCount: messages.length,
+			timestamp: startTime,
+			durationMs,
+		})
+
+		this.providerRef
+			.deref()
+			?.log(`[Task#logModelCall] ${modelId} with ${messages.length} messages (hash: ${promptHash.slice(0, 16)})`)
+
+		// Persist to Control-Plane if available (fire and forget)
+		this.persistModelCallToControlPlane(modelId, promptHash, messages.length, durationMs).catch(() => {
+			// Ignore errors - persistence is best-effort
+		})
+	}
+
+	/**
+	 * Persist model call to Control-Plane database
+	 */
+	private async persistModelCallToControlPlane(
+		modelId: string,
+		promptHash: string,
+		messageCount: number,
+		durationMs: number,
+	): Promise<void> {
+		const provider = this.providerRef.deref()
+		if (!provider) return
+
+		const cpPort = provider.context?.globalState.get<number>("roo.cpPort")
+		const txId = provider.context?.globalState.get<string>("roo.current_tx_id")
+
+		if (!cpPort || !txId) return
+
+		try {
+			await fetch(`http://127.0.0.1:${cpPort}/tx/${txId}/model-call`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"X-Actor-Id": "human",
+				},
+				body: JSON.stringify({
+					sub_tx_id: this.subTransactionId,
+					model_id: modelId,
+					prompt_hash: promptHash,
+					message_count: messageCount,
+					duration_ms: durationMs,
+				}),
+			})
+		} catch {
+			// Ignore network errors - persistence is best-effort
+		}
+	}
+
+	/**
+	 * Get the full model call history for this task (P3 reproducibility).
+	 */
+	public getModelCallHistory() {
+		return this.modelCallHistory
 	}
 
 	public recordToolError(toolName: ToolName, error?: string) {

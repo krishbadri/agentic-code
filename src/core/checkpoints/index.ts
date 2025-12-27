@@ -1,7 +1,8 @@
 import pWaitFor from "p-wait-for"
 import * as vscode from "vscode"
 
-import { TelemetryService } from "@roo-code/telemetry"
+import { TelemetryService } from "@agentic-code/telemetry"
+import { ControlPlaneCheckpointService } from "../../services/checkpoints/ControlPlaneCheckpointService"
 
 import { Task } from "../task/Task"
 
@@ -9,12 +10,10 @@ import { getWorkspacePath } from "../../utils/path"
 import { checkGitInstalled } from "../../utils/git"
 import { t } from "../../i18n"
 
-import { ClineApiReqInfo } from "../../shared/ExtensionMessage"
-import { getApiMetrics } from "../../shared/getApiMetrics"
-
 import { DIFF_VIEW_URI_SCHEME } from "../../integrations/editor/DiffViewProvider"
 
 import { CheckpointServiceOptions, RepoPerTaskCheckpointService } from "../../services/checkpoints"
+import { SubTransactionManager } from "./SubTransactionManager"
 
 export async function getCheckpointService(
 	task: Task,
@@ -59,6 +58,35 @@ export async function getCheckpointService(
 			return undefined
 		}
 
+		// CHECK: Is transactional mode enabled?
+		const cfg = vscode.workspace.getConfiguration()
+		const txMode =
+			cfg.get<boolean>("roo.experimental.transactionalMode") ||
+			cfg.get<boolean>("roo-cline.experimental.transactionalMode")
+		const cpPort = provider?.context.globalState.get<number>("roo.cpPort")
+
+		// If transactional mode is enabled and Control-Plane is running, use ControlPlaneCheckpointService
+		if (txMode && cpPort) {
+			try {
+				log(`[Task#getCheckpointService] Using Control-Plane checkpoint service (port ${cpPort})`)
+				const txId = provider?.context.globalState.get<string>("roo.current_tx_id")
+				if (!txId) {
+					log("[Task#getCheckpointService] No transaction ID, creating new one")
+					// Will be set later when transaction begins
+				}
+				const baseUrl = `http://127.0.0.1:${cpPort}`
+				const cpService = new ControlPlaneCheckpointService(baseUrl, txId || "pending", log)
+				task.checkpointService = cpService as any
+				log("[Task#getCheckpointService] Control-Plane service initialized")
+				return cpService as any
+			} catch (err) {
+				log(
+					`[Task#getCheckpointService] Failed to initialize Control-Plane service: ${err.message}, falling back to local`,
+				)
+			}
+		}
+
+		// Fallback: use local RepoPerTaskCheckpointService
 		const options: CheckpointServiceOptions = {
 			taskId: task.taskId,
 			workspaceDir,
@@ -95,6 +123,146 @@ export async function getCheckpointService(
 		task.enableCheckpoints = false
 		task.checkpointServiceInitializing = false
 		return undefined
+	}
+}
+
+export async function checkpointSaveManual(task: Task, suppressMessage = false) {
+	const provider = task.providerRef.deref()
+	const attemptSave = async () => {
+		const service = await getCheckpointService(task)
+		if (!service) return
+
+		// Checkpoint belongs to current sub-transaction (if exists)
+		const subTxnId = task.currentSubTransaction?.id
+		const message = subTxnId
+			? `Manual checkpoint at ${new Date().toISOString()} (sub-transaction: ${subTxnId})`
+			: `Manual checkpoint at ${new Date().toISOString()}`
+
+		await service.saveCheckpoint(message, {
+			allowEmpty: true,
+			suppressMessage,
+		})
+	}
+
+	try {
+		await attemptSave()
+	} catch (error: any) {
+		const message = error?.message || String(error)
+		const errorCode = error?.code || error?.cause?.code || ""
+		const isControlPlaneFailure =
+			message.includes("spawn git ENOENT") ||
+			message.includes('"code":"DENIED"') ||
+			message.includes("fetch failed") ||
+			errorCode === "ECONNREFUSED" ||
+			errorCode === "ENOTFOUND"
+
+		if (isControlPlaneFailure) {
+			provider?.log?.(`[Checkpoint] Control-Plane checkpoint failed (${message}); falling back to local Git.`)
+
+			try {
+				await provider?.context?.globalState.update("roo.cpPort", undefined)
+			} catch {}
+
+			task.checkpointService = undefined
+			task.checkpointServiceInitializing = false
+
+			try {
+				await attemptSave()
+				return
+			} catch (fallbackError) {
+				console.error("[checkpointSaveManual] fallback failed", fallbackError)
+				throw fallbackError
+			}
+		}
+
+		console.error("[checkpointSaveManual]", error)
+		throw error
+	}
+}
+
+/**
+ * Rollback to checkpoint - Restores SystemState only, preserves AgentState
+ *
+ * Rollback affects ONLY SystemState (repo/files); AgentState (chat history, tool calls, API history)
+ * is preserved for debugging, replay, and informed retries.
+ *
+ * This separation is critical - we treat rollback as a system-state operation;
+ * agent state is preserved to support replay, debugging, and informed retries.
+ */
+export async function rollbackToCheckpointManual(task: Task, commitHash: string) {
+	if (!commitHash) throw new Error("commit hash required")
+
+	// Get context from provider, not task (task.context might be undefined)
+	const provider = task.providerRef.deref()
+	if (!provider || !provider.context) {
+		throw new Error("Provider context not available")
+	}
+
+	const cpPort = provider.context.globalState.get<number>("roo.cpPort")
+	const txId = provider.context.globalState.get<string>("roo.current_tx_id")
+
+	// Try Control-Plane rollback if available
+	// This restores SystemState (repo) only; AgentState is preserved
+	if (cpPort && txId) {
+		try {
+			const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${txId}/rollback`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
+				body: JSON.stringify({ to: `commit:${commitHash}` }),
+			})
+			if (!res.ok) {
+				const errorText = await res.text()
+				throw new Error(errorText || `HTTP ${res.status}`)
+			}
+			const data = await res.json()
+			provider?.log?.(`[ControlPlaneRollback] Rolled back SystemState to ${commitHash} (AgentState preserved)`)
+			return
+		} catch (e: any) {
+			provider?.log?.(`[ControlPlaneRollback] failed, falling back to local git: ${e.message || e}`)
+		}
+	}
+
+	// Fallback: use checkpoint service's restore method (handles shadow repos correctly)
+	// This restores SystemState (repo) only; AgentState is preserved
+	try {
+		const service = await getCheckpointService(task)
+		if (service && typeof service.restoreCheckpoint === "function") {
+			await service.restoreCheckpoint(commitHash)
+			provider?.log?.(
+				`[CheckpointServiceRollback] Successfully rolled back SystemState to ${commitHash} (AgentState preserved)`,
+			)
+			provider?.postMessageToWebview({
+				type: "currentCheckpointUpdated",
+				text: commitHash,
+			})
+			return
+		}
+	} catch (e: any) {
+		provider?.log?.(`[CheckpointServiceRollback] failed: ${e.message || e}, trying direct git`)
+	}
+
+	// Last resort: direct Git operations (for workspace repo only)
+	// This restores SystemState (repo) only; AgentState is preserved
+	const workspaceDir = task.cwd || getWorkspacePath()
+	if (!workspaceDir) {
+		throw new Error("Workspace directory not found")
+	}
+
+	const simpleGit = (await import("simple-git")).default
+	const git = simpleGit(workspaceDir, { binary: "git" })
+
+	try {
+		await git.revparse([commitHash])
+		await git.reset(["--hard", commitHash])
+		provider?.log?.(
+			`[DirectGitRollback] Successfully rolled back SystemState to ${commitHash} (AgentState preserved)`,
+		)
+		provider?.postMessageToWebview({
+			type: "currentCheckpointUpdated",
+			text: commitHash,
+		})
+	} catch (e: any) {
+		throw new Error(`Failed to rollback: ${e.message || e}`)
 	}
 }
 
@@ -186,22 +354,35 @@ export async function checkpointSave(task: Task, force = false, suppressMessage 
 
 	TelemetryService.instance.captureCheckpointCreated(task.taskId)
 
+	// Checkpoint belongs to current sub-transaction (if exists)
+	const subTxnId = task.currentSubTransaction?.id
+	const message = subTxnId
+		? `Task: ${task.taskId}, Time: ${Date.now()} (sub-transaction: ${subTxnId})`
+		: `Task: ${task.taskId}, Time: ${Date.now()}`
+
 	// Start the checkpoint process in the background.
-	return service
-		.saveCheckpoint(`Task: ${task.taskId}, Time: ${Date.now()}`, { allowEmpty: force, suppressMessage })
-		.catch((err) => {
-			console.error("[Task#checkpointSave] caught unexpected error, disabling checkpoints", err)
-			task.enableCheckpoints = false
-		})
+	return service.saveCheckpoint(message, { allowEmpty: force, suppressMessage }).catch((err: unknown) => {
+		console.error("[Task#checkpointSave] caught unexpected error, disabling checkpoints", err)
+		task.enableCheckpoints = false
+	})
 }
 
 export type CheckpointRestoreOptions = {
 	ts: number
 	commitHash: string
-	mode: "preview" | "restore"
-	operation?: "delete" | "edit" // Optional to maintain backward compatibility
+	mode: "preview" | "restore" // Kept for API compatibility, no longer affects behavior
+	operation?: "delete" | "edit" // Kept for API compatibility, no longer affects behavior
 }
 
+/**
+ * Restore checkpoint - Restores SystemState only, preserves AgentState
+ *
+ * Rollback affects ONLY SystemState (repo/files); AgentState (chat history, tool calls, API history)
+ * is preserved for debugging, replay, and informed retries.
+ *
+ * This separation is critical - we treat rollback as a system-state operation;
+ * agent state is preserved to support replay, debugging, and informed retries.
+ */
 export async function checkpointRestore(
 	task: Task,
 	{ ts, commitHash, mode, operation = "delete" }: CheckpointRestoreOptions,
@@ -221,36 +402,15 @@ export async function checkpointRestore(
 	const provider = task.providerRef.deref()
 
 	try {
+		// Restore SystemState (repo) only; AgentState is preserved
 		await service.restoreCheckpoint(commitHash)
 		TelemetryService.instance.captureCheckpointRestored(task.taskId)
 		await provider?.postMessageToWebview({ type: "currentCheckpointUpdated", text: commitHash })
 
-		if (mode === "restore") {
-			await task.overwriteApiConversationHistory(task.apiConversationHistory.filter((m) => !m.ts || m.ts < ts))
-
-			const deletedMessages = task.clineMessages.slice(index + 1)
-
-			const { totalTokensIn, totalTokensOut, totalCacheWrites, totalCacheReads, totalCost } = getApiMetrics(
-				task.combineMessages(deletedMessages),
-			)
-
-			// For delete operations, exclude the checkpoint message itself
-			// For edit operations, include the checkpoint message (to be edited)
-			const endIndex = operation === "edit" ? index + 1 : index
-			await task.overwriteClineMessages(task.clineMessages.slice(0, endIndex))
-
-			// TODO: Verify that this is working as expected.
-			await task.say(
-				"api_req_deleted",
-				JSON.stringify({
-					tokensIn: totalTokensIn,
-					tokensOut: totalTokensOut,
-					cacheWrites: totalCacheWrites,
-					cacheReads: totalCacheReads,
-					cost: totalCost,
-				} satisfies ClineApiReqInfo),
-			)
-		}
+		// NOTE: AgentState (chat history, API history) is NOT deleted during rollback.
+		// This preserves the agent's trajectory for debugging, replay, and informed retries.
+		// The previous behavior of deleting messages when mode === "restore" has been removed
+		// to align with the SystemState/AgentState separation principle.
 
 		// The task is already cancelled by the provider beforehand, but we
 		// need to re-init to get the updated messages.
@@ -309,7 +469,7 @@ export async function checkpointDiff(task: Task, { ts, previousCommitHash, commi
 		await vscode.commands.executeCommand(
 			"vscode.changes",
 			mode === "full" ? "Changes since task started" : "Changes compare with next checkpoint",
-			changes.map((change) => [
+			changes.map((change: import("../../services/checkpoints/types").CheckpointDiff) => [
 				vscode.Uri.file(change.paths.absolute),
 				vscode.Uri.parse(`${DIFF_VIEW_URI_SCHEME}:${change.paths.relative}`).with({
 					query: Buffer.from(change.content.before ?? "").toString("base64"),
@@ -324,4 +484,43 @@ export async function checkpointDiff(task: Task, { ts, previousCommitHash, commi
 		provider?.log("[checkpointDiff] disabling checkpoints for this task")
 		task.enableCheckpoints = false
 	}
+}
+
+/**
+ * Commit the current sub-transaction
+ *
+ * Runs safety checks, sets endCheckpoint, and marks as committed.
+ * This corresponds to commit point C_i in the transaction model.
+ *
+ * After commit, a new sub-transaction can be created for subsequent work.
+ */
+export async function commitSubTransaction(task: Task): Promise<void> {
+	const manager = new SubTransactionManager(task)
+	const currentSubTxn = manager.getCurrentSubTransaction()
+
+	if (!currentSubTxn) {
+		throw new Error("No active sub-transaction to commit")
+	}
+
+	await manager.commitSubTransaction(currentSubTxn)
+}
+
+/**
+ * Abort the current sub-transaction
+ *
+ * Rolls back to baseCheckpoint and marks as aborted.
+ * This corresponds to rolling back to C_{i-1} on failure.
+ *
+ * SystemState is restored to baseCheckpoint; AgentState is preserved.
+ * After abort, a new sub-transaction can be created for subsequent work.
+ */
+export async function abortSubTransaction(task: Task): Promise<void> {
+	const manager = new SubTransactionManager(task)
+	const currentSubTxn = manager.getCurrentSubTransaction()
+
+	if (!currentSubTxn) {
+		throw new Error("No active sub-transaction to abort")
+	}
+
+	await manager.abortSubTransaction(currentSubTxn)
 }

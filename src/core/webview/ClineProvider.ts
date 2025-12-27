@@ -774,7 +774,7 @@ export class ClineProvider
 		webviewView.webview.html =
 			this.contextProxy.extensionMode === vscode.ExtensionMode.Development
 				? await this.getHMRHtmlContent(webviewView.webview)
-				: this.getHtmlContent(webviewView.webview)
+				: await this.getHtmlContent(webviewView.webview)
 
 		// Sets up an event listener to listen for messages passed from the webview view context
 		// and executes code based on the message that is received.
@@ -1081,19 +1081,38 @@ export class ClineProvider
 	 * @returns A template string literal containing the HTML that should be
 	 * rendered within the webview panel
 	 */
-	private getHtmlContent(webview: vscode.Webview): string {
+	private async getHtmlContent(webview: vscode.Webview): Promise<string> {
 		// Get the local path to main script run in the webview,
 		// then convert it to a uri we can use in the webview.
 
-		// The CSS file from the React build output
-		const stylesUri = getUri(webview, this.contextProxy.extensionUri, [
+		// Load prebuilt index.html and rewrite asset paths to webview URIs
+		const indexHtmlUri = vscode.Uri.joinPath(this.contextProxy.extensionUri, "webview-ui", "build", "index.html")
+		let html = await vscode.workspace.fs.readFile(indexHtmlUri).then((b) => b.toString())
+
+		// Build correct URIs for specific assets referenced by index.html
+		const scriptUri = getUri(webview, this.contextProxy.extensionUri, [
+			"webview-ui",
+			"build",
+			"assets",
+			"index.js",
+		]).toString()
+		const cssUri = getUri(webview, this.contextProxy.extensionUri, [
 			"webview-ui",
 			"build",
 			"assets",
 			"index.css",
-		])
+		]).toString()
+		const mermaidUri = getUri(webview, this.contextProxy.extensionUri, [
+			"webview-ui",
+			"build",
+			"assets",
+			"mermaid-bundle.js",
+		]).toString()
 
-		const scriptUri = getUri(webview, this.contextProxy.extensionUri, ["webview-ui", "build", "assets", "index.js"])
+		html = html
+			.replace(/src="\/assets\/index\.js"/g, `src="${scriptUri}"`)
+			.replace(/href="\/assets\/index\.css"/g, `href="${cssUri}"`)
+			.replace(/href="\/assets\/mermaid-bundle\.js"/g, `href="${mermaidUri}"`)
 		const codiconsUri = getUri(webview, this.contextProxy.extensionUri, ["assets", "codicons", "codicon.css"])
 		const materialIconsUri = getUri(webview, this.contextProxy.extensionUri, [
 			"assets",
@@ -1117,30 +1136,18 @@ export class ClineProvider
 		const nonce = getNonce()
 
 		// Tip: Install the es6-string-html VS Code extension to enable code highlighting below
-		return /*html*/ `
-        <!DOCTYPE html>
-        <html lang="en">
-          <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width,initial-scale=1,shrink-to-fit=no">
-            <meta name="theme-color" content="#000000">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; font-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; img-src ${webview.cspSource} https://storage.googleapis.com https://img.clerk.com data:; media-src ${webview.cspSource}; script-src ${webview.cspSource} 'wasm-unsafe-eval' 'nonce-${nonce}' https://us-assets.i.posthog.com 'strict-dynamic'; connect-src ${webview.cspSource} https://openrouter.ai https://api.requesty.ai https://us.i.posthog.com https://us-assets.i.posthog.com;">
-            <link rel="stylesheet" type="text/css" href="${stylesUri}">
-			<link href="${codiconsUri}" rel="stylesheet" />
-			<script nonce="${nonce}">
-				window.IMAGES_BASE_URI = "${imagesUri}"
-				window.AUDIO_BASE_URI = "${audioUri}"
-				window.MATERIAL_ICONS_BASE_URI = "${materialIconsUri}"
-			</script>
-            <title>Roo Code</title>
-          </head>
-          <body>
-            <noscript>You need to enable JavaScript to run this app.</noscript>
-            <div id="root"></div>
-            <script nonce="${nonce}" type="module" src="${scriptUri}"></script>
-          </body>
-        </html>
-      `
+		const csp = `default-src 'none'; font-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; img-src ${webview.cspSource} https://storage.googleapis.com https://img.clerk.com data:; media-src ${webview.cspSource}; script-src ${webview.cspSource} 'wasm-unsafe-eval' 'nonce-${nonce}' https://us-assets.i.posthog.com 'strict-dynamic'; connect-src ${webview.cspSource} https://openrouter.ai https://api.requesty.ai https://us.i.posthog.com https://us-assets.i.posthog.com;`
+
+		// Inject CSP, codicons, and base-URIs into the <head>
+		html = html.replace(
+			/<head>/i,
+			`<head>\n<meta http-equiv="Content-Security-Policy" content="${csp}">\n<link href="${codiconsUri}" rel="stylesheet" />\n<script nonce="${nonce}">window.IMAGES_BASE_URI='${imagesUri}';window.AUDIO_BASE_URI='${audioUri}';window.MATERIAL_ICONS_BASE_URI='${materialIconsUri}';</script>`,
+		)
+
+		// Ensure module scripts carry the nonce
+		html = html.replace(/<script\s+type="module"/g, `<script nonce="${nonce}" type="module"`)
+
+		return html
 	}
 
 	/**
@@ -2441,6 +2448,10 @@ export class ClineProvider
 		}
 
 		return this.clineStack[this.clineStack.length - 1]
+	}
+
+	public getTaskById(taskId: string): Task | undefined {
+		return this.clineStack.find((task) => task.taskId === taskId)
 	}
 
 	public getRecentTasks(): string[] {

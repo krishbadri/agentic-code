@@ -97,6 +97,41 @@ export async function executeCommandTool(
 			}
 
 			try {
+				// Transactional terminal gating: route via Control-Plane when enabled
+				const cfg = vscode.workspace.getConfiguration()
+				const transactional =
+					cfg.get<boolean>("roo.experimental.transactionalMode") ||
+					cfg.get<boolean>("roo-cline.experimental.transactionalMode")
+
+				if (transactional) {
+					const txId = await vscode.commands.executeCommand<string>("roo.internal.getCurrentTxId")
+					const provider = task.providerRef.deref()
+					const port = provider?.context?.globalState.get<number>("roo.cpPort")
+					if (txId) {
+						if (!port) {
+							// CP not running; fall through to local execution
+						} else {
+							const args = ["bash", "-lc", command]
+							const res = await fetch(`http://127.0.0.1:${port}/shell/exec/${txId}`, {
+								method: "POST",
+								headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
+								body: JSON.stringify({
+									cmd: args[0],
+									args: args.slice(1),
+									cwd_rel: "",
+									timeout_ms: commandExecutionTimeout || 600000,
+								}),
+							})
+							const body = await res.json().catch(() => ({}))
+							const stdout = Buffer.from(body.stdout_base64 || "", "base64").toString("utf8")
+							const stderr = Buffer.from(body.stderr_base64 || "", "base64").toString("utf8")
+							const output = [stdout, stderr].filter(Boolean).join("\n")
+							pushToolResult(output || "<no output>")
+							return
+						}
+					}
+				}
+
 				const [rejected, result] = await executeCommand(task, options)
 
 				if (rejected) {
