@@ -17,6 +17,8 @@
 
 **New to Agentic Code?** See the **[User Installation Guide](USER_GUIDE.md)** for complete setup instructions.
 
+**Preparing a demo?** See the **[Demo Guide](DEMO_GUIDE.md)** for step-by-step demonstration instructions.
+
 **Quick Install:**
 
 1. Clone: `git clone https://github.com/krishbadri/agentic-code.git`

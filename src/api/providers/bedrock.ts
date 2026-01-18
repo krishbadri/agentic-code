@@ -22,7 +22,7 @@ import {
 	BEDROCK_DEFAULT_CONTEXT,
 	AWS_INFERENCE_PROFILE_MAPPING,
 	BEDROCK_1M_CONTEXT_MODEL_IDS,
-} from "@roo-code/types"
+} from "@agentic-code/types"
 
 import { ApiStream } from "../transform/stream"
 import { BaseProvider } from "./base-provider"

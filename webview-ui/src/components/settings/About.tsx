@@ -4,7 +4,7 @@ import { Trans } from "react-i18next"
 import { Info, Download, Upload, TriangleAlert } from "lucide-react"
 import { VSCodeCheckbox, VSCodeLink } from "@vscode/webview-ui-toolkit/react"
 
-import type { TelemetrySetting } from "@roo-code/types"
+import type { TelemetrySetting } from "@agentic-code/types"
 
 import { Package } from "@roo/package"
 

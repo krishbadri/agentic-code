@@ -20,7 +20,7 @@ vitest.mock("../../../shared/embeddingModels", () => ({
 }))
 
 // Mock TelemetryService
-vitest.mock("@roo-code/telemetry", () => ({
+vitest.mock("@agentic-code/telemetry", () => ({
 	TelemetryService: {
 		instance: {
 			captureEvent: vitest.fn(),

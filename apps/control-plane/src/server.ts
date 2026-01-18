@@ -18,6 +18,10 @@ export type ServerConfig = {
 	databaseUrl?: string
 	disableDb?: boolean
 	disableMcp?: boolean
+	// R31, R32: Server-side allowlist for test file modifications
+	// Only paths explicitly listed here can be modified by agents.
+	// This is a SERVER-SIDE config, NOT controllable by agent requests.
+	testModifyAllowlist?: string[]
 }
 
 export async function startServer(config: ServerConfig) {
@@ -36,6 +40,11 @@ export async function startServer(config: ServerConfig) {
 
 	app.decorate("repoRoot", config.repoRoot)
 	app.decorate("databaseUrl", config.databaseUrl || "")
+	// R31, R32: Server-side allowlist for test file modifications (NOT agent-controlled)
+	app.decorate("testModifyAllowlist", config.testModifyAllowlist || [])
+	// R33: In-memory progress baselines for DB-less mode (testing)
+	app.decorate("progressBaselines", new Map<string, { passing_count: number; total_count: number; test_command: string; last_checkpoint_count?: number; last_checkpoint_sha?: string }>())
+
 	if (!config.disableDb && config.databaseUrl) {
 		const pool = createPool(config.databaseUrl)
 		await migrate(pool)
@@ -71,6 +80,13 @@ declare module "fastify" {
 		repoRoot: string
 		databaseUrl: string
 		db?: import("pg").Pool
+		// R31, R32: Server-side allowlist for test file modifications (NOT agent-controlled)
+		testModifyAllowlist: string[]
+		// R33: In-memory progress baselines for DB-less mode (testing)
+		progressBaselines?: Map<
+			string,
+			{ passing_count: number; total_count: number; test_command: string; last_checkpoint_count?: number; last_checkpoint_sha?: string }
+		>
 	}
 }
 

@@ -6,7 +6,7 @@ import {
 	type ModelInfo,
 	type ReasoningEffortWithMinimal,
 	reasoningEfforts,
-} from "@roo-code/types"
+} from "@agentic-code/types"
 
 import {
 	DEFAULT_HYBRID_REASONING_MODEL_MAX_TOKENS,

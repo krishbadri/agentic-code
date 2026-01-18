@@ -11,7 +11,7 @@ import {
 	type OrganizationAllowList,
 	type CloudOrganizationMembership,
 	ORGANIZATION_ALLOW_ALL,
-} from "@roo-code/types"
+} from "@agentic-code/types"
 
 import { ExtensionMessage, ExtensionState, MarketplaceInstalledMetadata, Command } from "@roo/ExtensionMessage"
 import { findLastIndex } from "@roo/array"

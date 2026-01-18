@@ -9,7 +9,7 @@ import {
 	isDynamicProvider,
 	isFauxProvider,
 	isCustomProvider,
-} from "@roo-code/types"
+} from "@agentic-code/types"
 
 import type { RouterModels } from "@roo/api"
 

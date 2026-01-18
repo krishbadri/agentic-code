@@ -6,7 +6,7 @@ import {
 	type OrganizationAllowList,
 	ioIntelligenceDefaultModelId,
 	ioIntelligenceModels,
-} from "@roo-code/types"
+} from "@agentic-code/types"
 
 import { useAppTranslation } from "@src/i18n/TranslationContext"
 import { VSCodeButtonLink } from "@src/components/common/VSCodeButtonLink"

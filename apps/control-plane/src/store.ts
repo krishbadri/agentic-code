@@ -546,3 +546,68 @@ export async function listPlans(pool: Pool, limit = 50): Promise<PlanRow[]> {
 	)
 	return q.rows as PlanRow[]
 }
+
+// ============================================================================
+// Progress Gate (R33): Monotonic non-decreasing passing test count
+// ============================================================================
+
+export interface ProgressBaseline {
+	tx_id: string
+	passing_count: number
+	total_count: number
+	test_command: string
+	created_at: Date
+}
+
+export async function setProgressBaseline(
+	pool: Pool,
+	tx_id: string,
+	passing_count: number,
+	total_count: number,
+	test_command: string,
+): Promise<void> {
+	await pool.query(
+		`INSERT INTO progress_baseline (tx_id, passing_count, total_count, test_command)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (tx_id) DO UPDATE SET
+		   passing_count = GREATEST(progress_baseline.passing_count, $2),
+		   total_count = $3,
+		   updated_at = now()`,
+		[tx_id, passing_count, total_count, test_command],
+	)
+}
+
+export async function getProgressBaseline(pool: Pool, tx_id: string): Promise<ProgressBaseline | null> {
+	const q = await pool.query(
+		`SELECT tx_id, passing_count, total_count, test_command, created_at
+		 FROM progress_baseline WHERE tx_id = $1`,
+		[tx_id],
+	)
+	return q.rowCount ? (q.rows[0] as ProgressBaseline) : null
+}
+
+export async function recordProgressCheckpoint(
+	pool: Pool,
+	tx_id: string,
+	checkpoint_sha: string,
+	passing_count: number,
+	total_count: number,
+): Promise<void> {
+	await pool.query(
+		`INSERT INTO progress_checkpoint (tx_id, checkpoint_sha, passing_count, total_count)
+		 VALUES ($1, $2, $3, $4)`,
+		[tx_id, checkpoint_sha, passing_count, total_count],
+	)
+}
+
+export async function getLastProgressCheckpoint(
+	pool: Pool,
+	tx_id: string,
+): Promise<{ checkpoint_sha: string; passing_count: number } | null> {
+	const q = await pool.query(
+		`SELECT checkpoint_sha, passing_count FROM progress_checkpoint
+		 WHERE tx_id = $1 ORDER BY created_at DESC LIMIT 1`,
+		[tx_id],
+	)
+	return q.rowCount ? (q.rows[0] as { checkpoint_sha: string; passing_count: number }) : null
+}

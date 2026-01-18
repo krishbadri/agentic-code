@@ -30,8 +30,8 @@ vi.mock("@/context/ExtensionStateContext", () => ({
 	}),
 }))
 
-// Mock the getModelId function from @roo-code/types
-vi.mock("@roo-code/types", () => ({
+// Mock the getModelId function from @agentic-code/types
+vi.mock("@agentic-code/types", () => ({
 	getModelId: (config: any) => config?.apiModelId || undefined,
 }))
 

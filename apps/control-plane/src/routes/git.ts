@@ -8,6 +8,69 @@ const HeadersSchema = z.object({
 })
 
 export function registerGitRoutes(app: FastifyInstance) {
+	// ============================================================================
+	// Worktree/Branch listing endpoints (for test assertions)
+	// ============================================================================
+
+	app.get("/git/worktrees", async (req, reply) => {
+		try {
+			const { execFile } = await import("node:child_process")
+			const { promisify } = await import("node:util")
+			const execAsync = promisify(execFile)
+
+			const { stdout } = await execAsync("git", ["worktree", "list", "--porcelain"], {
+				cwd: app.repoRoot,
+				windowsHide: true,
+			})
+
+			// Parse porcelain output: each worktree starts with "worktree <path>"
+			const worktrees: string[] = []
+			for (const line of stdout.split("\n")) {
+				if (line.startsWith("worktree ")) {
+					worktrees.push(line.substring(9).trim())
+				}
+			}
+
+			return reply.send({ worktrees })
+		} catch (e) {
+			return reply.code(500).send({ code: "ERROR", message: String(e) })
+		}
+	})
+
+	app.get("/git/branches", async (req, reply) => {
+		const query = z
+			.object({
+				pattern: z.string().optional(),
+			})
+			.parse((req as any).query || {})
+
+		try {
+			const { execFile } = await import("node:child_process")
+			const { promisify } = await import("node:util")
+			const execAsync = promisify(execFile)
+
+			const args = ["branch", "--list"]
+			if (query.pattern) {
+				args.push(query.pattern)
+			}
+
+			const { stdout } = await execAsync("git", args, {
+				cwd: app.repoRoot,
+				windowsHide: true,
+			})
+
+			// Parse branch output: each line is "  branch-name" or "* current-branch"
+			const branches = stdout
+				.split("\n")
+				.map((line) => line.replace(/^\*?\s*/, "").trim())
+				.filter(Boolean)
+
+			return reply.send({ branches })
+		} catch (e) {
+			return reply.code(500).send({ code: "ERROR", message: String(e) })
+		}
+	})
+
 	app.get("/git/status/:tx_id", async (req, reply) => {
 		HeadersSchema.parse(req.headers as any)
 		const git = new Git({ repoRoot: app.repoRoot })

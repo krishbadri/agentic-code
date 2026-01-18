@@ -7,8 +7,8 @@ import {
 	type MarketplaceItemType,
 	modeMarketplaceItemSchema,
 	mcpMarketplaceItemSchema,
-} from "@roo-code/types"
-import { getRooCodeApiUrl } from "@roo-code/cloud"
+} from "@agentic-code/types"
+import { getRooCodeApiUrl } from "@agentic-code/cloud"
 
 const modeMarketplaceResponse = z.object({
 	items: z.array(modeMarketplaceItemSchema),

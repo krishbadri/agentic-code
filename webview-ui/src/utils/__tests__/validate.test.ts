@@ -1,4 +1,4 @@
-import type { ProviderSettings, OrganizationAllowList } from "@roo-code/types"
+import type { ProviderSettings, OrganizationAllowList } from "@agentic-code/types"
 
 import { RouterModels } from "@roo/api"
 

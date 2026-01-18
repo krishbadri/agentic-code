@@ -4,8 +4,8 @@ import { Trans } from "react-i18next"
 import { VSCodeButton, VSCodeLink } from "@vscode/webview-ui-toolkit/react"
 import posthog from "posthog-js"
 
-import type { ProviderSettings } from "@roo-code/types"
-import { TelemetryEventName } from "@roo-code/types"
+import type { ProviderSettings } from "@agentic-code/types"
+import { TelemetryEventName } from "@agentic-code/types"
 
 import { useExtensionState } from "@src/context/ExtensionStateContext"
 import { validateApiConfiguration } from "@src/utils/validate"

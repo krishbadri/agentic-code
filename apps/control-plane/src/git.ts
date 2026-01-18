@@ -3,6 +3,7 @@ import { promisify } from "node:util"
 import * as path from "node:path"
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
+import { CPError } from "./errors.js"
 const pexec = promisify(execFile)
 
 export type GitConfig = { repoRoot: string }
@@ -14,6 +15,85 @@ export class Git {
 		return pexec("git", args, { cwd: cwd ?? this.cfg.repoRoot, windowsHide: true })
 	}
 
+	/**
+	 * Assert that a relative path is safe for use within a worktree.
+	 * Enforces:
+	 * - rel is NOT absolute
+	 * - rel does NOT contain .. segments
+	 * - rel does NOT contain \0
+	 * - normalized join stays within worktree root
+	 */
+	private assertSafeRelPath(rel: string, worktreePath: string): void {
+		// Check for null bytes
+		if (rel.includes("\0")) {
+			throw new CPError("DENIED", "Path contains null byte", { path: rel })
+		}
+
+		// Check for absolute path
+		if (path.isAbsolute(rel)) {
+			throw new CPError("DENIED", "Absolute path not allowed", { path: rel })
+		}
+
+		// Check for .. segments
+		if (rel.includes("..")) {
+			throw new CPError("DENIED", "Path traversal (..) not allowed", { path: rel })
+		}
+
+		// Normalize and check that resolved path stays within worktree
+		const normalizedWt = path.resolve(worktreePath)
+		const resolved = path.resolve(worktreePath, rel)
+		
+		// Ensure resolved path is within worktree (handle both Windows and Unix paths)
+		if (!resolved.startsWith(normalizedWt + path.sep) && resolved !== normalizedWt) {
+			throw new CPError("DENIED", "Path resolves outside worktree", { path: rel })
+		}
+	}
+
+	/**
+	 * Check if any segment in the path is a symlink.
+	 * Walks each path segment under the worktree and checks with lstat.
+	 */
+	private async checkSymlinkPath(rel: string, worktreePath: string): Promise<void> {
+		const normalizedWt = path.resolve(worktreePath)
+		const fullPath = path.resolve(worktreePath, rel)
+		
+		// Build path segments from worktree root to target
+		const segments: string[] = [normalizedWt]
+		const relParts = rel.split(path.sep).filter(Boolean)
+		
+		// Build each segment path
+		let current = normalizedWt
+		for (const part of relParts) {
+			current = path.join(current, part)
+			segments.push(current)
+		}
+		
+		// Check each segment (excluding the final target file, which we're creating)
+		// We check all parent directories
+		for (let i = 0; i < segments.length - 1; i++) {
+			const segment = segments[i]
+			
+			// Skip if we've gone outside worktree (shouldn't happen after assertSafeRelPath)
+			if (!segment.startsWith(normalizedWt + path.sep) && segment !== normalizedWt) {
+				continue
+			}
+			
+			try {
+				const stats = await fs.lstat(segment)
+				if (stats.isSymbolicLink()) {
+					throw new CPError("DENIED", "Symlink path not allowed", { path: rel })
+				}
+			} catch (e) {
+				// If lstat fails because path doesn't exist, that's OK (we're creating it)
+				// But if it's a symlink error, rethrow
+				if (e instanceof CPError && e.code === "DENIED") {
+					throw e
+				}
+				// Otherwise, path doesn't exist yet - that's fine, continue checking
+			}
+		}
+	}
+
 	public worktreePath(tx_id: string) {
 		return path.join(this.cfg.repoRoot, ".cp", "worktrees", `tx_${tx_id}`)
 	}
@@ -23,6 +103,15 @@ export class Git {
 		return stdout.trim()
 	}
 
+	/**
+	 * Reset a worktree to a specific commit (hard reset).
+	 * R33: Used for progress gate rollback.
+	 */
+	public async resetHard(tx_id: string, targetRef: string): Promise<void> {
+		const wt = this.worktreePath(tx_id)
+		await this.git(["reset", "--hard", targetRef], wt)
+	}
+
 	public async beginTx(tx_id: string, base: string) {
 		const baseSha = await this.revParse(base)
 		await this.git(["branch", `tx/${tx_id}`, baseSha])
@@ -30,22 +119,158 @@ export class Git {
 		return baseSha
 	}
 
+	/**
+	 * Apply a patch to a worktree.
+	 * 
+	 * R26: Uses `git apply --reject` to handle partial applies.
+	 * 
+	 * If any hunks are rejected, .rej files are created. This method:
+	 * 1. Detects .rej files after apply
+	 * 2. Validates .rej files are within worktree (path safety)
+	 * 3. Treats .rej files as failure (no explicit resolution flow)
+	 * 4. Returns deterministic error with .rej file paths
+	 */
 	public async applyPatch(tx_id: string, filePath: string, patch: string) {
 		const wt = this.worktreePath(tx_id)
+		
+		// SECURITY: Validate file path before processing
+		this.assertSafeRelPath(filePath, wt)
+		
 		// Write patch to a temp file and apply
 		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "roo-cp-"))
 		const patchPath = path.join(tmpDir, "patch.diff")
 		await fs.writeFile(patchPath, patch, "utf8")
+		
+		// Save current HEAD before applying (for rollback if partial apply occurs)
+		let headBeforeApply: string
 		try {
-			await this.git(["apply", "--whitespace=nowarn", "-p0", patchPath], wt)
+			headBeforeApply = await this.revParse("HEAD", wt)
+		} catch {
+			// If HEAD doesn't exist (empty repo), use empty tree
+			headBeforeApply = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+		}
+		
+		let applySucceeded = false
+		try {
+			// R26: Use --reject flag for partial apply support
+			// REQUIRED: git apply --reject --whitespace=nowarn -p0 <patchPath>
+			// Note: git apply --reject may exit with non-zero even if some hunks applied
+			// We need to check for .rej files regardless of exit code
+			try {
+				await this.git(["apply", "--reject", "--whitespace=nowarn", "-p0", patchPath], wt)
+				applySucceeded = true
+			} catch (e) {
+				// git apply --reject may throw even if some hunks applied
+				// We'll check for .rej files below
+				applySucceeded = false
+			}
+			
+			// Check for .rej files (rejected hunks)
+			const rejFiles = await this.findRejFiles(wt)
+			
+			if (rejFiles.length > 0) {
+				// Validate path safety: ensure all .rej files are within worktree
+				const normalizedWt = path.resolve(wt)
+				for (const rejFile of rejFiles) {
+					const resolvedRej = path.resolve(wt, rejFile)
+					if (!resolvedRej.startsWith(normalizedWt + path.sep) && resolvedRej !== normalizedWt) {
+						throw new Error(
+							`SECURITY: .rej file path traversal detected: ${rejFile} resolves outside worktree`
+						)
+					}
+				}
+				
+				// CRITICAL: Rollback any applied hunks (we do NOT allow partial applies)
+				// Reset worktree to state before apply to remove any partially applied hunks
+				try {
+					await this.git(["reset", "--hard", headBeforeApply], wt)
+				} catch {
+					// If reset fails, try to clean up manually
+					// This should not happen, but we handle it gracefully
+				}
+				
+				// Clean up .rej files (they may have been created outside worktree, but we validated paths)
+				for (const rejFile of rejFiles) {
+					try {
+						await fs.unlink(path.join(wt, rejFile))
+					} catch {
+						// Ignore cleanup errors (file may not exist after reset)
+					}
+				}
+				
+				// R26: Treat .rej files as deterministic failure (no explicit resolution flow)
+				// Partial applies are NOT allowed - all hunks must apply or none
+				const error = new CPError(
+					"PATCH_REJECTED",
+					`Patch apply failed: ${rejFiles.length} hunk(s) rejected. .rej files: ${rejFiles.join(", ")}`,
+					{ rej_files: rejFiles, file_path: filePath }
+				)
+				throw error
+			}
+			
+			// Only add file if apply succeeded and no .rej files
+			if (applySucceeded) {
 			await this.git(["add", filePath], wt)
+			} else {
+				// Apply failed completely (no .rej files, but git exited with error)
+				// This means the patch was completely invalid, not just partially rejected
+				// Rollback to ensure no partial state
+				try {
+					await this.git(["reset", "--hard", headBeforeApply], wt)
+				} catch {
+					// Ignore reset errors
+				}
+				throw new CPError(
+					"BAD_PATCH",
+					"Patch apply failed completely - patch format may be invalid or file does not exist",
+					{ file_path: filePath }
+				)
+			}
 		} finally {
 			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
 		}
 	}
+	
+	/**
+	 * Find all .rej files in a worktree.
+	 * Returns relative paths from worktree root.
+	 */
+	private async findRejFiles(worktreePath: string): Promise<string[]> {
+		const rejFiles: string[] = []
+		
+		async function scanDir(dir: string, baseDir: string): Promise<void> {
+			try {
+				const entries = await fs.readdir(dir, { withFileTypes: true })
+				for (const entry of entries) {
+					const fullPath = path.join(dir, entry.name)
+					const relPath = path.relative(baseDir, fullPath)
+					
+					if (entry.isDirectory()) {
+						// Skip .git directory
+						if (entry.name === ".git") continue
+						await scanDir(fullPath, baseDir)
+					} else if (entry.name.endsWith(".rej")) {
+						rejFiles.push(relPath)
+					}
+				}
+			} catch {
+				// Ignore permission errors, etc.
+			}
+		}
+		
+		await scanDir(worktreePath, worktreePath)
+		return rejFiles
+	}
 
 	public async writeFile(tx_id: string, filePath: string, content: Buffer, mode?: string) {
 		const wt = this.worktreePath(tx_id)
+		
+		// SECURITY: Validate file path before processing
+		this.assertSafeRelPath(filePath, wt)
+		
+		// SECURITY: Check for symlinks in path segments
+		await this.checkSymlinkPath(filePath, wt)
+		
 		const fs = await import("node:fs/promises")
 		const full = path.join(wt, filePath)
 		await fs.mkdir(path.dirname(full), { recursive: true })
@@ -68,7 +293,10 @@ export class Git {
 
 	public async checkpoint(tx_id: string, message: string) {
 		const wt = this.worktreePath(tx_id)
-		await this.git(["commit", "-m", message], wt)
+		// Stage all changes before committing
+		await this.git(["add", "-A"], wt)
+		// Use --allow-empty to handle case where tests ran but no file changes
+		await this.git(["commit", "--allow-empty", "-m", message], wt)
 		const sha = await this.revParse("HEAD", wt)
 		const tag = `cp/${new Date().toISOString().replace(/[-:T]/g, "").slice(0, 15)}-${sha.slice(0, 7)}`
 		await this.git(["tag", tag, sha], wt)
@@ -158,6 +386,17 @@ export class Git {
 		return path.join(this.cfg.repoRoot, ".cp", "worktrees", `tx_${parentTxId}_sub_${subTxId}`)
 	}
 
+	/**
+	 * Get the branch name for a sub-transaction.
+	 * Uses flat naming (tx-<parentId>-sub-<subId>) to avoid Git ref path conflicts.
+	 * R25: Branch naming must be compatible with Git's ref storage model.
+	 */
+	public subTxBranchName(parentTxId: string, subTxId: string): string {
+		// CRITICAL: Use flat naming to avoid hierarchical ref conflict
+		// Git cannot have both refs/heads/tx/abc (file) and refs/heads/tx/abc/sub/xyz (requires abc to be dir)
+		return `tx-${parentTxId}-sub-${subTxId}`
+	}
+
 	public async beginSubTx(parentTxId: string, subTxId: string, base: string): Promise<string> {
 		// Get the current HEAD of the parent transaction worktree
 		const parentWt = this.worktreePath(parentTxId)
@@ -171,64 +410,180 @@ export class Git {
 			baseSha = await this.revParse(base)
 		}
 
-		// Create branch for sub-transaction
-		const branchName = `tx/${parentTxId}/sub/${subTxId}`
-		await this.git(["branch", branchName, baseSha])
-
-		// Create worktree for sub-transaction
+		// R25: Use `git worktree add -B` for atomic branch creation + worktree setup
+		const branchName = this.subTxBranchName(parentTxId, subTxId)
 		const subWt = this.subTxWorktreePath(parentTxId, subTxId)
-		await this.git(["worktree", "add", subWt, branchName])
+
+		// Single atomic command: create/reset branch AND create worktree
+		await this.git(["worktree", "add", "-B", branchName, subWt, baseSha])
 
 		return subWt
 	}
 
-	public async mergeSubTx(parentTxId: string, subTxId: string): Promise<void> {
+	/**
+	 * Merge a sub-transaction into its parent transaction.
+	 * R27: Uses `git merge --no-ff` for explicit merge commits.
+	 * R28: Cleans up worktree and branch after merge.
+	 * R15, R17: Detects conflicts at merge time and aborts/rolls back on failure.
+	 */
+	public async mergeSubTx(parentTxId: string, subTxId: string): Promise<{ merged: boolean; conflict?: string }> {
 		const parentWt = this.worktreePath(parentTxId)
 		const subWt = this.subTxWorktreePath(parentTxId, subTxId)
-		const branchName = `tx/${parentTxId}/sub/${subTxId}`
+		const branchName = this.subTxBranchName(parentTxId, subTxId)
+		let merged = false
 
-		// Check if sub-transaction has any commits
 		try {
-			// Get the current HEAD of sub-transaction
-			const subHead = await this.revParse("HEAD", subWt)
+			// Check if sub-transaction has any commits
+			let hasCommits = false
+			try {
+				await this.revParse("HEAD", subWt)
+				hasCommits = true
+			} catch {
+				// No commits in sub-transaction
+			}
 
-			// Merge sub-transaction branch into parent worktree
+			if (!hasCommits) {
+				// Nothing to merge - just clean up
+				return { merged: false }
+			}
+
+			// R27: Merge sub-transaction branch into parent worktree using --no-ff
 			await this.git(["checkout", `tx/${parentTxId}`], parentWt)
-			await this.git(["merge", "--no-ff", "-m", `[cp] Merge sub-transaction ${subTxId}`, branchName], parentWt)
-		} catch {
-			// No commits in sub-transaction, nothing to merge - just clean up
+
+			// Get HEAD before merge for potential rollback
+			const headBefore = await this.revParse("HEAD", parentWt)
+
+			try {
+				await this.git(["merge", "--no-ff", "-m", `[cp] Merge sub-transaction ${subTxId}`, branchName], parentWt)
+
+				// R15: Check for unmerged files after merge (some conflicts may not throw)
+				const { stdout: statusOut } = await this.git(["status", "--porcelain"], parentWt)
+				const hasUnmerged = statusOut.split("\n").some((line) => {
+					const status = line.substring(0, 2)
+					return status.includes("U") || status === "DD" || status === "AA"
+				})
+				if (hasUnmerged) {
+					// R28: Abort the merge on conflict
+					await this.abortMerge(parentWt, headBefore)
+					return { merged: false, conflict: "Unmerged files detected after merge" }
+				}
+
+				// Check for merge conflict markers in any modified files
+				const conflictMarkers = await this.hasConflictMarkers(parentWt)
+				if (conflictMarkers) {
+					await this.abortMerge(parentWt, headBefore)
+					return { merged: false, conflict: "Merge conflict markers found in files" }
+				}
+
+				merged = true
+			} catch (e) {
+				// Git merge failed - this is a conflict
+				const errMsg = String(e)
+				await this.abortMerge(parentWt, headBefore)
+				return { merged: false, conflict: errMsg }
+			}
+		} finally {
+			// R28: Always clean up sub-transaction worktree and branch
+			await this.cleanupSubTx(parentTxId, subTxId)
 		}
 
-		// Clean up sub-transaction worktree and branch
-		await this.git(["worktree", "remove", subWt, "--force"])
-		await this.git(["branch", "-D", branchName])
+		return { merged }
 	}
 
-	public async rollbackSubTx(parentTxId: string, subTxId: string): Promise<void> {
-		const subWt = this.subTxWorktreePath(parentTxId, subTxId)
-		const branchName = `tx/${parentTxId}/sub/${subTxId}`
-
-		// Get the base commit - try parent first, fallback to branch itself, then parent's HEAD
-		let baseSha: string
+	/**
+	 * Abort a merge in progress and reset to a known good state.
+	 */
+	private async abortMerge(worktree: string, resetTo: string): Promise<void> {
 		try {
-			baseSha = await this.revParse(`${branchName}^`, subWt)
+			await this.git(["merge", "--abort"], worktree)
 		} catch {
-			// Branch has no parent (just created, no commits), try the branch itself
+			// merge --abort may fail if no merge in progress
+		}
+		try {
+			await this.git(["reset", "--hard", resetTo], worktree)
+		} catch {
+			// Ignore reset errors
+		}
+	}
+
+	/**
+	 * Check if any tracked files contain conflict markers (<<<<<<< / >>>>>>> / =======).
+	 */
+	private async hasConflictMarkers(worktree: string): Promise<boolean> {
+		try {
+			const { stdout } = await this.git(["diff", "--check"], worktree)
+			// git diff --check reports conflict markers
+			return stdout.includes("conflict") || stdout.includes("<<<<<<<") || stdout.includes(">>>>>>>")
+		} catch (e) {
+			// git diff --check exits with non-zero if there are issues
+			const errMsg = String(e)
+			return errMsg.includes("conflict") || errMsg.includes("<<<<<<<") || errMsg.includes(">>>>>>>")
+		}
+	}
+
+	/**
+	 * Clean up a sub-transaction's worktree and branch.
+	 * R28: Rollback uses `git worktree remove --force` + `git branch -D`.
+	 */
+	private async cleanupSubTx(parentTxId: string, subTxId: string): Promise<void> {
+		const subWt = this.subTxWorktreePath(parentTxId, subTxId)
+		const branchName = this.subTxBranchName(parentTxId, subTxId)
+
+		// Remove worktree first (required before branch deletion)
+		try {
+			await this.git(["worktree", "remove", subWt, "--force"])
+		} catch {
+			// Worktree may already be removed or not exist
 			try {
-				baseSha = await this.revParse(branchName, subWt)
+				await fs.rm(subWt, { recursive: true, force: true })
 			} catch {
-				// Branch doesn't exist or is empty, use parent's HEAD
-				const parentWt = this.worktreePath(parentTxId)
-				baseSha = await this.revParse("HEAD", parentWt)
+				// Ignore cleanup errors
 			}
 		}
 
-		// Reset sub-transaction worktree to base
-		await this.git(["reset", "--hard", baseSha], subWt)
+		// Remove branch
+		try {
+			await this.git(["branch", "-D", branchName])
+		} catch {
+			// Branch may already be deleted
+		}
+	}
 
-		// Clean up sub-transaction worktree and branch
-		await this.git(["worktree", "remove", subWt, "--force"])
-		await this.git(["branch", "-D", branchName])
+	/**
+	 * Rollback a sub-transaction, discarding all changes.
+	 * R7: Rollback restores to last good checkpoint.
+	 * R28: Rollback uses `git merge --abort` + `git worktree remove --force` + `git branch -D`.
+	 */
+	public async rollbackSubTx(parentTxId: string, subTxId: string): Promise<void> {
+		const subWt = this.subTxWorktreePath(parentTxId, subTxId)
+		const branchName = this.subTxBranchName(parentTxId, subTxId)
+
+		try {
+			// Get the base commit - try parent first, fallback to branch itself, then parent's HEAD
+			let baseSha: string
+			try {
+				baseSha = await this.revParse(`${branchName}^`, subWt)
+			} catch {
+				// Branch has no parent (just created, no commits), try the branch itself
+				try {
+					baseSha = await this.revParse(branchName, subWt)
+				} catch {
+					// Branch doesn't exist or is empty, use parent's HEAD
+					const parentWt = this.worktreePath(parentTxId)
+					baseSha = await this.revParse("HEAD", parentWt)
+				}
+			}
+
+			// Reset sub-transaction worktree to base (restore last good state)
+			try {
+				await this.git(["reset", "--hard", baseSha], subWt)
+			} catch {
+				// Reset may fail if worktree is corrupted - proceed with cleanup
+			}
+		} finally {
+			// R28: Always clean up worktree and branch
+			await this.cleanupSubTx(parentTxId, subTxId)
+		}
 	}
 
 	// ============================================================================
@@ -305,10 +660,11 @@ export class Git {
 
 				// This worktree is orphaned - clean it up
 				try {
-					// Determine the branch name
+					// Determine the branch name (handle both old hierarchical and new flat naming)
 					let branchName: string
 					if (isSubTx && parentTxId && subTxId) {
-						branchName = `tx/${parentTxId}/sub/${subTxId}`
+						// Use new flat naming scheme
+						branchName = this.subTxBranchName(parentTxId, subTxId)
 					} else if (txId) {
 						branchName = `tx/${txId}`
 					} else {
@@ -358,23 +714,40 @@ export class Git {
 	}
 
 	/**
-	 * Get list of all tx/* branches that may need cleanup
+	 * Get list of all tx/* and tx-* branches that may need cleanup
 	 */
 	public async listOrphanedBranches(activeTxIds: Set<string> = new Set()): Promise<string[]> {
 		const orphaned: string[] = []
 
 		try {
-			// List all branches matching tx/*
-			const { stdout } = await this.git(["branch", "--list", "tx/*"])
-			const branches = stdout
+			// List all branches matching tx/* (parent transactions)
+			const { stdout: stdout1 } = await this.git(["branch", "--list", "tx/*"])
+			const parentBranches = stdout1
 				.split("\n")
 				.map((b) => b.trim().replace(/^\*\s*/, ""))
 				.filter(Boolean)
 
-			for (const branch of branches) {
-				// Parse transaction ID from branch name
-				// Format: tx/<txId> or tx/<parentTxId>/sub/<subTxId>
-				const match = branch.match(/^tx\/([^/]+)/)
+			for (const branch of parentBranches) {
+				// Parse transaction ID from branch name: tx/<txId>
+				const match = branch.match(/^tx\/([^/]+)$/)
+				if (match && match[1]) {
+					const txId = match[1]
+					if (!activeTxIds.has(txId)) {
+						orphaned.push(branch)
+					}
+				}
+			}
+
+			// List all branches matching tx-* (sub-transactions with flat naming)
+			const { stdout: stdout2 } = await this.git(["branch", "--list", "tx-*"])
+			const subTxBranches = stdout2
+				.split("\n")
+				.map((b) => b.trim().replace(/^\*\s*/, ""))
+				.filter(Boolean)
+
+			for (const branch of subTxBranches) {
+				// Parse transaction ID from branch name: tx-<parentTxId>-sub-<subTxId>
+				const match = branch.match(/^tx-([^-]+)-sub-/)
 				if (match && match[1]) {
 					const txId = match[1]
 					if (!activeTxIds.has(txId)) {

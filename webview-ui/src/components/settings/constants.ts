@@ -21,7 +21,7 @@ import {
 	fireworksModels,
 	rooModels,
 	featherlessModels,
-} from "@roo-code/types"
+} from "@agentic-code/types"
 
 export const MODELS_BY_PROVIDER: Partial<Record<ProviderName, Record<string, ModelInfo>>> = {
 	anthropic: anthropicModels,

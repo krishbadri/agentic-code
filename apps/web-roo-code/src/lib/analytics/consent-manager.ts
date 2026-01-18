@@ -4,7 +4,7 @@
  */
 
 import { getCookieConsentValue } from "react-cookie-consent"
-import { CONSENT_COOKIE_NAME } from "@roo-code/types"
+import { CONSENT_COOKIE_NAME } from "@agentic-code/types"
 
 export const CONSENT_EVENT = "cookieConsentChanged"
 

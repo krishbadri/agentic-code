@@ -1,8 +1,8 @@
 import { Anthropic } from "@anthropic-ai/sdk"
 import OpenAI from "openai"
 
-import { AuthState, rooDefaultModelId, rooModels, type RooModelId } from "@roo-code/types"
-import { CloudService } from "@roo-code/cloud"
+import { AuthState, rooDefaultModelId, rooModels, type RooModelId } from "@agentic-code/types"
+import { CloudService } from "@agentic-code/cloud"
 
 import type { ApiHandlerOptions } from "../../shared/api"
 import { ApiStream } from "../transform/stream"
