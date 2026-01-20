@@ -50,6 +50,12 @@ export async function checkLiveness(worktreePath: string, config: LivenessConfig
 		try {
 			const parts = config.testCommand.split(/\s+/)
 			const program = parts[0]
+			if (!program) {
+				result.testsPass = false
+				result.passed = false
+				result.details.error = "Test command is empty"
+				return result
+			}
 			const args = parts.slice(1)
 
 			const { stdout, stderr } = await pexec(program, args, {
@@ -108,11 +114,7 @@ export interface LivenessEvent {
 /**
  * Create a structured log event for a liveness check.
  */
-export function createLivenessEvent(
-	check: LivenessCheck,
-	txId: string,
-	isFinalCommit: boolean,
-): LivenessEvent {
+export function createLivenessEvent(check: LivenessCheck, txId: string, isFinalCommit: boolean): LivenessEvent {
 	return {
 		type: "liveness_check",
 		timestamp: Date.now(),

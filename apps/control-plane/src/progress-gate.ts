@@ -27,6 +27,16 @@ export async function runTestsAndCount(worktreePath: string, testCommand: string
 	// Split command into program and args
 	const parts = testCommand.split(/\s+/)
 	const program = parts[0]
+	if (!program) {
+		return {
+			passingCount: 0,
+			failingCount: 0,
+			totalCount: 0,
+			exitCode: 1,
+			stdout: "",
+			stderr: "Test command is empty",
+		}
+	}
 	const args = parts.slice(1)
 
 	let stdout = ""
@@ -72,7 +82,7 @@ export async function runTestsAndCount(worktreePath: string, testCommand: string
 function parseTestOutput(output: string): { passingCount: number; failingCount: number; totalCount: number } {
 	// Jest/Vitest: "Tests:  5 passed, 2 failed, 7 total"
 	const jestMatch = output.match(/Tests?:\s*(\d+)\s*passed(?:,\s*(\d+)\s*failed)?(?:,\s*(\d+)\s*total)?/i)
-	if (jestMatch) {
+	if (jestMatch && jestMatch[1]) {
 		const passed = parseInt(jestMatch[1], 10)
 		const failed = jestMatch[2] ? parseInt(jestMatch[2], 10) : 0
 		const total = jestMatch[3] ? parseInt(jestMatch[3], 10) : passed + failed
@@ -82,15 +92,15 @@ function parseTestOutput(output: string): { passingCount: number; failingCount: 
 	// Mocha: "5 passing" and optionally "2 failing"
 	const mochaPassMatch = output.match(/(\d+)\s*passing/i)
 	const mochaFailMatch = output.match(/(\d+)\s*failing/i)
-	if (mochaPassMatch) {
+	if (mochaPassMatch && mochaPassMatch[1]) {
 		const passed = parseInt(mochaPassMatch[1], 10)
-		const failed = mochaFailMatch ? parseInt(mochaFailMatch[1], 10) : 0
+		const failed = mochaFailMatch && mochaFailMatch[1] ? parseInt(mochaFailMatch[1], 10) : 0
 		return { passingCount: passed, failingCount: failed, totalCount: passed + failed }
 	}
 
 	// pytest: "5 passed, 2 failed" or "5 passed"
 	const pytestMatch = output.match(/(\d+)\s*passed(?:,\s*(\d+)\s*failed)?/i)
-	if (pytestMatch) {
+	if (pytestMatch && pytestMatch[1]) {
 		const passed = parseInt(pytestMatch[1], 10)
 		const failed = pytestMatch[2] ? parseInt(pytestMatch[2], 10) : 0
 		return { passingCount: passed, failingCount: failed, totalCount: passed + failed }
@@ -100,8 +110,8 @@ function parseTestOutput(output: string): { passingCount: number; failingCount: 
 	const nodePassMatch = output.match(/pass\s*(\d+)/i)
 	const nodeFailMatch = output.match(/fail\s*(\d+)/i)
 	if (nodePassMatch || nodeFailMatch) {
-		const passed = nodePassMatch ? parseInt(nodePassMatch[1], 10) : 0
-		const failed = nodeFailMatch ? parseInt(nodeFailMatch[1], 10) : 0
+		const passed = nodePassMatch && nodePassMatch[1] ? parseInt(nodePassMatch[1], 10) : 0
+		const failed = nodeFailMatch && nodeFailMatch[1] ? parseInt(nodeFailMatch[1], 10) : 0
 		return { passingCount: passed, failingCount: failed, totalCount: passed + failed }
 	}
 

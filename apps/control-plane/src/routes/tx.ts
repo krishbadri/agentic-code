@@ -68,7 +68,7 @@ function isTestFile(filePath: string): boolean {
 
 /**
  * Check if test file modification is allowed via SERVER-SIDE allowlist.
- * 
+ *
  * SECURITY: This is NOT controlled by agent input (headers, request body).
  * Only paths explicitly configured in the server's testModifyAllowlist
  * can be modified. An empty allowlist means NO test modifications allowed.
@@ -91,10 +91,7 @@ function isTestModifyAllowed(filePath: string, allowlist: string[]): boolean {
 
 		// Glob pattern matching
 		if (normalizedPattern.includes("*")) {
-			const regex = new RegExp(
-				"^" + normalizedPattern.replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*") + "$",
-				"i",
-			)
+			const regex = new RegExp("^" + normalizedPattern.replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*") + "$", "i")
 			if (regex.test(normalized)) {
 				return true
 			}
@@ -111,10 +108,10 @@ function isTestModifyAllowed(filePath: string, allowlist: string[]): boolean {
 
 /**
  * Parse patch content to extract all file paths that would be modified.
- * 
+ *
  * SECURITY: Patches can modify multiple files. We must validate ALL files
  * in the patch, not just the file_path parameter.
- * 
+ *
  * Patch format:
  * --- a/path/to/file1.ts
  * +++ b/path/to/file1.ts
@@ -125,12 +122,13 @@ function isTestModifyAllowed(filePath: string, allowlist: string[]): boolean {
 function extractPatchFilePaths(patch: string): string[] {
 	const filePaths = new Set<string>()
 	const lines = patch.split("\n")
-	
+
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i]
+		if (!line) continue
 		// Match "--- a/path" or "+++ b/path" (git diff format)
 		const match = line.match(/^(?:---|\+\+\+)\s+(?:a|b)\/(.+)$/)
-		if (match) {
+		if (match && match[1]) {
 			// Remove "a/" or "b/" prefix and normalize
 			const filePath = match[1].trim()
 			// Remove leading "a/" or "b/" if present (some patches have it)
@@ -140,7 +138,7 @@ function extractPatchFilePaths(patch: string): string[] {
 			}
 		}
 	}
-	
+
 	return Array.from(filePaths)
 }
 
@@ -165,7 +163,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 			const git = new Git({ repoRoot: app.repoRoot })
 			const base_commit = await git.beginTx(tx_id, body.base)
 			const worktree_path = git.worktreePath(tx_id)
-			
+
 			let repo_id = "default"
 			let progressBaseline: { passingCount: number; totalCount: number } | undefined
 
@@ -204,7 +202,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 					})
 				}
 			}
-			
+
 			return reply.send({
 				tx_id,
 				base_commit,
@@ -225,7 +223,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 		// SECURITY: Parse patch content to extract ALL file paths it modifies
 		// Attack vector: file_path="src/safe.ts" but patch modifies "test/file.test.ts"
 		const patchFilePaths = extractPatchFilePaths(body.patch)
-		
+
 		// Validate file_path parameter
 		if (isTestFile(body.file_path) && !isTestModifyAllowed(body.file_path, app.testModifyAllowlist)) {
 			return reply.code(403).send({
@@ -330,7 +328,13 @@ export function registerTxRoutes(app: FastifyInstance) {
 
 			// R33: Progress Gate - check if test count is monotonically non-decreasing
 			// Check DB first, then in-memory storage for testing
-			let baseline: { passing_count: number; total_count: number; test_command: string; last_checkpoint_count?: number; last_checkpoint_sha?: string } | null = null
+			let baseline: {
+				passing_count: number
+				total_count: number
+				test_command: string
+				last_checkpoint_count?: number
+				last_checkpoint_sha?: string
+			} | null = null
 
 			if (app.db) {
 				const { getProgressBaseline, getLastProgressCheckpoint } = await import("../store.js")
@@ -389,7 +393,13 @@ export function registerTxRoutes(app: FastifyInstance) {
 				// Update storage
 				if (app.db) {
 					const { recordProgressCheckpoint } = await import("../store.js")
-					await recordProgressCheckpoint(app.db, txId, sha, currentResult.passingCount, currentResult.totalCount)
+					await recordProgressCheckpoint(
+						app.db,
+						txId,
+						sha,
+						currentResult.passingCount,
+						currentResult.totalCount,
+					)
 
 					const tx = await getTransaction(app.db, txId)
 					if (tx) {
@@ -467,7 +477,12 @@ export function registerTxRoutes(app: FastifyInstance) {
 			// R6, Slide 68: Liveness MUST run at FINAL commit point
 			// Get test_command from progress baseline (stored "given tests")
 			let testCommand: string | undefined
-			let baseline: { passing_count: number; total_count: number; test_command: string; last_checkpoint_sha?: string } | null = null
+			let baseline: {
+				passing_count: number
+				total_count: number
+				test_command: string
+				last_checkpoint_sha?: string
+			} | null = null
 
 			if (app.db) {
 				const { getProgressBaseline } = await import("../store.js")
@@ -584,7 +599,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 			} catch {
 				/* ignore */
 			}
-			
+
 			// Reset the worktree to the specified commit
 			await (git as any).git(["reset", "--hard", body.hash], wt)
 
@@ -604,8 +619,8 @@ export function registerTxRoutes(app: FastifyInstance) {
 					/* ignore metrics errors */
 				}
 			}
-			
-			return reply.send({ 
+
+			return reply.send({
 				rolled_back_to: body.hash,
 				message: `Rolled back to commit ${body.hash}`,
 				duration_ms: durationMs,

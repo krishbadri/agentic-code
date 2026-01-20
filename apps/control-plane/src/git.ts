@@ -42,7 +42,7 @@ export class Git {
 		// Normalize and check that resolved path stays within worktree
 		const normalizedWt = path.resolve(worktreePath)
 		const resolved = path.resolve(worktreePath, rel)
-		
+
 		// Ensure resolved path is within worktree (handle both Windows and Unix paths)
 		if (!resolved.startsWith(normalizedWt + path.sep) && resolved !== normalizedWt) {
 			throw new CPError("DENIED", "Path resolves outside worktree", { path: rel })
@@ -56,28 +56,29 @@ export class Git {
 	private async checkSymlinkPath(rel: string, worktreePath: string): Promise<void> {
 		const normalizedWt = path.resolve(worktreePath)
 		const fullPath = path.resolve(worktreePath, rel)
-		
+
 		// Build path segments from worktree root to target
 		const segments: string[] = [normalizedWt]
 		const relParts = rel.split(path.sep).filter(Boolean)
-		
+
 		// Build each segment path
 		let current = normalizedWt
 		for (const part of relParts) {
 			current = path.join(current, part)
 			segments.push(current)
 		}
-		
+
 		// Check each segment (excluding the final target file, which we're creating)
 		// We check all parent directories
 		for (let i = 0; i < segments.length - 1; i++) {
 			const segment = segments[i]
-			
+			if (!segment) continue
+
 			// Skip if we've gone outside worktree (shouldn't happen after assertSafeRelPath)
 			if (!segment.startsWith(normalizedWt + path.sep) && segment !== normalizedWt) {
 				continue
 			}
-			
+
 			try {
 				const stats = await fs.lstat(segment)
 				if (stats.isSymbolicLink()) {
@@ -121,9 +122,9 @@ export class Git {
 
 	/**
 	 * Apply a patch to a worktree.
-	 * 
+	 *
 	 * R26: Uses `git apply --reject` to handle partial applies.
-	 * 
+	 *
 	 * If any hunks are rejected, .rej files are created. This method:
 	 * 1. Detects .rej files after apply
 	 * 2. Validates .rej files are within worktree (path safety)
@@ -132,15 +133,15 @@ export class Git {
 	 */
 	public async applyPatch(tx_id: string, filePath: string, patch: string) {
 		const wt = this.worktreePath(tx_id)
-		
+
 		// SECURITY: Validate file path before processing
 		this.assertSafeRelPath(filePath, wt)
-		
+
 		// Write patch to a temp file and apply
 		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "roo-cp-"))
 		const patchPath = path.join(tmpDir, "patch.diff")
 		await fs.writeFile(patchPath, patch, "utf8")
-		
+
 		// Save current HEAD before applying (for rollback if partial apply occurs)
 		let headBeforeApply: string
 		try {
@@ -149,7 +150,7 @@ export class Git {
 			// If HEAD doesn't exist (empty repo), use empty tree
 			headBeforeApply = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 		}
-		
+
 		let applySucceeded = false
 		try {
 			// R26: Use --reject flag for partial apply support
@@ -164,10 +165,10 @@ export class Git {
 				// We'll check for .rej files below
 				applySucceeded = false
 			}
-			
+
 			// Check for .rej files (rejected hunks)
 			const rejFiles = await this.findRejFiles(wt)
-			
+
 			if (rejFiles.length > 0) {
 				// Validate path safety: ensure all .rej files are within worktree
 				const normalizedWt = path.resolve(wt)
@@ -175,11 +176,11 @@ export class Git {
 					const resolvedRej = path.resolve(wt, rejFile)
 					if (!resolvedRej.startsWith(normalizedWt + path.sep) && resolvedRej !== normalizedWt) {
 						throw new Error(
-							`SECURITY: .rej file path traversal detected: ${rejFile} resolves outside worktree`
+							`SECURITY: .rej file path traversal detected: ${rejFile} resolves outside worktree`,
 						)
 					}
 				}
-				
+
 				// CRITICAL: Rollback any applied hunks (we do NOT allow partial applies)
 				// Reset worktree to state before apply to remove any partially applied hunks
 				try {
@@ -188,7 +189,7 @@ export class Git {
 					// If reset fails, try to clean up manually
 					// This should not happen, but we handle it gracefully
 				}
-				
+
 				// Clean up .rej files (they may have been created outside worktree, but we validated paths)
 				for (const rejFile of rejFiles) {
 					try {
@@ -197,20 +198,20 @@ export class Git {
 						// Ignore cleanup errors (file may not exist after reset)
 					}
 				}
-				
+
 				// R26: Treat .rej files as deterministic failure (no explicit resolution flow)
 				// Partial applies are NOT allowed - all hunks must apply or none
 				const error = new CPError(
 					"PATCH_REJECTED",
 					`Patch apply failed: ${rejFiles.length} hunk(s) rejected. .rej files: ${rejFiles.join(", ")}`,
-					{ rej_files: rejFiles, file_path: filePath }
+					{ rej_files: rejFiles, file_path: filePath },
 				)
 				throw error
 			}
-			
+
 			// Only add file if apply succeeded and no .rej files
 			if (applySucceeded) {
-			await this.git(["add", filePath], wt)
+				await this.git(["add", filePath], wt)
 			} else {
 				// Apply failed completely (no .rej files, but git exited with error)
 				// This means the patch was completely invalid, not just partially rejected
@@ -223,28 +224,28 @@ export class Git {
 				throw new CPError(
 					"BAD_PATCH",
 					"Patch apply failed completely - patch format may be invalid or file does not exist",
-					{ file_path: filePath }
+					{ file_path: filePath },
 				)
 			}
 		} finally {
 			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
 		}
 	}
-	
+
 	/**
 	 * Find all .rej files in a worktree.
 	 * Returns relative paths from worktree root.
 	 */
 	private async findRejFiles(worktreePath: string): Promise<string[]> {
 		const rejFiles: string[] = []
-		
+
 		async function scanDir(dir: string, baseDir: string): Promise<void> {
 			try {
 				const entries = await fs.readdir(dir, { withFileTypes: true })
 				for (const entry of entries) {
 					const fullPath = path.join(dir, entry.name)
 					const relPath = path.relative(baseDir, fullPath)
-					
+
 					if (entry.isDirectory()) {
 						// Skip .git directory
 						if (entry.name === ".git") continue
@@ -257,20 +258,20 @@ export class Git {
 				// Ignore permission errors, etc.
 			}
 		}
-		
+
 		await scanDir(worktreePath, worktreePath)
 		return rejFiles
 	}
 
 	public async writeFile(tx_id: string, filePath: string, content: Buffer, mode?: string) {
 		const wt = this.worktreePath(tx_id)
-		
+
 		// SECURITY: Validate file path before processing
 		this.assertSafeRelPath(filePath, wt)
-		
+
 		// SECURITY: Check for symlinks in path segments
 		await this.checkSymlinkPath(filePath, wt)
-		
+
 		const fs = await import("node:fs/promises")
 		const full = path.join(wt, filePath)
 		await fs.mkdir(path.dirname(full), { recursive: true })
@@ -454,7 +455,10 @@ export class Git {
 			const headBefore = await this.revParse("HEAD", parentWt)
 
 			try {
-				await this.git(["merge", "--no-ff", "-m", `[cp] Merge sub-transaction ${subTxId}`, branchName], parentWt)
+				await this.git(
+					["merge", "--no-ff", "-m", `[cp] Merge sub-transaction ${subTxId}`, branchName],
+					parentWt,
+				)
 
 				// R15: Check for unmerged files after merge (some conflicts may not throw)
 				const { stdout: statusOut } = await this.git(["status", "--porcelain"], parentWt)

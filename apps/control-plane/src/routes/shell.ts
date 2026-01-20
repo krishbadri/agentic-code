@@ -42,7 +42,7 @@ export function parseGitStatusOutput(output: string): string[] {
 		// We want to catch all changes (staged and unstaged)
 		// Match: 2 status chars, whitespace, then filename
 		const match = line.match(/^.{2}\s+(.+)$/)
-		if (match) {
+		if (match && match[1]) {
 			changedFiles.push(match[1].trim())
 		} else {
 			// Fallback: if regex doesn't match, try to extract filename after first 2 chars
@@ -98,14 +98,15 @@ export function registerShellRoutes(app: FastifyInstance) {
 		if (!whitelist.has(body.cmd)) {
 			return reply.code(403).send({ code: "DENIED", message: "Command not allowed" })
 		}
-		
+
 		// SECURITY: R31/R32 - Pre-execution gate: block commands that reference test files
 		const fullCommandString = [body.cmd, ...body.args].join(" ")
 		if (isTestFile(fullCommandString)) {
 			// Extract test file paths from the command string
 			const testFilePaths: string[] = []
 			// Match file paths that look like test files (e.g., test/file.test.ts, tests/foo.spec.js)
-			const testFilePattern = /(\S*(?:test|tests|__tests__)\/[^\s"']+\.(?:test|spec)\.(?:ts|js|tsx|jsx)|\S+\.(?:test|spec)\.(?:ts|js|tsx|jsx))/gi
+			const testFilePattern =
+				/(\S*(?:test|tests|__tests__)\/[^\s"']+\.(?:test|spec)\.(?:ts|js|tsx|jsx)|\S+\.(?:test|spec)\.(?:ts|js|tsx|jsx))/gi
 			const matches = fullCommandString.match(testFilePattern)
 			if (matches) {
 				for (const match of matches) {
@@ -125,35 +126,39 @@ export function registerShellRoutes(app: FastifyInstance) {
 				command: fullCommandString,
 			})
 		}
-		
+
 		const txId = (req.params as any).tx_id
 		const git = new Git({ repoRoot: app.repoRoot })
 		const worktreePath = git.worktreePath(txId)
-		
+
 		const started = Date.now()
 		const cwd = path.join(worktreePath, body.cwd_rel || "")
 		const controller = new AbortController()
 		const timeout = setTimeout(() => controller.abort(), body.timeout_ms)
-		
+
 		// Helper to check and revert test file modifications
 		const checkAndRevertTestFiles = async (): Promise<string[] | null> => {
 			try {
 				// SECURITY: R31/R32 - Post-exec file-change gate
 				// Check for test file modifications using git status (covers all changes: modified, added, untracked)
-				const { stdout: statusOutput } = await pexec("git", ["status", "--porcelain=v1", "--untracked-files=all", "--ignored"], {
-					cwd: worktreePath,
-					windowsHide: true,
-				})
-				
+				const { stdout: statusOutput } = await pexec(
+					"git",
+					["status", "--porcelain=v1", "--untracked-files=all", "--ignored"],
+					{
+						cwd: worktreePath,
+						windowsHide: true,
+					},
+				)
+
 				const changedFiles = parseGitStatusOutput(statusOutput)
-				
+
 				const modifiedTestFiles: string[] = []
 				for (const filePath of changedFiles) {
 					if (isTestFile(filePath)) {
 						modifiedTestFiles.push(filePath)
 					}
 				}
-				
+
 				// If any test files were modified, revert them
 				if (modifiedTestFiles.length > 0) {
 					// Revert test files back to HEAD (do NOT stage them)
@@ -181,7 +186,7 @@ export function registerShellRoutes(app: FastifyInstance) {
 			}
 			return null
 		}
-		
+
 		try {
 			// Execute the shell command
 			const res = await pexec(body.cmd, body.args, {
@@ -192,7 +197,7 @@ export function registerShellRoutes(app: FastifyInstance) {
 			})
 			const duration_ms = Date.now() - started
 			clearTimeout(timeout)
-			
+
 			// Check for test file modifications after successful execution
 			const modifiedTestFiles = await checkAndRevertTestFiles()
 			if (modifiedTestFiles) {
@@ -203,7 +208,7 @@ export function registerShellRoutes(app: FastifyInstance) {
 					command: [body.cmd, ...body.args].join(" "),
 				})
 			}
-			
+
 			return reply.send({
 				exit_code: 0,
 				stdout_base64: Buffer.from(res.stdout ?? "").toString("base64"),
@@ -214,7 +219,7 @@ export function registerShellRoutes(app: FastifyInstance) {
 		} catch (err: any) {
 			const duration_ms = Date.now() - started
 			clearTimeout(timeout)
-			
+
 			// Even if command failed, check for test file modifications
 			const modifiedTestFiles = await checkAndRevertTestFiles()
 			if (modifiedTestFiles) {
@@ -225,7 +230,7 @@ export function registerShellRoutes(app: FastifyInstance) {
 					command: [body.cmd, ...body.args].join(" "),
 				})
 			}
-			
+
 			const exit_code = typeof err?.code === "number" ? err.code : 1
 			return reply.send({
 				exit_code,

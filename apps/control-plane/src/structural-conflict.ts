@@ -56,7 +56,7 @@ export async function getTouchedFiles(
 		for (const line of stdout.trim().split("\n")) {
 			if (!line.trim()) continue
 			const [added, removed, file] = line.split("\t")
-			if (file) {
+			if (file && added !== undefined && removed !== undefined) {
 				files.push(file)
 				// Handle binary files (shown as "-")
 				const addedNum = added === "-" ? 0 : parseInt(added, 10)
@@ -87,7 +87,7 @@ export function parseImports(content: string, filePath: string, basePath: string
 	let match
 	while ((match = esImportRegex.exec(content)) !== null) {
 		const importPath = match[1]
-		if (importPath.startsWith(".")) {
+		if (importPath && importPath.startsWith(".")) {
 			// Resolve relative import
 			let resolved = resolve(basePath, dir, importPath)
 			// Add common extensions if not present
@@ -102,7 +102,7 @@ export function parseImports(content: string, filePath: string, basePath: string
 
 	while ((match = requireRegex.exec(content)) !== null) {
 		const importPath = match[1]
-		if (importPath.startsWith(".")) {
+		if (importPath && importPath.startsWith(".")) {
 			let resolved = resolve(basePath, dir, importPath)
 			if (!resolved.match(/\.(ts|tsx|js|jsx|mjs|cjs)$/)) {
 				resolved += ".ts"
@@ -183,8 +183,12 @@ export function detectConflicts(touchedFilesMap: Map<string, TouchedFiles>): Con
 	// Check all pairs
 	for (let i = 0; i < subTxIds.length; i++) {
 		for (let j = i + 1; j < subTxIds.length; j++) {
-			const subA = touchedFilesMap.get(subTxIds[i])!
-			const subB = touchedFilesMap.get(subTxIds[j])!
+			const subAId = subTxIds[i]
+			const subBId = subTxIds[j]
+			if (!subAId || !subBId) continue
+			const subA = touchedFilesMap.get(subAId)
+			const subB = touchedFilesMap.get(subBId)
+			if (!subA || !subB) continue
 
 			// Check same-file overlap
 			const overlap = subA.files.filter((f) => subB.files.includes(f))
@@ -227,8 +231,12 @@ export async function detectDependentFileConflicts(
 	// Check if any pair of subTx has overlapping dependency closures
 	for (let i = 0; i < subTxIds.length; i++) {
 		for (let j = i + 1; j < subTxIds.length; j++) {
-			const subA = touchedFilesMap.get(subTxIds[i])!
-			const subB = touchedFilesMap.get(subTxIds[j])!
+			const subAId = subTxIds[i]
+			const subBId = subTxIds[j]
+			if (!subAId || !subBId) continue
+			const subA = touchedFilesMap.get(subAId)
+			const subB = touchedFilesMap.get(subBId)
+			if (!subA || !subB) continue
 
 			// Get dependency closures for all files in subA
 			const closureA = new Set<string>()
@@ -259,11 +267,11 @@ export async function detectDependentFileConflicts(
 
 /**
  * Order sub-transactions by amount of modifications (lines changed), descending.
- * 
+ *
  * R23: Deterministic ordering with stable tie-breaker.
  * - Primary sort: linesChanged (descending)
  * - Tie-breaker: subTxId (alphabetical, ascending) using localeCompare for stable ordering
- * 
+ *
  * This determines merge order for conflicting subTxs.
  */
 export function orderByModifications(touchedFilesMap: Map<string, TouchedFiles>): string[] {
