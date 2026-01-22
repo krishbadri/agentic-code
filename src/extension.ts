@@ -42,9 +42,9 @@ try {
 	console.warn("Failed to load environment variables:", e)
 }
 
-import type { CloudUserInfo, AuthState } from "@agentic-code/types"
-import { CloudService, BridgeOrchestrator } from "@agentic-code/cloud"
-import { TelemetryService, PostHogTelemetryClient } from "@agentic-code/telemetry"
+import type { CloudUserInfo, AuthState } from "@roo-code/types"
+import { CloudService, BridgeOrchestrator } from "@roo-code/cloud"
+import { TelemetryService, PostHogTelemetryClient } from "@roo-code/telemetry"
 
 import "./utils/path" // Necessary to have access to String.prototype.toPosix.
 import { createOutputChannelLogger, createDualLogger } from "./utils/outputChannelLogger"
@@ -146,9 +146,22 @@ async function startControlPlane(workspaceRoot: string, disableDb: boolean): Pro
 	// Explicitly pass process.env to ensure the child inherits the current PATH (including Git).
 	const child = spawn("pnpm", args, { cwd: cpRoot, shell: true, env: process.env })
 	cpProcess = child
+
+	// Capture stderr for diagnostics
+	const stderrLines: string[] = []
+	const stderrRl = readline.createInterface({ input: child.stderr })
+	stderrRl.on("line", (line) => {
+		stderrLines.push(line)
+		log(`stderr: ${line}`)
+	})
+
 	const rl = readline.createInterface({ input: child.stdout })
 	return new Promise<number | undefined>((resolve) => {
-		const timer = setTimeout(() => resolve(undefined), 10000)
+		// Increased timeout: tsx needs to compile TypeScript on first run (can take 15-20s)
+		const timer = setTimeout(() => {
+			log("timeout waiting for Control-Plane port (first run may need TypeScript compilation)")
+			resolve(undefined)
+		}, 30000)
 		rl.on("line", (line) => {
 			try {
 				const j = JSON.parse(line.trim())
@@ -157,12 +170,24 @@ async function startControlPlane(workspaceRoot: string, disableDb: boolean): Pro
 					extensionContext.globalState.update("roo.cpPort", j.port)
 					resolve(j.port)
 					rl.close()
+					stderrRl.close()
 				}
 			} catch {}
 		})
-		child.on("exit", () => {
+		child.on("exit", (code, signal) => {
 			clearTimeout(timer)
+			if (code !== 0 || signal) {
+				log(`process exited: code=${code}, signal=${signal}`)
+				if (stderrLines.length > 0) {
+					log(`last stderr: ${stderrLines.slice(-5).join("; ")}`)
+				}
+			}
 			extensionContext.globalState.update("roo.cpPort", undefined)
+			resolve(undefined)
+		})
+		child.on("error", (err) => {
+			clearTimeout(timer)
+			log(`spawn error: ${err.message}`)
 			resolve(undefined)
 		})
 	})
@@ -580,7 +605,7 @@ export async function activate(context: vscode.ExtensionContext) {
 			{ path: context.extensionPath, pattern: "**/*.ts" },
 			{ path: path.join(context.extensionPath, "../packages/types"), pattern: "**/*.ts" },
 			{ path: path.join(context.extensionPath, "../packages/telemetry"), pattern: "**/*.ts" },
-			{ path: path.join(context.extensionPath, "node_modules/@agentic-code/cloud"), pattern: "**/*" },
+			{ path: path.join(context.extensionPath, "node_modules/@roo-code/cloud"), pattern: "**/*" },
 		]
 
 		console.log(

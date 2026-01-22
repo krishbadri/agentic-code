@@ -1,8 +1,8 @@
 {
-	"name": "agentic-cline",
+	"name": "roo-cline",
 	"displayName": "%extension.displayName%",
 	"description": "%extension.description%",
-	"publisher": "AgenticCode",
+	"publisher": "RooVeterinaryInc",
 	"version": "3.28.62",
 	"icon": "assets/icons/icon.png",
 	"galleryBanner": {
@@ -355,6 +355,7 @@
 		},
 		"chatParticipants": [
 			{
+				"name": "claude-code",
 				"id": "claude-code",
 				"label": "Claude Code",
 				"when": "false"
@@ -564,10 +565,10 @@
 		"@mistralai/mistralai": "^1.9.18",
 		"@modelcontextprotocol/sdk": "1.12.0",
 		"@qdrant/js-client-rest": "^1.14.0",
-		"@agentic-code/cloud": "workspace:^",
-		"@agentic-code/ipc": "workspace:^",
-		"@agentic-code/telemetry": "workspace:^",
-		"@agentic-code/types": "workspace:^",
+		"@roo-code/cloud": "workspace:^",
+		"@roo-code/ipc": "workspace:^",
+		"@roo-code/telemetry": "workspace:^",
+		"@roo-code/types": "workspace:^",
 		"@vscode/codicons": "^0.0.36",
 		"async-mutex": "^0.5.0",
 		"axios": "^1.12.0",
@@ -630,9 +631,9 @@
 		"zod": "^3.25.61"
 	},
 	"devDependencies": {
-		"@agentic-code/build": "workspace:^",
-		"@agentic-code/config-eslint": "workspace:^",
-		"@agentic-code/config-typescript": "workspace:^",
+		"@roo-code/build": "workspace:^",
+		"@roo-code/config-eslint": "workspace:^",
+		"@roo-code/config-typescript": "workspace:^",
 		"@types/clone-deep": "^4.0.4",
 		"@types/debug": "^4.1.12",
 		"@types/diff": "^5.2.1",
