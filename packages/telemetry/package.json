@@ -12,7 +12,7 @@
 	},
 	"dependencies": {
 		"@agentic-code/types": "workspace:^",
-		"posthog-node": "^5.0.0",
+		"posthog-node": "^5.24.2",
 		"zod": "^3.25.61"
 	},
 	"devDependencies": {
