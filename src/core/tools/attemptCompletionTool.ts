@@ -1,8 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk"
 import * as vscode from "vscode"
 
-import { RooCodeEventName } from "@agentic-code/types"
-import { TelemetryService } from "@agentic-code/telemetry"
+import { RooCodeEventName, type ClineAskResponse } from "@roo-code/types"
+import { TelemetryService } from "@roo-code/telemetry"
 
 import { Task } from "../task/Task"
 import {
@@ -110,7 +110,27 @@ export async function attemptCompletionTool(
 			// We already sent completion_result says, an
 			// empty string asks relinquishes control over
 			// button and field.
-			const { response, text, images } = await cline.ask("completion_result", "", false)
+			let response: ClineAskResponse
+			let text: string | undefined
+			let images: string[] | undefined
+			try {
+				const askResult = await cline.ask("completion_result", "", false)
+				response = askResult.response
+				text = askResult.text
+				images = askResult.images
+			} catch (error) {
+				// Fix #4: Catch "ask promise ignored" errors and log internally instead of leaking to LLM
+				if (error instanceof Error && error.message.includes("Current ask promise was ignored")) {
+					const provider = await cline.providerRef.deref()
+					provider?.log(
+						`[attemptCompletionTool] Ask promise was ignored (task ${cline.taskId}) - this is an internal cancellation, not a user-visible error`,
+					)
+					// Return early without adding error to conversation
+					return
+				}
+				// Re-throw other errors to be handled by outer catch
+				throw error
+			}
 
 			// Signals to recursive loop to stop (for now
 			// cline never happens since yesButtonClicked

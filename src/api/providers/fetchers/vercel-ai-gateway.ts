@@ -1,8 +1,8 @@
 import axios from "axios"
 import { z } from "zod"
 
-import type { ModelInfo } from "@agentic-code/types"
-import { VERCEL_AI_GATEWAY_VISION_ONLY_MODELS, VERCEL_AI_GATEWAY_VISION_AND_TOOLS_MODELS } from "@agentic-code/types"
+import type { ModelInfo } from "@roo-code/types"
+import { VERCEL_AI_GATEWAY_VISION_ONLY_MODELS, VERCEL_AI_GATEWAY_VISION_AND_TOOLS_MODELS } from "@roo-code/types"
 
 import type { ApiHandlerOptions } from "../../../shared/api"
 import { parseApiPrice } from "../../../shared/cost"
@@ -52,6 +52,18 @@ type VercelAiGatewayModelsResponse = z.infer<typeof vercelAiGatewayModelsRespons
  * getVercelAiGatewayModels
  */
 
+const redactSensitive = (value: string): string =>
+	value
+		.replace(/sk-[a-zA-Z0-9_-]{10,}/g, "sk-***REDACTED***")
+		.replace(/gsk_[a-zA-Z0-9_-]{10,}/g, "gsk_***REDACTED***")
+		.replace(/Bearer\s+[a-zA-Z0-9._-]{10,}/gi, "Bearer ***REDACTED***")
+
+const formatSnippet = (value: unknown, maxLength = 2000): string => {
+	const raw = typeof value === "string" ? value : JSON.stringify(value, null, 2)
+	const redacted = redactSensitive(raw)
+	return redacted.length > maxLength ? `${redacted.slice(0, maxLength)}...(truncated)` : redacted
+}
+
 export async function getVercelAiGatewayModels(options?: ApiHandlerOptions): Promise<Record<string, ModelInfo>> {
 	const models: Record<string, ModelInfo> = {}
 	const baseURL = "https://ai-gateway.vercel.sh/v1"
@@ -62,7 +74,12 @@ export async function getVercelAiGatewayModels(options?: ApiHandlerOptions): Pro
 		const data = result.success ? result.data.data : response.data.data
 
 		if (!result.success) {
-			console.error("Vercel AI Gateway models response is invalid", result.error.format())
+			console.error("Vercel AI Gateway models response is invalid", {
+				status: response.status,
+				url: `${baseURL}/models`,
+				body: formatSnippet(response.data),
+				error: result.error.format(),
+			})
 		}
 
 		for (const model of data) {
@@ -80,9 +97,18 @@ export async function getVercelAiGatewayModels(options?: ApiHandlerOptions): Pro
 			})
 		}
 	} catch (error) {
-		console.error(
-			`Error fetching Vercel AI Gateway models: ${JSON.stringify(error, Object.getOwnPropertyNames(error), 2)}`,
-		)
+		if (axios.isAxiosError(error)) {
+			console.error("Error fetching Vercel AI Gateway models (axios)", {
+				status: error.response?.status,
+				url: error.config?.url,
+				body: formatSnippet(error.response?.data),
+				message: error.message,
+			})
+		} else {
+			console.error(
+				`Error fetching Vercel AI Gateway models: ${JSON.stringify(error, Object.getOwnPropertyNames(error), 2)}`,
+			)
+		}
 	}
 
 	return models

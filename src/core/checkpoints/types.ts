@@ -1,17 +1,17 @@
 /**
  * Checkpoint System Types
  *
- * NOTE: The canonical SubTransaction type is defined in @agentic-code/types.
- * Import it from there: `import type { SubTransaction } from "@agentic-code/types"`
+ * NOTE: The canonical SubTransaction type is defined in @roo-code/types.
+ * Import it from there: `import type { SubTransaction } from "@roo-code/types"`
  *
  * This file defines types specific to the checkpoint system's state management.
  */
 
-import type { ClineMessage } from "@agentic-code/types"
+import type { ClineMessage } from "@roo-code/types"
 import type { ApiMessage } from "../task-persistence"
 
 // Re-export SubTransaction from canonical location for backwards compatibility
-export type { SubTransaction, SubTransactionStatus, SafetyGate, SafetyCheckResult } from "@agentic-code/types"
+export type { SubTransaction, SubTransactionStatus, SafetyGate, SafetyCheckResult } from "@roo-code/types"
 
 /**
  * System State vs Agent State

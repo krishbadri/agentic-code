@@ -17,6 +17,7 @@ import * as path from "path"
 import * as fs from "fs/promises"
 import { spawn } from "child_process"
 import * as readline from "readline"
+import * as net from "net"
 import { setGlobalChannel } from "./shared/globalChannel"
 
 async function nukeOldWebviewCache() {
@@ -85,8 +86,59 @@ import { initializeI18n } from "./i18n"
 let outputChannel: vscode.OutputChannel
 let cpProcess: import("child_process").ChildProcess | undefined
 
-async function startControlPlane(workspaceRoot: string, disableDb: boolean): Promise<number | undefined> {
+/**
+ * Verify that a Control-Plane port is actually responding
+ */
+async function verifyControlPlanePort(port: number, timeoutMs = 2000): Promise<boolean> {
+	const controller = new AbortController()
+	const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+	try {
+		if (typeof (globalThis as any).fetch !== "function") return false
+		const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal })
+		return res.ok
+	} catch {
+		return false
+	} finally {
+		clearTimeout(timeoutId)
+	}
+}
+
+async function isPortInUse(port: number, host = "127.0.0.1", timeoutMs = 500): Promise<boolean> {
+	return new Promise((resolve) => {
+		const socket = new net.Socket()
+		const onDone = (inUse: boolean) => {
+			socket.removeAllListeners()
+			socket.destroy()
+			resolve(inUse)
+		}
+
+		socket.setTimeout(timeoutMs)
+		socket.once("connect", () => onDone(true))
+		socket.once("timeout", () => onDone(false))
+		socket.once("error", (err: NodeJS.ErrnoException) => {
+			if (err.code === "ECONNREFUSED" || err.code === "ENOTFOUND" || err.code === "EHOSTUNREACH") {
+				onDone(false)
+				return
+			}
+			onDone(true)
+		})
+
+		socket.connect(port, host)
+	})
+}
+
+async function startControlPlane(workspaceRoot: string, disableDb: boolean = false): Promise<number | undefined> {
 	const log = (msg: string) => outputChannel.appendLine(`[ControlPlane] ${msg}`)
+	const waitForHealthy = async (port: number, timeoutMs = 15000): Promise<boolean> => {
+		const start = Date.now()
+		while (Date.now() - start < timeoutMs) {
+			if (await verifyControlPlanePort(port, 1000)) {
+				return true
+			}
+			await new Promise((r) => setTimeout(r, 500))
+		}
+		return false
+	}
 
 	/** Simple helper – true if command runs successfully */
 	const commandExists = (exe: string): boolean => {
@@ -111,12 +163,39 @@ async function startControlPlane(workspaceRoot: string, disableDb: boolean): Pro
 		return undefined
 	}
 
+	// Early return: check stored port and verify it's healthy
 	if (cpProcess && extensionContext) {
-		return extensionContext.globalState.get<number>("roo.cpPort")
+		const storedPort = extensionContext.globalState.get<number>("roo.cpPort")
+		if (storedPort) {
+			const isHealthy = await verifyControlPlanePort(storedPort)
+			if (isHealthy) {
+				return storedPort
+			} else {
+				const inUse = await isPortInUse(storedPort)
+				if (inUse) {
+					log(
+						`stored port ${storedPort} is in use but not responding to /health; likely another process is bound`,
+					)
+				}
+				// Stored port exists but not healthy - clear it and continue startup
+				await extensionContext.globalState.update("roo.cpPort", undefined)
+			}
+		}
 	}
 	const cfg = vscode.workspace.getConfiguration()
 	const overridePort = cfg.get<number>("roo.cpPortOverride", 0)
 	if (overridePort && overridePort > 0) {
+		const isHealthy = await verifyControlPlanePort(overridePort)
+		if (!isHealthy) {
+			const inUse = await isPortInUse(overridePort)
+			if (inUse) {
+				vscode.window.showErrorMessage(
+					`Control-Plane port override ${overridePort} is already in use by another process. Free the port or change roo.cpPortOverride.`,
+				)
+				log(`override port ${overridePort} is in use by another process`)
+				return undefined
+			}
+		}
 		await extensionContext.globalState.update("roo.cpPort", overridePort)
 		return overridePort
 	}
@@ -128,6 +207,19 @@ async function startControlPlane(workspaceRoot: string, disableDb: boolean): Pro
 		)
 		return undefined
 	}
+
+	// Check if there's already a Control-Plane running on any common port
+	// This helps avoid spawning duplicate processes
+	const commonPorts = [65254, 8899]
+	for (const testPort of commonPorts) {
+		const isWorking = await verifyControlPlanePort(testPort, 1000)
+		if (isWorking) {
+			log(`found existing Control-Plane on port ${testPort}, using it`)
+			await extensionContext.globalState.update("roo.cpPort", testPort)
+			return testPort
+		}
+	}
+
 	const args = [
 		"-C",
 		"apps/control-plane",
@@ -142,6 +234,7 @@ async function startControlPlane(workspaceRoot: string, disableDb: boolean): Pro
 	]
 	if (disableDb) args.push("--disableDb")
 
+	log(`spawning Control-Plane process (first run may take 20-30s for TypeScript compilation)`)
 	// Use shell=true so that Windows resolves pnpm.cmd; this is cross-platform safe.
 	// Explicitly pass process.env to ensure the child inherits the current PATH (including Git).
 	const child = spawn("pnpm", args, { cwd: cpRoot, shell: true, env: process.env })
@@ -156,24 +249,50 @@ async function startControlPlane(workspaceRoot: string, disableDb: boolean): Pro
 	})
 
 	const rl = readline.createInterface({ input: child.stdout })
+	let jsonReceived = false
 	return new Promise<number | undefined>((resolve) => {
-		// Increased timeout: tsx needs to compile TypeScript on first run (can take 15-20s)
-		const timer = setTimeout(() => {
+		const timer = setTimeout(async () => {
+			if (jsonReceived) {
+				return // Already resolved
+			}
 			log("timeout waiting for Control-Plane port (first run may need TypeScript compilation)")
-			resolve(undefined)
-		}, 30000)
-		rl.on("line", (line) => {
-			try {
-				const j = JSON.parse(line.trim())
-				if (typeof j.port === "number") {
-					clearTimeout(timer)
-					extensionContext.globalState.update("roo.cpPort", j.port)
-					resolve(j.port)
-					rl.close()
-					stderrRl.close()
+			// One last check: if port became healthy but JSON was delayed
+			const storedPort = extensionContext.globalState.get<number>("roo.cpPort")
+			if (storedPort) {
+				const isHealthy = await verifyControlPlanePort(storedPort)
+				if (isHealthy) {
+					log(`[ControlPlane] port became healthy after timeout; using ${storedPort}`)
+					resolve(storedPort)
+					return
 				}
-			} catch {}
-		})
+			}
+			resolve(undefined)
+		}, 60000) // Increased to 60s for first-run compilation
+			rl.on("line", async (line) => {
+				try {
+					const j = JSON.parse(line.trim())
+					if (typeof j.port === "number") {
+						jsonReceived = true
+						clearTimeout(timer)
+						const healthy = await waitForHealthy(j.port)
+						if (!healthy) {
+							log(`Control-Plane reported port ${j.port} but health check failed`)
+							await extensionContext.globalState.update("roo.cpPort", undefined)
+							resolve(undefined)
+							rl.close()
+							stderrRl.close()
+							return
+						}
+						await extensionContext.globalState.update("roo.cpPort", j.port)
+						log(`Control-Plane started on port ${j.port}`)
+						resolve(j.port)
+						rl.close()
+						stderrRl.close()
+					}
+				} catch {
+					// Not JSON, ignore
+				}
+			})
 		child.on("exit", (code, signal) => {
 			clearTimeout(timer)
 			if (code !== 0 || signal) {
@@ -206,6 +325,11 @@ let userInfoHandler: ((data: { userInfo: CloudUserInfo }) => Promise<void>) | un
 export async function activate(context: vscode.ExtensionContext) {
 	await nukeOldWebviewCache()
 	extensionContext = context
+	
+	vscode.window.showInformationMessage("Roo DEV activate ping")
+
+	vscode.window.showInformationMessage("Roo DEV activate ping v2 (from Cursor)")
+
 	outputChannel = vscode.window.createOutputChannel(Package.outputChannel)
 	setGlobalChannel(outputChannel)
 	context.subscriptions.push(outputChannel)
@@ -228,8 +352,14 @@ export async function activate(context: vscode.ExtensionContext) {
 		// Check if Control-Plane is already running (from auto-start or previous run)
 		const existingPort = extensionContext?.globalState.get<number>("roo.cpPort")
 		if (existingPort) {
-			vscode.window.showInformationMessage(`Roo Control-Plane already running on port ${existingPort}`)
-			return
+			const isWorking = await verifyControlPlanePort(existingPort)
+			if (isWorking) {
+				vscode.window.showInformationMessage(`Roo Control-Plane already running on port ${existingPort}`)
+				return
+			} else {
+				// Port in globalState but not responding - clear it
+				await extensionContext.globalState.update("roo.cpPort", undefined)
+			}
 		}
 		const port = await startControlPlane(workspaceRoot, !process.env.CP_DATABASE_URL)
 		if (port) {
@@ -321,7 +451,9 @@ export async function activate(context: vscode.ExtensionContext) {
 		if (!enabled) return
 		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
 		if (!workspaceRoot) return
-		const disableDb = !process.env.CP_DATABASE_URL
+		// Database is now enabled by default (uses SQLite if CP_DATABASE_URL not set)
+		// Only disable if explicitly requested
+		const disableDb = false
 		const portStored = await context.globalState.get<number>("roo.cpPort")
 		if (!portStored) {
 			const port = await startControlPlane(workspaceRoot, disableDb)
@@ -331,7 +463,19 @@ export async function activate(context: vscode.ExtensionContext) {
 				outputChannel.appendLine(`[ControlPlane] failed to start`)
 			}
 		} else {
-			outputChannel.appendLine(`[ControlPlane] using existing port ${portStored}`)
+			const isHealthy = await verifyControlPlanePort(portStored)
+			if (!isHealthy) {
+				outputChannel.appendLine(`[ControlPlane] stored port ${portStored} not healthy; clearing`)
+				await context.globalState.update("roo.cpPort", undefined)
+				const port = await startControlPlane(workspaceRoot, disableDb)
+				if (port) {
+					outputChannel.appendLine(`[ControlPlane] started on port ${port}`)
+				} else {
+					outputChannel.appendLine(`[ControlPlane] failed to start`)
+				}
+			} else {
+				outputChannel.appendLine(`[ControlPlane] using existing port ${portStored}`)
+			}
 		}
 	})().catch((e) => outputChannel.appendLine(`[ControlPlane] auto-start error: ${e}`))
 
@@ -349,6 +493,15 @@ export async function activate(context: vscode.ExtensionContext) {
 		}),
 	)
 
+	// Internal command: set Control-Plane port (for e2e testing)
+	context.subscriptions.push(
+		vscode.commands.registerCommand("roo.internal.setCpPort", async (port: number) => {
+			await context.globalState.update("roo.cpPort", port)
+			outputChannel.appendLine(`[ControlPlane] Port set to ${port} via internal command`)
+			return port
+		}),
+	)
+
 	// Real command (placeholder delegates to this once loaded)
 	context.subscriptions.push(
 		vscode.commands.registerCommand("roo.startControlPlaneHere.real", async () => {
@@ -357,7 +510,19 @@ export async function activate(context: vscode.ExtensionContext) {
 				vscode.window.showErrorMessage("Open a workspace folder first")
 				return
 			}
-			const port = await startControlPlane(root, !process.env.CP_DATABASE_URL)
+			const existingPort = await context.globalState.get<number>("roo.cpPort")
+			if (existingPort) {
+				const isHealthy = await verifyControlPlanePort(existingPort)
+				if (isHealthy) {
+					vscode.window.showInformationMessage(`Roo Control-Plane already running on port ${existingPort}`)
+					return
+				} else {
+					// Port in globalState but not responding - clear it
+					await context.globalState.update("roo.cpPort", undefined)
+				}
+			}
+			// Database enabled by default (SQLite fallback if CP_DATABASE_URL not set)
+			const port = await startControlPlane(root, false)
 			if (port) {
 				vscode.window.showInformationMessage(`Roo Control-Plane started on port ${port}`)
 			} else {

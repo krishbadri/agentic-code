@@ -1,4 +1,4 @@
-import type { TaskMetrics, Run } from "@agentic-code/evals"
+import type { TaskMetrics, Run } from "@roo-code/evals"
 
 export type EvalRun = Run & {
 	label: string

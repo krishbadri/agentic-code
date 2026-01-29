@@ -7,7 +7,7 @@ import {
 	type MainlandZAiModelId,
 	ZAI_DEFAULT_TEMPERATURE,
 	zaiApiLineConfigs,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import type { ApiHandlerOptions } from "../../shared/api"
 

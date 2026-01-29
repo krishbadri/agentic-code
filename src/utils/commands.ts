@@ -1,9 +1,9 @@
-import type { CommandId, CodeActionId, TerminalActionId } from "@agentic-code/types"
+import type { CodeActionId, CommandId, TerminalActionId } from "@roo-code/types"
 
-import { Package } from "../shared/package"
+import { COMMAND_PREFIX } from "../constants/ids"
 
-export const getCommand = (id: CommandId) => `${Package.name}.${id}`
+export const getCommand = (id: CommandId) => `${COMMAND_PREFIX}.${id}`
 
-export const getCodeActionCommand = (id: CodeActionId) => `${Package.name}.${id}`
+export const getCodeActionCommand = (id: CodeActionId) => `${COMMAND_PREFIX}.${id}`
 
-export const getTerminalCommand = (id: TerminalActionId) => `${Package.name}.${id}`
+export const getTerminalCommand = (id: TerminalActionId) => `${COMMAND_PREFIX}.${id}`

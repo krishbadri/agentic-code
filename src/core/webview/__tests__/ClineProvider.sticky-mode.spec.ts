@@ -1,58 +1,76 @@
 // npx vitest core/webview/__tests__/ClineProvider.sticky-mode.spec.ts
 
 import * as vscode from "vscode"
-import { TelemetryService } from "@agentic-code/telemetry"
+import { TelemetryService } from "@roo-code/telemetry"
 import { ClineProvider } from "../ClineProvider"
 import { ContextProxy } from "../../config/ContextProxy"
 import { Task } from "../../task/Task"
-import type { HistoryItem, ProviderName } from "@agentic-code/types"
+import type { HistoryItem, ProviderName } from "@roo-code/types"
 
-vi.mock("vscode", () => ({
-	ExtensionContext: vi.fn(),
-	OutputChannel: vi.fn(),
-	WebviewView: vi.fn(),
-	Uri: {
-		joinPath: vi.fn(),
-		file: vi.fn(),
-	},
-	CodeActionKind: {
-		QuickFix: { value: "quickfix" },
-		RefactorRewrite: { value: "refactor.rewrite" },
-	},
-	commands: {
-		executeCommand: vi.fn().mockResolvedValue(undefined),
-	},
-	window: {
-		showInformationMessage: vi.fn(),
-		showWarningMessage: vi.fn(),
-		showErrorMessage: vi.fn(),
-		onDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
-	},
-	workspace: {
-		getConfiguration: vi.fn().mockReturnValue({
-			get: vi.fn().mockReturnValue([]),
-			update: vi.fn(),
-		}),
-		onDidChangeConfiguration: vi.fn().mockImplementation(() => ({
-			dispose: vi.fn(),
-		})),
-		onDidSaveTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
-		onDidChangeTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
-		onDidOpenTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
-		onDidCloseTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
-	},
-	env: {
-		uriScheme: "vscode",
-		language: "en",
-		appName: "Visual Studio Code",
-	},
-	ExtensionMode: {
-		Production: 1,
-		Development: 2,
-		Test: 3,
-	},
-	version: "1.85.0",
-}))
+vi.mock("vscode", async () => {
+	const base = await vi.importActual<any>("vscode")
+	return {
+		...base,
+		ExtensionContext: vi.fn(),
+		OutputChannel: vi.fn(),
+		WebviewView: vi.fn(),
+		Uri: {
+			...(base.Uri ?? {}),
+			joinPath: vi.fn(),
+			file: vi.fn(),
+		},
+		CodeActionKind: {
+			QuickFix: { value: "quickfix" },
+			RefactorRewrite: { value: "refactor.rewrite" },
+		},
+		commands: {
+			...(base.commands ?? {}),
+			executeCommand: vi.fn().mockResolvedValue(undefined),
+		},
+		window: {
+			...(base.window ?? {}),
+			showInformationMessage: vi.fn(),
+			showWarningMessage: vi.fn(),
+			showErrorMessage: vi.fn(),
+			onDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
+			createTextEditorDecorationType: vi.fn().mockReturnValue({ dispose: vi.fn() }),
+		},
+		workspace: {
+			...(base.workspace ?? {}),
+			fs: {
+				...(base.workspace?.fs ?? {}),
+				readFile: vi.fn().mockResolvedValue(
+					Buffer.from(
+						'<!DOCTYPE html><html><head></head><body><script type="module" src="/assets/index.js"></script><link href="/assets/index.css" rel="stylesheet" /></body></html>',
+					),
+				),
+			},
+			getConfiguration: vi.fn().mockReturnValue({
+				get: vi.fn().mockReturnValue([]),
+				update: vi.fn(),
+			}),
+			onDidChangeConfiguration: vi.fn().mockImplementation(() => ({
+				dispose: vi.fn(),
+			})),
+			onDidSaveTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
+			onDidChangeTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
+			onDidOpenTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
+			onDidCloseTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
+		},
+		env: {
+			...(base.env ?? {}),
+			uriScheme: "vscode",
+			language: "en",
+			appName: "Visual Studio Code",
+		},
+		ExtensionMode: {
+			Production: 1,
+			Development: 2,
+			Test: 3,
+		},
+		version: "1.85.0",
+	}
+})
 
 // Create a counter for unique task IDs.
 let taskIdCounter = 0
@@ -104,7 +122,7 @@ vi.mock("../../diff/strategies/multi-search-replace", () => ({
 	})),
 }))
 
-vi.mock("@agentic-code/cloud", () => ({
+vi.mock("@roo-code/cloud", () => ({
 	CloudService: {
 		hasInstance: vi.fn().mockReturnValue(true),
 		get instance() {
@@ -169,7 +187,7 @@ vi.mock("fs/promises", () => ({
 	rmdir: vi.fn().mockResolvedValue(undefined),
 }))
 
-vi.mock("@agentic-code/telemetry", () => ({
+vi.mock("@roo-code/telemetry", () => ({
 	TelemetryService: {
 		hasInstance: vi.fn().mockReturnValue(true),
 		createInstance: vi.fn(),
@@ -250,7 +268,9 @@ describe("ClineProvider - Sticky Mode", () => {
 				html: "",
 				options: {},
 				onDidReceiveMessage: vi.fn(),
-				asWebviewUri: vi.fn(),
+				asWebviewUri: vi.fn((uri: any) => ({
+					toString: () => `vscode-webview://test${uri?.fsPath ? `/${uri.fsPath}` : ""}`,
+				})),
 				cspSource: "vscode-webview://test-csp-source",
 			},
 			visible: true,

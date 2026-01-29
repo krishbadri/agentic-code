@@ -12,7 +12,7 @@ import {
 	ExtensionBridgeEventName,
 	ExtensionSocketEvents,
 	HEARTBEAT_INTERVAL_MS,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import { type BaseChannelOptions, BaseChannel } from "./BaseChannel.js"
 

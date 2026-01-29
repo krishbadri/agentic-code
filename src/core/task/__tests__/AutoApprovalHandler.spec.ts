@@ -1,4 +1,4 @@
-import { GlobalState, ClineMessage } from "@agentic-code/types"
+import { GlobalState, ClineMessage } from "@roo-code/types"
 
 import { AutoApprovalHandler } from "../AutoApprovalHandler"
 

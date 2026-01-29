@@ -1,5 +1,6 @@
 {
-	"extends": "@agentic-code/config-typescript/nextjs.json",
+	// "extends": "@roo-code/config-typescript/nextjs.json",
+	"extends": "../../packages/config-typescript/nextjs.json",
 	"compilerOptions": {
 		"types": ["vitest/globals"],
 		"plugins": [{ "name": "next" }],

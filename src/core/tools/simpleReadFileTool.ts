@@ -57,7 +57,11 @@ export async function simpleReadFileTool(
 			...sharedMessageProps,
 			content: undefined,
 		} satisfies ClineSayTool)
-		await cline.ask("tool", partialMessage, block.partial).catch(() => {})
+		// In E2E mode, skip partial asks to avoid race conditions with full tool calls
+		const isE2EMode = !!(process.env.TEST_TORTURE_REPO || process.env.TEST_TORTURE_REPO_WORKSPACE)
+		if (!isE2EMode) {
+			await cline.ask("tool", partialMessage, block.partial).catch(() => {})
+		}
 		return
 	}
 

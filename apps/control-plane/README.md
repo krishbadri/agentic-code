@@ -4,7 +4,7 @@ Local daemon that gates all file and shell actions via REST + MCP.
 
 ## Run
 
-pnpm --filter @agentic-code/control-plane dev --repo /path/to/workspace --port 8899 --db postgres://localhost/agentic_cp
+pnpm --filter @roo-code/control-plane dev --repo /path/to/workspace --port 8899 --db postgres://localhost/agentic_cp
 
 ## REST
 

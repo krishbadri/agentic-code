@@ -26,10 +26,10 @@ import {
 	MAX_PENDING_BATCHES,
 } from "../constants"
 import { isPathInIgnoredDirectory } from "../../glob/ignore-utils"
-import { TelemetryService } from "@agentic-code/telemetry"
-import { TelemetryEventName } from "@agentic-code/types"
+import { TelemetryService } from "@roo-code/telemetry"
+import { TelemetryEventName } from "@roo-code/types"
 import { sanitizeErrorMessage } from "../shared/validation-helpers"
-import { Package } from "../../../shared/package"
+import { CONFIG_SECTION, LEGACY_CONFIG_SECTION } from "../../../constants/ids"
 
 export class DirectoryScanner implements IDirectoryScanner {
 	private readonly batchSegmentThreshold: number
@@ -48,9 +48,14 @@ export class DirectoryScanner implements IDirectoryScanner {
 			this.batchSegmentThreshold = batchSegmentThreshold
 		} else {
 			try {
-				this.batchSegmentThreshold = vscode.workspace
-					.getConfiguration(Package.name)
-					.get<number>("codeIndex.embeddingBatchSize", BATCH_SEGMENT_THRESHOLD)
+				const primaryConfig = vscode.workspace.getConfiguration(CONFIG_SECTION)
+				let batchSize = primaryConfig.get<number>("codeIndex.embeddingBatchSize")
+				if (batchSize === undefined) {
+					batchSize = vscode.workspace
+						.getConfiguration(LEGACY_CONFIG_SECTION)
+						.get<number>("codeIndex.embeddingBatchSize", BATCH_SEGMENT_THRESHOLD)
+				}
+				this.batchSegmentThreshold = batchSize ?? BATCH_SEGMENT_THRESHOLD
 			} catch {
 				// In test environment, vscode.workspace might not be available
 				this.batchSegmentThreshold = BATCH_SEGMENT_THRESHOLD

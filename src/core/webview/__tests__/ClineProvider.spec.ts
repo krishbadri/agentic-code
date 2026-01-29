@@ -4,8 +4,8 @@ import Anthropic from "@anthropic-ai/sdk"
 import * as vscode from "vscode"
 import axios from "axios"
 
-import { type ProviderSettingsEntry, type ClineMessage, ORGANIZATION_ALLOW_ALL } from "@agentic-code/types"
-import { TelemetryService } from "@agentic-code/telemetry"
+import { type ProviderSettingsEntry, type ClineMessage, ORGANIZATION_ALLOW_ALL } from "@roo-code/types"
+import { TelemetryService } from "@roo-code/telemetry"
 
 import { ExtensionMessage, ExtensionState } from "../../../shared/ExtensionMessage"
 import { defaultModeSlug } from "../../../shared/modes"
@@ -132,52 +132,79 @@ vi.mock("@modelcontextprotocol/sdk/client/stdio.js", () => ({
 	})),
 }))
 
-vi.mock("vscode", () => ({
-	ExtensionContext: vi.fn(),
-	OutputChannel: vi.fn(),
-	WebviewView: vi.fn(),
-	Uri: {
-		joinPath: vi.fn(),
-		file: vi.fn(),
-	},
-	CodeActionKind: {
-		QuickFix: { value: "quickfix" },
-		RefactorRewrite: { value: "refactor.rewrite" },
-	},
-	commands: {
-		executeCommand: vi.fn().mockResolvedValue(undefined),
-	},
-	window: {
-		showInformationMessage: vi.fn(),
-		showWarningMessage: vi.fn(),
-		showErrorMessage: vi.fn(),
-		onDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
-	},
-	workspace: {
-		getConfiguration: vi.fn().mockReturnValue({
-			get: vi.fn().mockReturnValue([]),
-			update: vi.fn(),
-		}),
-		onDidChangeConfiguration: vi.fn().mockImplementation(() => ({
-			dispose: vi.fn(),
-		})),
-		onDidSaveTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
-		onDidChangeTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
-		onDidOpenTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
-		onDidCloseTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
-	},
-	env: {
-		uriScheme: "vscode",
-		language: "en",
-		appName: "Visual Studio Code",
-	},
-	ExtensionMode: {
-		Production: 1,
-		Development: 2,
-		Test: 3,
-	},
-	version: "1.85.0",
-}))
+vi.mock("vscode", async () => {
+	const base = await vi.importActual<any>("vscode")
+	return {
+		...base,
+		ExtensionContext: vi.fn(),
+		OutputChannel: vi.fn(),
+		WebviewView: vi.fn(),
+		Uri: {
+			...(base.Uri ?? {}),
+			joinPath: vi.fn((baseUri: any, ...paths: any[]) => {
+				const basePath = baseUri?.fsPath ?? ""
+				const joined = [basePath, ...paths.map(String)].filter(Boolean).join("/")
+				return {
+					fsPath: joined,
+					toString: () => joined,
+				}
+			}),
+			file: vi.fn((p: string) => ({ fsPath: p, toString: () => p })),
+			parse: vi.fn((u: string) => ({ fsPath: u, toString: () => u, with: vi.fn(() => ({})) })),
+		},
+		CodeActionKind: {
+			QuickFix: { value: "quickfix" },
+			RefactorRewrite: { value: "refactor.rewrite" },
+		},
+		commands: {
+			...(base.commands ?? {}),
+			executeCommand: vi.fn().mockResolvedValue(undefined),
+		},
+		window: {
+			...(base.window ?? {}),
+			showInformationMessage: vi.fn(),
+			showWarningMessage: vi.fn(),
+			showErrorMessage: vi.fn(),
+			onDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
+			createTextEditorDecorationType: vi.fn().mockReturnValue({ dispose: vi.fn() }),
+		},
+		workspace: {
+			...(base.workspace ?? {}),
+			// Ensure fs exists for ClineProvider.getHtmlContent (reads webview index.html)
+			fs: {
+				...(base.workspace?.fs ?? {}),
+				readFile: vi.fn().mockResolvedValue(
+					Buffer.from(
+						'<!DOCTYPE html><html><head></head><body><script type="module" src="/assets/index.js"></script><link href="/assets/index.css" rel="stylesheet" /></body></html>',
+					),
+				),
+			},
+			getConfiguration: vi.fn().mockReturnValue({
+				get: vi.fn().mockReturnValue([]),
+				update: vi.fn(),
+			}),
+			onDidChangeConfiguration: vi.fn().mockImplementation(() => ({
+				dispose: vi.fn(),
+			})),
+			onDidSaveTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
+			onDidChangeTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
+			onDidOpenTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
+			onDidCloseTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
+		},
+		env: {
+			...(base.env ?? {}),
+			uriScheme: "vscode",
+			language: "en",
+			appName: "Visual Studio Code",
+		},
+		ExtensionMode: {
+			Production: 1,
+			Development: 2,
+			Test: 3,
+		},
+		version: "1.85.0",
+	}
+})
 
 vi.mock("../../../utils/tts", () => ({
 	setTtsEnabled: vi.fn(),
@@ -317,7 +344,7 @@ vi.mock("../diff/strategies/multi-search-replace", () => ({
 	})),
 }))
 
-vi.mock("@agentic-code/cloud", () => ({
+vi.mock("@roo-code/cloud", () => ({
 	CloudService: {
 		hasInstance: vi.fn().mockReturnValue(true),
 		get instance() {
@@ -407,7 +434,9 @@ describe("ClineProvider", () => {
 				html: "",
 				options: {},
 				onDidReceiveMessage: vi.fn(),
-				asWebviewUri: vi.fn(),
+				asWebviewUri: vi.fn((uri: any) => ({
+					toString: () => `vscode-webview://test${uri?.fsPath ? `/${uri.fsPath}` : ""}`,
+				})),
 				cspSource: "vscode-webview://test-csp-source",
 			},
 			visible: true,
@@ -2268,7 +2297,9 @@ describe("Project MCP Settings", () => {
 				html: "",
 				options: {},
 				onDidReceiveMessage: vi.fn(),
-				asWebviewUri: vi.fn(),
+				asWebviewUri: vi.fn((uri: any) => ({
+					toString: () => `vscode-webview://test${uri?.fsPath ? `/${uri.fsPath}` : ""}`,
+				})),
 				cspSource: "vscode-webview://test-csp-source",
 			},
 			visible: true,
@@ -2492,7 +2523,7 @@ describe("getTelemetryProperties", () => {
 
 		test("includes cloud authentication property when user is authenticated", async () => {
 			// Import the CloudService mock and update it
-			const { CloudService } = await import("@agentic-code/cloud")
+			const { CloudService } = await import("@roo-code/cloud")
 			const mockCloudService = {
 				isAuthenticated: vi.fn().mockReturnValue(true),
 			}
@@ -2510,7 +2541,7 @@ describe("getTelemetryProperties", () => {
 
 		test("includes cloud authentication property when user is not authenticated", async () => {
 			// Import the CloudService mock and update it
-			const { CloudService } = await import("@agentic-code/cloud")
+			const { CloudService } = await import("@roo-code/cloud")
 			const mockCloudService = {
 				isAuthenticated: vi.fn().mockReturnValue(false),
 			}
@@ -2528,7 +2559,7 @@ describe("getTelemetryProperties", () => {
 
 		test("handles CloudService errors gracefully", async () => {
 			// Import the CloudService mock and update it to throw an error
-			const { CloudService } = await import("@agentic-code/cloud")
+			const { CloudService } = await import("@roo-code/cloud")
 			Object.defineProperty(CloudService, "instance", {
 				get: vi.fn().mockImplementation(() => {
 					throw new Error("CloudService not available")
@@ -2549,7 +2580,7 @@ describe("getTelemetryProperties", () => {
 
 		test("handles CloudService method errors gracefully", async () => {
 			// Import the CloudService mock and update it
-			const { CloudService } = await import("@agentic-code/cloud")
+			const { CloudService } = await import("@roo-code/cloud")
 			const mockCloudService = {
 				isAuthenticated: vi.fn().mockImplementation(() => {
 					throw new Error("Authentication check error")
@@ -2625,7 +2656,9 @@ describe("ClineProvider - Router Models", () => {
 				html: "",
 				options: {},
 				onDidReceiveMessage: vi.fn(),
-				asWebviewUri: vi.fn(),
+				asWebviewUri: vi.fn((uri: any) => ({
+					toString: () => `vscode-webview://test${uri?.fsPath ? `/${uri.fsPath}` : ""}`,
+				})),
 			},
 			visible: true,
 			onDidDispose: vi.fn().mockImplementation((callback) => {
@@ -2962,7 +2995,9 @@ describe("ClineProvider - Comprehensive Edit/Delete Edge Cases", () => {
 				html: "",
 				options: {},
 				onDidReceiveMessage: vi.fn(),
-				asWebviewUri: vi.fn(),
+				asWebviewUri: vi.fn((uri: any) => ({
+					toString: () => `vscode-webview://test${uri?.fsPath ? `/${uri.fsPath}` : ""}`,
+				})),
 			},
 			visible: true,
 			onDidDispose: vi.fn().mockImplementation((callback) => {

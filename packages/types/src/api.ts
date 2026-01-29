@@ -133,6 +133,11 @@ export interface RooCodeAPI extends EventEmitter<RooCodeAPIEvents> {
 	 * @throws Error if the profile does not exist
 	 */
 	setActiveProfile(name: string): Promise<string | undefined>
+	/**
+	 * Sets the Control-Plane port (for e2e testing)
+	 * @param port The port number to set
+	 */
+	setCpPort(port: number): Promise<void>
 }
 
 export interface RooCodeIpcServer extends EventEmitter<IpcServerEvents> {

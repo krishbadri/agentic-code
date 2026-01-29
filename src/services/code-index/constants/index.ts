@@ -1,4 +1,4 @@
-import { CODEBASE_INDEX_DEFAULTS } from "@agentic-code/types"
+import { CODEBASE_INDEX_DEFAULTS } from "@roo-code/types"
 
 /**Parser */
 export const MAX_BLOCK_CHARS = 1000

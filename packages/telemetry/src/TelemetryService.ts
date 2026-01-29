@@ -5,7 +5,7 @@ import {
 	type TelemetryPropertiesProvider,
 	TelemetryEventName,
 	type TelemetrySetting,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 /**
  * TelemetryService wrapper class that defers initialization.

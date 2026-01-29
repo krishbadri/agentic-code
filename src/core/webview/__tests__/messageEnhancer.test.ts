@@ -1,5 +1,5 @@
-import { ProviderSettings, ClineMessage } from "@agentic-code/types"
-import { TelemetryService } from "@agentic-code/telemetry"
+import { ProviderSettings, ClineMessage } from "@roo-code/types"
+import { TelemetryService } from "@roo-code/telemetry"
 
 import { MessageEnhancer } from "../messageEnhancer"
 import * as singleCompletionHandlerModule from "../../../utils/single-completion-handler"
@@ -7,7 +7,7 @@ import { ProviderSettingsManager } from "../../config/ProviderSettingsManager"
 
 // Mock dependencies
 vi.mock("../../../utils/single-completion-handler")
-vi.mock("@agentic-code/telemetry")
+vi.mock("@roo-code/telemetry")
 
 describe("MessageEnhancer", () => {
 	let mockProviderSettingsManager: ProviderSettingsManager

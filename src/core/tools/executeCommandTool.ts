@@ -4,8 +4,8 @@ import * as vscode from "vscode"
 
 import delay from "delay"
 
-import { CommandExecutionStatus, DEFAULT_TERMINAL_OUTPUT_CHARACTER_LIMIT } from "@agentic-code/types"
-import { TelemetryService } from "@agentic-code/telemetry"
+import { CommandExecutionStatus, DEFAULT_TERMINAL_OUTPUT_CHARACTER_LIMIT, getApiProtocol, getModelId } from "@roo-code/types"
+import { TelemetryService } from "@roo-code/telemetry"
 
 import { Task } from "../task/Task"
 
@@ -132,10 +132,32 @@ export async function executeCommandTool(
 					}
 				}
 
+				// Logging: Track tool execution
+				const provider = await task.providerRef.deref()
+				if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
+					const modelId = task.api.getModel().id
+					const apiProtocol = getApiProtocol(
+						(task.apiConfiguration as any)?.apiProvider,
+						modelId,
+					)
+					provider.log(
+						`[executeCommandTool] Executing command - Protocol: ${apiProtocol}, Provider: ${(task.apiConfiguration as any)?.apiProvider}, Model: ${modelId}, Command: ${command.substring(0, 100)}`,
+					)
+				}
+
 				const [rejected, result] = await executeCommand(task, options)
 
 				if (rejected) {
 					task.didRejectTool = true
+				}
+
+				// Logging: Track tool execution result
+				const providerForLogging = await task.providerRef.deref()
+				if (providerForLogging && process.env.ROO_DEBUG_TOOL_EXECUTION) {
+					const resultPreview = typeof result === "string" ? result.substring(0, 200) : JSON.stringify(result).substring(0, 200)
+					providerForLogging.log(
+						`[executeCommandTool] Command execution completed - Rejected: ${rejected}, Result preview: ${resultPreview}`,
+					)
 				}
 
 				pushToolResult(result)
@@ -373,7 +395,21 @@ export async function executeCommand(
 				exitStatus = `Exit code: <undefined, notify user>`
 			} else {
 				if (exitDetails.exitCode !== 0) {
-					exitStatus += "Command execution was not successful, inspect the cause and adjust as needed.\n"
+					// Provide more specific error guidance based on exit code
+					if (exitDetails.exitCode === 1 && result.trim() === "") {
+						// Common case: command not found or no matches (ripgrep returns 1 for no matches)
+						exitStatus += "Command execution completed but may indicate:\n"
+						exitStatus += "- Command not found (check if the command is installed and in PATH)\n"
+						exitStatus += "- No matches found (for search commands like grep/ripgrep, this is normal if nothing matches)\n"
+						exitStatus += "- Command failed silently (check command syntax and permissions)\n"
+					} else {
+						exitStatus += "Command execution was not successful. "
+						if (result.trim()) {
+							exitStatus += "Error output:\n"
+						} else {
+							exitStatus += "No output was produced. This may indicate the command failed or was not found.\n"
+						}
+					}
 				}
 
 				exitStatus += `Exit code: ${exitDetails.exitCode}`

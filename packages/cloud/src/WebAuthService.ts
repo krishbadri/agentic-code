@@ -10,7 +10,7 @@ import type {
 	AuthService,
 	AuthServiceEvents,
 	AuthState,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import { getClerkBaseUrl, getRooCodeApiUrl, PRODUCTION_CLERK_BASE_URL } from "./config.js"
 import { getUserAgent } from "./utils.js"

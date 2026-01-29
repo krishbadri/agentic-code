@@ -8,7 +8,7 @@ import {
 	anthropicDefaultModelId,
 	anthropicModels,
 	ANTHROPIC_DEFAULT_MAX_TOKENS,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import type { ApiHandlerOptions } from "../../shared/api"
 
@@ -18,6 +18,8 @@ import { getModelParams } from "../transform/model-params"
 import { BaseProvider } from "./base-provider"
 import type { SingleCompletionHandler, ApiHandlerCreateMessageMetadata } from "../index"
 import { calculateApiCostAnthropic } from "../../shared/cost"
+import { maybeVcrWrapStream, type VcrRequestDescriptor } from "../vcr/recordReplay"
+import { isVcrEnabled } from "../vcr/vcrConfig"
 
 export class AnthropicHandler extends BaseProvider implements SingleCompletionHandler {
 	private options: ApiHandlerOptions
@@ -145,6 +147,23 @@ export class AnthropicHandler extends BaseProvider implements SingleCompletionHa
 				})) as any
 				break
 			}
+		}
+
+		// Wrap stream with VCR if enabled
+		if (isVcrEnabled()) {
+			const descriptor: VcrRequestDescriptor = {
+				providerName: "anthropic",
+				model: modelId,
+				endpoint: "anthropic-messages",
+				params: {
+					messages: messages,
+					system: systemPrompt,
+					max_tokens: maxTokens ?? ANTHROPIC_DEFAULT_MAX_TOKENS,
+					temperature,
+					thinking,
+				},
+			}
+			stream = (await maybeVcrWrapStream(descriptor, stream)) as AnthropicStream<Anthropic.Messages.RawMessageStreamEvent>
 		}
 
 		let inputTokens = 0

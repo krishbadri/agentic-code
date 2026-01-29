@@ -12,7 +12,7 @@ import {
 	ConnectionState,
 	ExtensionSocketEvents,
 	TaskSocketEvents,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import { SocketTransport } from "./SocketTransport.js"
 import { ExtensionChannel } from "./ExtensionChannel.js"

@@ -8,7 +8,7 @@ import {
 	featherlessDefaultModelId,
 	featherlessModels,
 	DEEP_SEEK_DEFAULT_TEMPERATURE,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import { FeatherlessHandler } from "../featherless"
 

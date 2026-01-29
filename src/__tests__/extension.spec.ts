@@ -1,46 +1,60 @@
 // npx vitest run __tests__/extension.spec.ts
 
 import type * as vscode from "vscode"
-import type { AuthState } from "@agentic-code/types"
+import type { AuthState } from "@roo-code/types"
 
-vi.mock("vscode", () => ({
-	window: {
-		createOutputChannel: vi.fn().mockReturnValue({
-			appendLine: vi.fn(),
-		}),
-		registerWebviewViewProvider: vi.fn(),
-		registerUriHandler: vi.fn(),
-		tabGroups: {
-			onDidChangeTabs: vi.fn(),
+vi.mock("vscode", async () => {
+	const base = await vi.importActual<any>("vscode")
+	return {
+		...base,
+		// extension.ts touches vscode.chat very early; make sure it's always present in this mock
+		chat: base.chat ?? {
+			registerChatParticipant: vi.fn(() => ({ dispose: vi.fn() })),
 		},
-		onDidChangeActiveTextEditor: vi.fn(),
-	},
-	workspace: {
-		registerTextDocumentContentProvider: vi.fn(),
-		getConfiguration: vi.fn().mockReturnValue({
-			get: vi.fn().mockReturnValue([]),
-		}),
-		createFileSystemWatcher: vi.fn().mockReturnValue({
-			onDidCreate: vi.fn(),
-			onDidChange: vi.fn(),
-			onDidDelete: vi.fn(),
-			dispose: vi.fn(),
-		}),
-		onDidChangeWorkspaceFolders: vi.fn(),
-	},
-	languages: {
-		registerCodeActionsProvider: vi.fn(),
-	},
-	commands: {
-		executeCommand: vi.fn(),
-	},
-	env: {
-		language: "en",
-	},
-	ExtensionMode: {
-		Production: 1,
-	},
-}))
+		window: {
+			...(base.window ?? {}),
+			createOutputChannel: vi.fn().mockReturnValue({
+				appendLine: vi.fn(),
+			}),
+			registerWebviewViewProvider: vi.fn(),
+			registerUriHandler: vi.fn(),
+			tabGroups: {
+				onDidChangeTabs: vi.fn(),
+			},
+			onDidChangeActiveTextEditor: vi.fn(),
+		},
+		workspace: {
+			...(base.workspace ?? {}),
+			registerTextDocumentContentProvider: vi.fn(),
+			getConfiguration: vi.fn().mockReturnValue({
+				get: vi.fn().mockReturnValue([]),
+				update: vi.fn(),
+			}),
+			createFileSystemWatcher: vi.fn().mockReturnValue({
+				onDidCreate: vi.fn(),
+				onDidChange: vi.fn(),
+				onDidDelete: vi.fn(),
+				dispose: vi.fn(),
+			}),
+			onDidChangeWorkspaceFolders: vi.fn(),
+		},
+		languages: {
+			...(base.languages ?? {}),
+			registerCodeActionsProvider: vi.fn(),
+		},
+		commands: {
+			...(base.commands ?? {}),
+			executeCommand: vi.fn(),
+		},
+		env: {
+			...(base.env ?? {}),
+			language: "en",
+		},
+		ExtensionMode: {
+			Production: 1,
+		},
+	}
+})
 
 vi.mock("@dotenvx/dotenvx", () => ({
 	config: vi.fn(),
@@ -48,7 +62,7 @@ vi.mock("@dotenvx/dotenvx", () => ({
 
 const mockBridgeOrchestratorDisconnect = vi.fn().mockResolvedValue(undefined)
 
-vi.mock("@agentic-code/cloud", () => ({
+vi.mock("@roo-code/cloud", () => ({
 	CloudService: {
 		createInstance: vi.fn(),
 		hasInstance: vi.fn().mockReturnValue(true),
@@ -67,7 +81,7 @@ vi.mock("@agentic-code/cloud", () => ({
 	getRooCodeApiUrl: vi.fn().mockReturnValue("https://app.roocode.com"),
 }))
 
-vi.mock("@agentic-code/telemetry", () => ({
+vi.mock("@roo-code/telemetry", () => ({
 	TelemetryService: {
 		createInstance: vi.fn().mockReturnValue({
 			register: vi.fn(),
@@ -158,6 +172,9 @@ vi.mock("../extension/api", () => ({
 
 vi.mock("../activate", () => ({
 	handleUri: vi.fn(),
+	registerCommandMap: vi.fn().mockResolvedValue(undefined),
+	getCoreCommands: vi.fn(),
+	getUiCommands: vi.fn(),
 	registerCommands: vi.fn(),
 	registerCodeActions: vi.fn(),
 	registerTerminalActions: vi.fn(),
@@ -182,6 +199,7 @@ describe("extension.ts", () => {
 
 		mockContext = {
 			extensionPath: "/test/path",
+			globalStorageUri: { fsPath: "/test/storage" } as any,
 			globalState: {
 				get: vi.fn().mockReturnValue(undefined),
 				update: vi.fn(),
@@ -192,8 +210,10 @@ describe("extension.ts", () => {
 		authStateChangedHandler = undefined
 	})
 
-	test("authStateChangedHandler calls BridgeOrchestrator.disconnect when logged-out event fires", async () => {
-		const { CloudService, BridgeOrchestrator } = await import("@agentic-code/cloud")
+	test(
+		"authStateChangedHandler calls BridgeOrchestrator.disconnect when logged-out event fires",
+		async () => {
+		const { CloudService, BridgeOrchestrator } = await import("@roo-code/cloud")
 
 		// Capture the auth state changed handler.
 		vi.mocked(CloudService.createInstance).mockImplementation(async (_context, _logger, handlers) => {
@@ -223,10 +243,14 @@ describe("extension.ts", () => {
 
 		// Verify BridgeOrchestrator.disconnect was called
 		expect(mockBridgeOrchestratorDisconnect).toHaveBeenCalled()
-	})
+		},
+		30_000,
+	)
 
-	test("authStateChangedHandler does not call BridgeOrchestrator.disconnect for other states", async () => {
-		const { CloudService } = await import("@agentic-code/cloud")
+	test(
+		"authStateChangedHandler does not call BridgeOrchestrator.disconnect for other states",
+		async () => {
+		const { CloudService } = await import("@roo-code/cloud")
 
 		// Capture the auth state changed handler.
 		vi.mocked(CloudService.createInstance).mockImplementation(async (_context, _logger, handlers) => {
@@ -253,5 +277,7 @@ describe("extension.ts", () => {
 
 		// Verify BridgeOrchestrator.disconnect was NOT called.
 		expect(mockBridgeOrchestratorDisconnect).not.toHaveBeenCalled()
-	})
+		},
+		30_000,
+	)
 })

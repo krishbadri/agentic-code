@@ -12,8 +12,8 @@ import {
 	getModelId,
 	type ProviderName,
 	type RooModelId,
-} from "@agentic-code/types"
-import { TelemetryService } from "@agentic-code/telemetry"
+} from "@roo-code/types"
+import { TelemetryService } from "@roo-code/telemetry"
 
 import { Mode, modes } from "../../shared/modes"
 

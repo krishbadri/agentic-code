@@ -16,15 +16,15 @@ importers:
 
   .:
     devDependencies:
-      '@agentic-code/config-typescript':
-        specifier: workspace:^
-        version: link:packages/config-typescript
       '@changesets/cli':
         specifier: ^2.27.10
         version: 2.29.6(@types/node@24.2.1)
       '@dotenvx/dotenvx':
         specifier: ^1.34.0
         version: 1.44.2
+      '@roo-code/config-typescript':
+        specifier: workspace:^
+        version: link:packages/config-typescript
       '@types/glob':
         specifier: ^9.0.0
         version: 9.0.0
@@ -97,6 +97,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.12.0
         version: 1.12.0
+      better-sqlite3:
+        specifier: ^11.10.0
+        version: 11.10.0
       fastify:
         specifier: ^4.28.1
         version: 4.29.1
@@ -116,9 +119,12 @@ importers:
         specifier: ^3.23.5
         version: 3.24.5(zod@3.25.76)
     devDependencies:
-      '@agentic-code/config-typescript':
+      '@roo-code/config-typescript':
         specifier: workspace:^
         version: link:../../packages/config-typescript
+      '@types/better-sqlite3':
+        specifier: ^7.6.13
+        version: 7.6.13
       '@types/pg':
         specifier: ^8.15.5
         version: 8.15.5
@@ -134,13 +140,13 @@ importers:
 
   apps/vscode-e2e:
     devDependencies:
-      '@agentic-code/config-eslint':
+      '@roo-code/config-eslint':
         specifier: workspace:^
         version: link:../../packages/config-eslint
-      '@agentic-code/config-typescript':
+      '@roo-code/config-typescript':
         specifier: workspace:^
         version: link:../../packages/config-typescript
-      '@agentic-code/types':
+      '@roo-code/types':
         specifier: workspace:^
         version: link:../../packages/types
       '@types/mocha':
@@ -173,18 +179,12 @@ importers:
 
   apps/vscode-nightly:
     devDependencies:
-      '@agentic-code/build':
+      '@roo-code/build':
         specifier: workspace:^
         version: link:../../packages/build
 
   apps/web-evals:
     dependencies:
-      '@agentic-code/evals':
-        specifier: workspace:^
-        version: link:../../packages/evals
-      '@agentic-code/types':
-        specifier: workspace:^
-        version: link:../../packages/types
       '@hookform/resolvers':
         specifier: ^5.1.1
         version: 5.1.1(react-hook-form@7.57.0(react@18.3.1))
@@ -224,6 +224,12 @@ importers:
       '@radix-ui/react-tooltip':
         specifier: ^1.2.8
         version: 1.2.8(@types/react-dom@18.3.7(@types/react@18.3.23))(@types/react@18.3.23)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      '@roo-code/evals':
+        specifier: workspace:^
+        version: link:../../packages/evals
+      '@roo-code/types':
+        specifier: workspace:^
+        version: link:../../packages/types
       '@tanstack/react-query':
         specifier: ^5.69.0
         version: 5.76.1(react@18.3.1)
@@ -282,10 +288,10 @@ importers:
         specifier: ^3.25.61
         version: 3.25.61
     devDependencies:
-      '@agentic-code/config-eslint':
+      '@roo-code/config-eslint':
         specifier: workspace:^
         version: link:../../packages/config-eslint
-      '@agentic-code/config-typescript':
+      '@roo-code/config-typescript':
         specifier: workspace:^
         version: link:../../packages/config-typescript
       '@tailwindcss/postcss':
@@ -309,18 +315,18 @@ importers:
 
   apps/web-roo-code:
     dependencies:
-      '@agentic-code/evals':
-        specifier: workspace:^
-        version: link:../../packages/evals
-      '@agentic-code/types':
-        specifier: workspace:^
-        version: link:../../packages/types
       '@radix-ui/react-dialog':
         specifier: ^1.1.14
         version: 1.1.14(@types/react-dom@18.3.7(@types/react@18.3.23))(@types/react@18.3.23)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-slot':
         specifier: ^1.2.3
         version: 1.2.3(@types/react@18.3.23)(react@18.3.1)
+      '@roo-code/evals':
+        specifier: workspace:^
+        version: link:../../packages/evals
+      '@roo-code/types':
+        specifier: workspace:^
+        version: link:../../packages/types
       '@tanstack/react-query':
         specifier: ^5.79.0
         version: 5.80.2(react@18.3.1)
@@ -391,10 +397,10 @@ importers:
         specifier: ^3.25.61
         version: 3.25.61
     devDependencies:
-      '@agentic-code/config-eslint':
+      '@roo-code/config-eslint':
         specifier: workspace:^
         version: link:../../packages/config-eslint
-      '@agentic-code/config-typescript':
+      '@roo-code/config-typescript':
         specifier: workspace:^
         version: link:../../packages/config-typescript
       '@tailwindcss/typography':
@@ -428,10 +434,10 @@ importers:
         specifier: ^3.25.61
         version: 3.25.61
     devDependencies:
-      '@agentic-code/config-eslint':
+      '@roo-code/config-eslint':
         specifier: workspace:^
         version: link:../config-eslint
-      '@agentic-code/config-typescript':
+      '@roo-code/config-typescript':
         specifier: workspace:^
         version: link:../config-typescript
       '@types/node':
@@ -443,7 +449,7 @@ importers:
 
   packages/cloud:
     dependencies:
-      '@agentic-code/types':
+      '@roo-code/types':
         specifier: workspace:^
         version: link:../types
       ioredis:
@@ -462,10 +468,10 @@ importers:
         specifier: ^3.25.76
         version: 3.25.76
     devDependencies:
-      '@agentic-code/config-eslint':
+      '@roo-code/config-eslint':
         specifier: workspace:^
         version: link:../config-eslint
-      '@agentic-code/config-typescript':
+      '@roo-code/config-typescript':
         specifier: workspace:^
         version: link:../config-typescript
       '@types/node':
@@ -518,10 +524,10 @@ importers:
 
   packages/evals:
     dependencies:
-      '@agentic-code/ipc':
+      '@roo-code/ipc':
         specifier: workspace:^
         version: link:../ipc
-      '@agentic-code/types':
+      '@roo-code/types':
         specifier: workspace:^
         version: link:../types
       cmd-ts:
@@ -529,7 +535,7 @@ importers:
         version: 0.13.0
       drizzle-orm:
         specifier: ^0.44.1
-        version: 0.44.1(@libsql/client@0.15.8)(@types/pg@8.15.5)(better-sqlite3@11.10.0)(gel@2.1.0)(pg@8.16.3)(postgres@3.4.7)
+        version: 0.44.1(@libsql/client@0.15.8)(@types/better-sqlite3@7.6.13)(@types/pg@8.15.5)(better-sqlite3@11.10.0)(gel@2.1.0)(pg@8.16.3)(postgres@3.4.7)
       execa:
         specifier: ^9.6.0
         version: 9.6.0
@@ -558,10 +564,10 @@ importers:
         specifier: ^3.25.61
         version: 3.25.61
     devDependencies:
-      '@agentic-code/config-eslint':
+      '@roo-code/config-eslint':
         specifier: workspace:^
         version: link:../config-eslint
-      '@agentic-code/config-typescript':
+      '@roo-code/config-typescript':
         specifier: workspace:^
         version: link:../config-typescript
       '@types/node':
@@ -585,17 +591,17 @@ importers:
 
   packages/ipc:
     dependencies:
-      '@agentic-code/types':
+      '@roo-code/types':
         specifier: workspace:^
         version: link:../types
       node-ipc:
         specifier: ^12.0.0
         version: 12.0.0
     devDependencies:
-      '@agentic-code/config-eslint':
+      '@roo-code/config-eslint':
         specifier: workspace:^
         version: link:../config-eslint
-      '@agentic-code/config-typescript':
+      '@roo-code/config-typescript':
         specifier: workspace:^
         version: link:../config-typescript
       '@types/node':
@@ -610,7 +616,7 @@ importers:
 
   packages/telemetry:
     dependencies:
-      '@agentic-code/types':
+      '@roo-code/types':
         specifier: workspace:^
         version: link:../types
       posthog-node:
@@ -620,10 +626,10 @@ importers:
         specifier: ^3.25.61
         version: 3.25.61
     devDependencies:
-      '@agentic-code/config-eslint':
+      '@roo-code/config-eslint':
         specifier: workspace:^
         version: link:../config-eslint
-      '@agentic-code/config-typescript':
+      '@roo-code/config-typescript':
         specifier: workspace:^
         version: link:../config-typescript
       '@types/node':
@@ -642,10 +648,10 @@ importers:
         specifier: ^3.25.61
         version: 3.25.61
     devDependencies:
-      '@agentic-code/config-eslint':
+      '@roo-code/config-eslint':
         specifier: workspace:^
         version: link:../config-eslint
-      '@agentic-code/config-typescript':
+      '@roo-code/config-typescript':
         specifier: workspace:^
         version: link:../config-typescript
       '@types/node':
@@ -663,18 +669,6 @@ importers:
 
   src:
     dependencies:
-      '@agentic-code/cloud':
-        specifier: workspace:^
-        version: link:../packages/cloud
-      '@agentic-code/ipc':
-        specifier: workspace:^
-        version: link:../packages/ipc
-      '@agentic-code/telemetry':
-        specifier: workspace:^
-        version: link:../packages/telemetry
-      '@agentic-code/types':
-        specifier: workspace:^
-        version: link:../packages/types
       '@anthropic-ai/bedrock-sdk':
         specifier: ^0.10.2
         version: 0.10.4
@@ -705,6 +699,18 @@ importers:
       '@qdrant/js-client-rest':
         specifier: ^1.14.0
         version: 1.14.0(typescript@5.8.3)
+      '@roo-code/cloud':
+        specifier: workspace:^
+        version: link:../packages/cloud
+      '@roo-code/ipc':
+        specifier: workspace:^
+        version: link:../packages/ipc
+      '@roo-code/telemetry':
+        specifier: workspace:^
+        version: link:../packages/telemetry
+      '@roo-code/types':
+        specifier: workspace:^
+        version: link:../packages/types
       '@vscode/codicons':
         specifier: ^0.0.36
         version: 0.0.36
@@ -886,13 +892,13 @@ importers:
         specifier: ^3.25.61
         version: 3.25.61
     devDependencies:
-      '@agentic-code/build':
+      '@roo-code/build':
         specifier: workspace:^
         version: link:../packages/build
-      '@agentic-code/config-eslint':
+      '@roo-code/config-eslint':
         specifier: workspace:^
         version: link:../packages/config-eslint
-      '@agentic-code/config-typescript':
+      '@roo-code/config-typescript':
         specifier: workspace:^
         version: link:../packages/config-typescript
       '@types/clone-deep':
@@ -994,9 +1000,6 @@ importers:
 
   webview-ui:
     dependencies:
-      '@agentic-code/types':
-        specifier: workspace:^
-        version: link:../packages/types
       '@radix-ui/react-alert-dialog':
         specifier: ^1.1.6
         version: 1.1.13(@types/react-dom@18.3.7(@types/react@18.3.23))(@types/react@18.3.23)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -1039,6 +1042,9 @@ importers:
       '@radix-ui/react-tooltip':
         specifier: ^1.1.8
         version: 1.2.6(@types/react-dom@18.3.7(@types/react@18.3.23))(@types/react@18.3.23)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      '@roo-code/types':
+        specifier: workspace:^
+        version: link:../packages/types
       '@tailwindcss/vite':
         specifier: ^4.0.0
         version: 4.1.6(vite@6.3.6(@types/node@20.17.57)(jiti@2.4.2)(lightningcss@1.30.1)(tsx@4.19.4)(yaml@2.8.0))
@@ -1190,10 +1196,10 @@ importers:
         specifier: ^3.25.61
         version: 3.25.61
     devDependencies:
-      '@agentic-code/config-eslint':
+      '@roo-code/config-eslint':
         specifier: workspace:^
         version: link:../packages/config-eslint
-      '@agentic-code/config-typescript':
+      '@roo-code/config-typescript':
         specifier: workspace:^
         version: link:../packages/config-typescript
       '@testing-library/jest-dom':
@@ -3968,6 +3974,9 @@ packages:
 
   '@types/babel__traverse@7.20.7':
     resolution: {integrity: sha512-dkO5fhS7+/oos4ciWxyEyjWe48zmG6wbCheo/G2ZnHx4fs3EU6YC6UM8rk56gAjNJ9P3MTH2jo5jb92/K6wbng==}
+
+  '@types/better-sqlite3@7.6.13':
+    resolution: {integrity: sha512-NMv9ASNARoKksWtsq/SHakpYAYnhBrQgGD8zkLYk/jaK8jUGn08CfEdTRgYhMypUQAfzSP8W6gNLe0q19/t4VA==}
 
   '@types/chai@5.2.2':
     resolution: {integrity: sha512-8kB30R7Hwqf40JPiKhVzodJs2Qc1ZJ5zuT3uzw5Hq/dhNCl3G3l83jfpdI1e20BP348+fV7VIL/+FxaXkqBmWg==}
@@ -13865,6 +13874,10 @@ snapshots:
     dependencies:
       '@babel/types': 7.27.1
 
+  '@types/better-sqlite3@7.6.13':
+    dependencies:
+      '@types/node': 24.2.1
+
   '@types/chai@5.2.2':
     dependencies:
       '@types/deep-eql': 4.0.2
@@ -14748,7 +14761,6 @@ snapshots:
       prebuild-install: 7.1.3
     transitivePeerDependencies:
       - bare-buffer
-    optional: true
 
   big-integer@1.6.52: {}
 
@@ -14764,7 +14776,6 @@ snapshots:
   bindings@1.5.0:
     dependencies:
       file-uri-to-path: 1.0.0
-    optional: true
 
   bl@4.1.0:
     dependencies:
@@ -15500,12 +15511,10 @@ snapshots:
   decompress-response@6.0.0:
     dependencies:
       mimic-response: 3.1.0
-    optional: true
 
   deep-eql@5.0.2: {}
 
-  deep-extend@0.6.0:
-    optional: true
+  deep-extend@0.6.0: {}
 
   deep-is@0.1.4: {}
 
@@ -15635,9 +15644,10 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  drizzle-orm@0.44.1(@libsql/client@0.15.8)(@types/pg@8.15.5)(better-sqlite3@11.10.0)(gel@2.1.0)(pg@8.16.3)(postgres@3.4.7):
+  drizzle-orm@0.44.1(@libsql/client@0.15.8)(@types/better-sqlite3@7.6.13)(@types/pg@8.15.5)(better-sqlite3@11.10.0)(gel@2.1.0)(pg@8.16.3)(postgres@3.4.7):
     optionalDependencies:
       '@libsql/client': 0.15.8
+      '@types/better-sqlite3': 7.6.13
       '@types/pg': 8.15.5
       better-sqlite3: 11.10.0
       gel: 2.1.0
@@ -16194,8 +16204,7 @@ snapshots:
 
   exenv-es6@1.1.1: {}
 
-  expand-template@2.0.3:
-    optional: true
+  expand-template@2.0.3: {}
 
   expect-type@1.2.1: {}
 
@@ -16389,8 +16398,7 @@ snapshots:
     dependencies:
       flat-cache: 4.0.1
 
-  file-uri-to-path@1.0.0:
-    optional: true
+  file-uri-to-path@1.0.0: {}
 
   fill-range@7.1.1:
     dependencies:
@@ -16640,8 +16648,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  github-from-package@0.0.0:
-    optional: true
+  github-from-package@0.0.0: {}
 
   glob-parent@5.1.2:
     dependencies:
@@ -17012,8 +17019,7 @@ snapshots:
 
   inherits@2.0.4: {}
 
-  ini@1.3.8:
-    optional: true
+  ini@1.3.8: {}
 
   inline-style-parser@0.1.1: {}
 
@@ -18341,8 +18347,7 @@ snapshots:
 
   mimic-function@5.0.1: {}
 
-  mimic-response@3.1.0:
-    optional: true
+  mimic-response@3.1.0: {}
 
   min-indent@1.0.1: {}
 
@@ -18376,8 +18381,7 @@ snapshots:
 
   mitt@3.0.1: {}
 
-  mkdirp-classic@0.5.3:
-    optional: true
+  mkdirp-classic@0.5.3: {}
 
   mkdirp@0.5.6:
     dependencies:
@@ -18464,8 +18468,7 @@ snapshots:
 
   nanoid@3.3.11: {}
 
-  napi-build-utils@2.0.0:
-    optional: true
+  napi-build-utils@2.0.0: {}
 
   natural-compare@1.4.0: {}
 
@@ -18520,7 +18523,6 @@ snapshots:
   node-abi@3.75.0:
     dependencies:
       semver: 7.7.2
-    optional: true
 
   node-addon-api@4.3.0:
     optional: true
@@ -19124,7 +19126,6 @@ snapshots:
       tunnel-agent: 0.6.0
     transitivePeerDependencies:
       - bare-buffer
-    optional: true
 
   prelude-ls@1.2.1: {}
 
@@ -19299,7 +19300,6 @@ snapshots:
       ini: 1.3.8
       minimist: 1.2.8
       strip-json-comments: 2.0.1
-    optional: true
 
   react-cookie-consent@9.0.0(react@18.3.1):
     dependencies:
@@ -19998,15 +19998,13 @@ snapshots:
 
   signal-exit@4.1.0: {}
 
-  simple-concat@1.0.1:
-    optional: true
+  simple-concat@1.0.1: {}
 
   simple-get@4.0.1:
     dependencies:
       decompress-response: 6.0.0
       once: 1.4.0
       simple-concat: 1.0.1
-    optional: true
 
   simple-git@3.27.0:
     dependencies:
@@ -20286,8 +20284,7 @@ snapshots:
     dependencies:
       min-indent: 1.0.1
 
-  strip-json-comments@2.0.1:
-    optional: true
+  strip-json-comments@2.0.1: {}
 
   strip-json-comments@3.1.1: {}
 
@@ -20609,7 +20606,6 @@ snapshots:
   tunnel-agent@0.6.0:
     dependencies:
       safe-buffer: 5.2.1
-    optional: true
 
   tunnel@0.0.6: {}
 

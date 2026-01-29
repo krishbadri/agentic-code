@@ -1,7 +1,7 @@
 import { Anthropic } from "@anthropic-ai/sdk"
 import OpenAI from "openai"
 
-import { deepInfraDefaultModelId, deepInfraDefaultModelInfo } from "@agentic-code/types"
+import { deepInfraDefaultModelId, deepInfraDefaultModelInfo } from "@roo-code/types"
 
 import type { ApiHandlerOptions } from "../../shared/api"
 import { calculateApiCostOpenAI } from "../../shared/cost"

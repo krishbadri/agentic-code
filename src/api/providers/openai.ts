@@ -8,7 +8,7 @@ import {
 	openAiModelInfoSaneDefaults,
 	DEEP_SEEK_DEFAULT_TEMPERATURE,
 	OPENAI_AZURE_AI_INFERENCE_PATH,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import type { ApiHandlerOptions } from "../../shared/api"
 
@@ -25,6 +25,8 @@ import { BaseProvider } from "./base-provider"
 import type { SingleCompletionHandler, ApiHandlerCreateMessageMetadata } from "../index"
 import { getApiRequestTimeout } from "./utils/timeout-config"
 import { handleOpenAIError } from "./utils/openai-error-handler"
+import { maybeVcrWrapStream, type VcrRequestDescriptor } from "../vcr/recordReplay"
+import { isVcrEnabled } from "../vcr/vcrConfig"
 
 // TODO: Rename this to OpenAICompatibleHandler. Also, I think the
 // `OpenAINativeHandler` can subclass from this, since it's obviously
@@ -177,6 +179,23 @@ export class OpenAiHandler extends BaseProvider implements SingleCompletionHandl
 				)
 			} catch (error) {
 				throw handleOpenAIError(error, this.providerName)
+			}
+
+			// Wrap stream with VCR if enabled
+			if (isVcrEnabled()) {
+				const descriptor: VcrRequestDescriptor = {
+					providerName: this.providerName,
+					model: modelId,
+					endpoint: "openai-chat",
+					params: {
+						messages: convertedMessages,
+						temperature: requestOptions.temperature ?? undefined,
+						max_tokens: requestOptions.max_tokens ?? undefined,
+						stream: requestOptions.stream,
+						stream_options: requestOptions.stream_options,
+					},
+				}
+				stream = (await maybeVcrWrapStream(descriptor, stream)) as typeof stream
 			}
 
 			const matcher = new XmlMatcher(

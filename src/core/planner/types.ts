@@ -1,12 +1,12 @@
 /**
  * Planner Types
  *
- * Re-exports the canonical SubTransaction, Step, and Plan types from @agentic-code/types.
+ * Re-exports the canonical SubTransaction, Step, and Plan types from @roo-code/types.
  * Also defines planner-specific result types.
  */
 
 // Re-export canonical types - there is ONE SubTransaction type
-export type { SubTransaction, Step, Plan } from "@agentic-code/types"
+export type { SubTransaction, Step, Plan } from "@roo-code/types"
 
 /**
  * Result of a child task execution

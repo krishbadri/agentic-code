@@ -33,8 +33,20 @@ Otherwise, if you have not completed the task and do not need additional informa
 	tooManyMistakes: (feedback?: string) =>
 		`You seem to be having trouble proceeding. The user has provided the following feedback to help guide you:\n<feedback>\n${feedback}\n</feedback>`,
 
-	missingToolParameterError: (paramName: string) =>
-		`Missing value for required parameter '${paramName}'. Please retry with complete response.\n\n${toolUseInstructionsReminder}`,
+	missingToolParameterError: (paramName: string, toolName?: string) => {
+		let specificExample = ""
+		
+		// Provide tool-specific examples for common tools
+		if (toolName === "search_files" && paramName === "path") {
+			specificExample = `\n\n⚠️ SPECIFIC FIX FOR search_files:\nThe <path> parameter is REQUIRED. Use "." for workspace root if unsure.\n\n✅ CORRECT FORMAT:\n<search_files>\n<path>.</path>\n<regex>.*</regex>\n<file_pattern>*test*.py</file_pattern>\n</search_files>\n\n❌ WRONG (missing path):\n<search_files>\n<regex>.*</regex>\n</search_files>`
+		} else if (toolName === "read_file" && (paramName === "path" || paramName.includes("args"))) {
+			specificExample = `\n\n⚠️ SPECIFIC FIX FOR read_file:\nThe <args> parameter is REQUIRED and must contain <file><path>...</path></file> structure.\n\n✅ CORRECT FORMAT:\n<read_file>\n<args>\n  <file>\n    <path>README.md</path>\n  </file>\n</args>\n</read_file>\n\n❌ WRONG (missing args or file structure):\n<read_file>\n<path>README.md</path>\n</read_file>\n\n❌ WRONG (missing file wrapper):\n<read_file>\n<args>\n  <path>README.md</path>\n</args>\n</read_file>`
+		} else if (toolName && paramName) {
+			specificExample = `\n\n⚠️ FIX: Add the missing <${paramName}> parameter inside your <${toolName}> XML tag.`
+		}
+		
+		return `Missing value for required parameter '${paramName}'. Please retry with complete response.${specificExample}\n\n${toolUseInstructionsReminder}`
+	},
 
 	lineCountTruncationError: (actualLineCount: number, isNewFile: boolean, diffStrategyEnabled: boolean = false) => {
 		const truncationMessage = `Note: Your response may have been truncated because it exceeded your output limit. You wrote ${actualLineCount} lines of content, but the line_count parameter was either missing or not included in your response.`

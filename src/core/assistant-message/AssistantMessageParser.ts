@@ -1,4 +1,4 @@
-import { type ToolName, toolNames } from "@agentic-code/types"
+import { type ToolName, toolNames } from "@roo-code/types"
 import { TextContent, ToolUse, ToolParamName, toolParamNames } from "../../shared/tools"
 import { AssistantMessageContent } from "./parseAssistantMessage"
 
@@ -17,6 +17,8 @@ export class AssistantMessageParser {
 	private readonly MAX_ACCUMULATOR_SIZE = 1024 * 1024 // 1MB limit
 	private readonly MAX_PARAM_LENGTH = 1024 * 100 // 100KB per parameter limit
 	private accumulator = ""
+	// Fix #5: Track validation errors for hard constraint injection
+	private validationErrors: Array<{ tool: string; code: string; message: string }> = []
 
 	/**
 	 * Initialize a new AssistantMessageParser instance.
@@ -37,6 +39,22 @@ export class AssistantMessageParser {
 		this.currentParamName = undefined
 		this.currentParamValueStartIndex = 0
 		this.accumulator = ""
+		this.validationErrors = []
+	}
+	
+	/**
+	 * Get validation errors detected during parsing
+	 * Fix #5: Returns validation errors that should trigger hard constraint injection
+	 */
+	public getValidationErrors(): Array<{ tool: string; code: string; message: string }> {
+		return [...this.validationErrors]
+	}
+	
+	/**
+	 * Clear validation errors (called after handling them)
+	 */
+	public clearValidationErrors(): void {
+		this.validationErrors = []
 	}
 
 	/**
@@ -100,6 +118,71 @@ export class AssistantMessageParser {
 				if (currentToolValue.endsWith(toolUseClosingTag)) {
 					// End of a tool use.
 					this.currentToolUse.partial = false
+
+					// Fix #5: Validate read_file calls before emitting tool_use object
+					if (this.currentToolUse.name === "read_file") {
+						// Check for path in args structure (new format) or legacy path
+						const argsXml = this.currentToolUse.params.args
+						const legacyPath = this.currentToolUse.params.path
+						
+						let hasValidPath = false
+						
+						// Check new format: <args><file><path>...</path></file></args>
+						if (argsXml && typeof argsXml === "string") {
+							const pathMatch = argsXml.match(/<file>.*?<path>([^<]+)<\/path>/s)
+							if (pathMatch && pathMatch[1]?.trim()) {
+								hasValidPath = true
+							}
+						}
+						
+						// Check legacy format: <path>...</path>
+						if (!hasValidPath && legacyPath && typeof legacyPath === "string" && legacyPath.trim()) {
+							hasValidPath = true
+						}
+						
+						if (!hasValidPath) {
+							// Fix #5: Track validation error for hard constraint injection
+							this.validationErrors.push({
+								tool: "read_file",
+								code: "VALIDATION_ERROR",
+								message: "Missing required attribute: path",
+							})
+							
+							// Reject empty read_file call - emit validation error as text instead
+							const validationError = `<tool_result tool="read_file" status="error" code="VALIDATION_ERROR" retryable="true">
+  <message>Missing required attribute: path</message>
+  <expected_call><![CDATA[<read_file>
+<args>
+  <file>
+    <path>src/index.ts</path>
+  </file>
+</args>
+</read_file>]]></expected_call>
+  <recovery><![CDATA[If you don't know the path, call <list_files><path>.</path></list_files> or <search_files><path>.</path><regex>.*</regex></search_files> first.]]></recovery>
+</tool_result>`
+							
+							// Remove the invalid tool_use from contentBlocks
+							const toolUseIndex = this.contentBlocks.indexOf(this.currentToolUse)
+							if (toolUseIndex !== -1) {
+								this.contentBlocks.splice(toolUseIndex, 1)
+							}
+							
+							// Add validation error as text content
+							if (!this.currentTextContent) {
+								this.currentTextContent = {
+									type: "text",
+									content: validationError,
+									partial: false,
+								}
+								this.contentBlocks.push(this.currentTextContent)
+							} else {
+								this.currentTextContent.content = (this.currentTextContent.content || "") + "\n\n" + validationError
+							}
+							
+							this.currentToolUse = undefined
+							continue
+						}
+					}
 
 					this.currentToolUse = undefined
 					continue

@@ -12,7 +12,7 @@ import {
 	type VerbosityLevel,
 	type ReasoningEffortWithMinimal,
 	type ServiceTier,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import type { ApiHandlerOptions } from "../../shared/api"
 

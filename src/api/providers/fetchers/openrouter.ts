@@ -8,7 +8,7 @@ import {
 	OPEN_ROUTER_REASONING_BUDGET_MODELS,
 	OPEN_ROUTER_REQUIRED_REASONING_BUDGET_MODELS,
 	anthropicModels,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import type { ApiHandlerOptions } from "../../../shared/api"
 import { parseApiPrice } from "../../../shared/cost"
@@ -95,6 +95,18 @@ type OpenRouterModelEndpointsResponse = z.infer<typeof openRouterModelEndpointsR
  * getOpenRouterModels
  */
 
+const redactSensitive = (value: string): string =>
+	value
+		.replace(/sk-[a-zA-Z0-9_-]{10,}/g, "sk-***REDACTED***")
+		.replace(/gsk_[a-zA-Z0-9_-]{10,}/g, "gsk_***REDACTED***")
+		.replace(/Bearer\s+[a-zA-Z0-9._-]{10,}/gi, "Bearer ***REDACTED***")
+
+const formatSnippet = (value: unknown, maxLength = 2000): string => {
+	const raw = typeof value === "string" ? value : JSON.stringify(value, null, 2)
+	const redacted = redactSensitive(raw)
+	return redacted.length > maxLength ? `${redacted.slice(0, maxLength)}...(truncated)` : redacted
+}
+
 export async function getOpenRouterModels(options?: ApiHandlerOptions): Promise<Record<string, ModelInfo>> {
 	const models: Record<string, ModelInfo> = {}
 	const baseURL = options?.openRouterBaseUrl || "https://openrouter.ai/api/v1"
@@ -105,7 +117,12 @@ export async function getOpenRouterModels(options?: ApiHandlerOptions): Promise<
 		const data = result.success ? result.data.data : response.data.data
 
 		if (!result.success) {
-			console.error("OpenRouter models response is invalid", result.error.format())
+			console.error("OpenRouter models response is invalid", {
+				status: response.status,
+				url: `${baseURL}/models`,
+				body: formatSnippet(response.data),
+				error: result.error.format(),
+			})
 		}
 
 		for (const model of data) {
@@ -126,9 +143,18 @@ export async function getOpenRouterModels(options?: ApiHandlerOptions): Promise<
 			})
 		}
 	} catch (error) {
-		console.error(
-			`Error fetching OpenRouter models: ${JSON.stringify(error, Object.getOwnPropertyNames(error), 2)}`,
-		)
+		if (axios.isAxiosError(error)) {
+			console.error("Error fetching OpenRouter models (axios)", {
+				status: error.response?.status,
+				url: error.config?.url,
+				body: formatSnippet(error.response?.data),
+				message: error.message,
+			})
+		} else {
+			console.error(
+				`Error fetching OpenRouter models: ${JSON.stringify(error, Object.getOwnPropertyNames(error), 2)}`,
+			)
+		}
 	}
 
 	return models
@@ -151,7 +177,12 @@ export async function getOpenRouterModelEndpoints(
 		const data = result.success ? result.data.data : response.data.data
 
 		if (!result.success) {
-			console.error("OpenRouter model endpoints response is invalid", result.error.format())
+			console.error("OpenRouter model endpoints response is invalid", {
+				status: response.status,
+				url: `${baseURL}/models/${modelId}/endpoints`,
+				body: formatSnippet(response.data),
+				error: result.error.format(),
+			})
 		}
 
 		const { id, architecture, endpoints } = data
@@ -171,9 +202,18 @@ export async function getOpenRouterModelEndpoints(
 			})
 		}
 	} catch (error) {
-		console.error(
-			`Error fetching OpenRouter model endpoints: ${JSON.stringify(error, Object.getOwnPropertyNames(error), 2)}`,
-		)
+		if (axios.isAxiosError(error)) {
+			console.error("Error fetching OpenRouter model endpoints (axios)", {
+				status: error.response?.status,
+				url: error.config?.url,
+				body: formatSnippet(error.response?.data),
+				message: error.message,
+			})
+		} else {
+			console.error(
+				`Error fetching OpenRouter model endpoints: ${JSON.stringify(error, Object.getOwnPropertyNames(error), 2)}`,
+			)
+		}
 	}
 
 	return models

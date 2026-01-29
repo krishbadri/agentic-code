@@ -7,7 +7,7 @@ import {
 	OPENROUTER_DEFAULT_PROVIDER_NAME,
 	OPEN_ROUTER_PROMPT_CACHING_MODELS,
 	DEEP_SEEK_DEFAULT_TEMPERATURE,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import type { ApiHandlerOptions, ModelRecord } from "../../shared/api"
 
@@ -94,6 +94,14 @@ export class OpenRouterHandler extends BaseProvider implements SingleCompletionH
 
 		const baseURL = this.options.openRouterBaseUrl || "https://openrouter.ai/api/v1"
 		const apiKey = this.options.openRouterApiKey ?? "not-provided"
+		
+		// Log API key status for debugging (sanitized)
+		if (apiKey === "not-provided") {
+			console.warn(`[OpenRouterHandler] WARNING: API key not provided. Options keys: ${Object.keys(options).join(", ")}`)
+		} else {
+			const sanitized = apiKey.length > 12 ? `${apiKey.substring(0, 8)}...${apiKey.substring(apiKey.length - 4)}` : "***REDACTED***"
+			console.log(`[OpenRouterHandler] Initialized with API key: ${sanitized}`)
+		}
 
 		this.client = new OpenAI({ baseURL, apiKey, defaultHeaders: DEFAULT_HEADERS })
 	}

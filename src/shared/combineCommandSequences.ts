@@ -1,4 +1,4 @@
-import type { ClineMessage } from "@agentic-code/types"
+import type { ClineMessage } from "@roo-code/types"
 
 import { safeJsonParse } from "./safeJsonParse"
 

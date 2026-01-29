@@ -1,7 +1,7 @@
 import pWaitFor from "p-wait-for"
 import * as vscode from "vscode"
 
-import { TelemetryService } from "@agentic-code/telemetry"
+import { TelemetryService } from "@roo-code/telemetry"
 import { ControlPlaneCheckpointService } from "../../services/checkpoints/ControlPlaneCheckpointService"
 
 import { Task } from "../task/Task"
@@ -63,13 +63,13 @@ export async function getCheckpointService(
 		const txMode =
 			cfg.get<boolean>("roo.experimental.transactionalMode") ||
 			cfg.get<boolean>("roo-cline.experimental.transactionalMode")
-		const cpPort = provider?.context.globalState.get<number>("roo.cpPort")
+		const cpPort = provider?.context.globalState?.get<number>("roo.cpPort")
 
 		// If transactional mode is enabled and Control-Plane is running, use ControlPlaneCheckpointService
 		if (txMode && cpPort) {
 			try {
 				log(`[Task#getCheckpointService] Using Control-Plane checkpoint service (port ${cpPort})`)
-				const txId = provider?.context.globalState.get<string>("roo.current_tx_id")
+				const txId = provider?.context.globalState?.get<string>("roo.current_tx_id")
 				if (!txId) {
 					log("[Task#getCheckpointService] No transaction ID, creating new one")
 					// Will be set later when transaction begins

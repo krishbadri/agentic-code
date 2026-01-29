@@ -12,6 +12,7 @@ const mockDisposable = {
 const mockUri = {
 	file: (path) => ({ fsPath: path, path, scheme: "file" }),
 	parse: (path) => ({ fsPath: path, path, scheme: "file" }),
+	joinPath: (...parts) => ({ fsPath: parts.map((p) => (p?.fsPath ? p.fsPath : String(p))).join("/"), path: "", scheme: "file" }),
 }
 
 const mockRange = class {
@@ -40,8 +41,9 @@ export const workspace = {
 	workspaceFolders: [],
 	getWorkspaceFolder: () => null,
 	onDidChangeWorkspaceFolders: () => mockDisposable,
-	getConfiguration: () => ({
-		get: () => null,
+	getConfiguration: (_section) => ({
+		get: (_key, defaultValue) => defaultValue ?? null,
+		update: () => Promise.resolve(),
 	}),
 	createFileSystemWatcher: () => ({
 		onDidCreate: () => mockDisposable,
@@ -62,6 +64,14 @@ export const window = {
 	showErrorMessage: () => Promise.resolve(),
 	showWarningMessage: () => Promise.resolve(),
 	showInformationMessage: () => Promise.resolve(),
+	createStatusBarItem: () => ({
+		text: "",
+		tooltip: "",
+		command: undefined,
+		show: () => {},
+		hide: () => {},
+		dispose: () => {},
+	}),
 	createOutputChannel: () => ({
 		appendLine: () => {},
 		append: () => {},
@@ -87,6 +97,10 @@ export const window = {
 export const commands = {
 	registerCommand: () => mockDisposable,
 	executeCommand: () => Promise.resolve(),
+}
+
+export const chat = {
+	registerChatParticipant: () => mockDisposable,
 }
 
 export const languages = {
@@ -137,6 +151,11 @@ export const OverviewRulerLane = {
 	Full: 7,
 }
 
+export const StatusBarAlignment = {
+	Left: 1,
+	Right: 2,
+}
+
 export const CodeAction = class {
 	constructor(title, kind) {
 		this.title = title
@@ -156,6 +175,7 @@ export default {
 	workspace,
 	window,
 	commands,
+	chat,
 	languages,
 	extensions,
 	env,
@@ -168,6 +188,7 @@ export default {
 	FileType,
 	DiagnosticSeverity,
 	OverviewRulerLane,
+	StatusBarAlignment,
 	EventEmitter,
 	CodeAction,
 	CodeActionKind,

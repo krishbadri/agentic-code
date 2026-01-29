@@ -6,7 +6,7 @@ import DismissibleUpsell from "@src/components/common/DismissibleUpsell"
 import { FoldVertical, ChevronUp, ChevronDown } from "lucide-react"
 import prettyBytes from "pretty-bytes"
 
-import type { ClineMessage } from "@agentic-code/types"
+import type { ClineMessage } from "@roo-code/types"
 
 import { getModelMaxOutputTokens } from "@roo/api"
 import { findLastIndex } from "@roo/array"

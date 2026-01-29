@@ -1,4 +1,4 @@
-import type { ExperimentId } from "@agentic-code/types"
+import type { ExperimentId } from "@roo-code/types"
 
 import { ExtensionStateContextType } from "@/context/ExtensionStateContext"
 

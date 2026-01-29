@@ -20,8 +20,26 @@ export function handleOpenAIError(error: unknown, providerName: string): Error {
 			return new Error(i18n.t("common:errors.api.invalidKeyInvalidChars"))
 		}
 
-		// For other Error instances, wrap with provider-specific prefix
-		return new Error(`${providerName} completion error: ${msg}`)
+		// For other Error instances, wrap with provider-specific prefix and preserve details
+		const wrapped = new Error(`${providerName} completion error: ${msg}`, { cause: error })
+		const copyKeys = [
+			"status",
+			"statusCode",
+			"response",
+			"requestId",
+			"request_id",
+			"headers",
+			"error",
+			"code",
+			"name",
+			"$metadata",
+		]
+		for (const key of copyKeys) {
+			if ((error as any)[key] !== undefined) {
+				;(wrapped as any)[key] = (error as any)[key]
+			}
+		}
+		return wrapped
 	}
 
 	// Non-Error: wrap with provider-specific prefix

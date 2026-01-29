@@ -1,5 +1,5 @@
 import type { Task } from "../task/Task"
-import type { SubTransaction } from "@agentic-code/types"
+import type { SubTransaction } from "@roo-code/types"
 import { getCheckpointService } from "./index"
 import { getWorkspacePath } from "../../utils/path"
 import crypto from "crypto"

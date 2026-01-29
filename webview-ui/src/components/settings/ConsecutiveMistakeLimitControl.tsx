@@ -1,7 +1,7 @@
 import React, { useCallback } from "react"
 import { Slider } from "@/components/ui"
 import { useAppTranslation } from "@/i18n/TranslationContext"
-import { DEFAULT_CONSECUTIVE_MISTAKE_LIMIT } from "@agentic-code/types"
+import { DEFAULT_CONSECUTIVE_MISTAKE_LIMIT } from "@roo-code/types"
 
 interface ConsecutiveMistakeLimitControlProps {
 	value: number

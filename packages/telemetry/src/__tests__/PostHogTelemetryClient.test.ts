@@ -5,7 +5,7 @@
 import * as vscode from "vscode"
 import { PostHog } from "posthog-node"
 
-import { type TelemetryPropertiesProvider, TelemetryEventName } from "@agentic-code/types"
+import { type TelemetryPropertiesProvider, TelemetryEventName } from "@roo-code/types"
 
 import { PostHogTelemetryClient } from "../PostHogTelemetryClient"
 

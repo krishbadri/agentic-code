@@ -26,70 +26,81 @@ vi.mock("path", () => ({
 }))
 
 // Mock vscode
-vi.mock("vscode", () => ({
-	workspace: {
-		applyEdit: vi.fn(),
-		onDidOpenTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
-		openTextDocument: vi.fn().mockResolvedValue({
-			isDirty: false,
-			save: vi.fn().mockResolvedValue(undefined),
-		}),
-		textDocuments: [],
-		fs: {
-			stat: vi.fn(),
+vi.mock("vscode", async () => {
+	const base = await vi.importActual<any>("vscode")
+	return {
+		...base,
+		workspace: {
+			...base.workspace,
+			// Ensure config lookups always exist (tests may exercise transactional-mode gates)
+			getConfiguration: vi.fn(() => ({ get: vi.fn(), update: vi.fn() })),
+			applyEdit: vi.fn(),
+			onDidOpenTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
+			openTextDocument: vi.fn().mockResolvedValue({
+				isDirty: false,
+				save: vi.fn().mockResolvedValue(undefined),
+			}),
+			textDocuments: [],
+			fs: {
+				...(base.workspace?.fs ?? {}),
+				stat: vi.fn(),
+			},
 		},
-	},
-	window: {
-		createTextEditorDecorationType: vi.fn(),
-		showTextDocument: vi.fn(),
-		onDidChangeVisibleTextEditors: vi.fn(() => ({ dispose: vi.fn() })),
-		tabGroups: {
-			all: [],
-			close: vi.fn(),
+		window: {
+			...base.window,
+			createTextEditorDecorationType: vi.fn(),
+			showTextDocument: vi.fn(),
+			onDidChangeVisibleTextEditors: vi.fn(() => ({ dispose: vi.fn() })),
+			tabGroups: {
+				all: [],
+				close: vi.fn(),
+			},
+			visibleTextEditors: [],
 		},
-		visibleTextEditors: [],
-	},
-	commands: {
-		executeCommand: vi.fn(),
-	},
-	languages: {
-		getDiagnostics: vi.fn(() => []),
-	},
-	DiagnosticSeverity: {
-		Error: 0,
-		Warning: 1,
-		Information: 2,
-		Hint: 3,
-	},
-	WorkspaceEdit: vi.fn().mockImplementation(() => ({
-		replace: vi.fn(),
-		delete: vi.fn(),
-	})),
-	ViewColumn: {
-		Active: 1,
-		Beside: 2,
-		One: 1,
-		Two: 2,
-		Three: 3,
-		Four: 4,
-		Five: 5,
-		Six: 6,
-		Seven: 7,
-		Eight: 8,
-		Nine: 9,
-	},
-	Range: vi.fn(),
-	Position: vi.fn(),
-	Selection: vi.fn(),
-	TextEditorRevealType: {
-		InCenter: 2,
-	},
-	TabInputTextDiff: class TabInputTextDiff {},
-	Uri: {
-		file: vi.fn((path) => ({ fsPath: path })),
-		parse: vi.fn((uri) => ({ with: vi.fn(() => ({})) })),
-	},
-}))
+		commands: {
+			...base.commands,
+			executeCommand: vi.fn(),
+		},
+		languages: {
+			...base.languages,
+			getDiagnostics: vi.fn(() => []),
+		},
+		DiagnosticSeverity: {
+			Error: 0,
+			Warning: 1,
+			Information: 2,
+			Hint: 3,
+		},
+		WorkspaceEdit: vi.fn().mockImplementation(() => ({
+			replace: vi.fn(),
+			delete: vi.fn(),
+		})),
+		ViewColumn: {
+			Active: 1,
+			Beside: 2,
+			One: 1,
+			Two: 2,
+			Three: 3,
+			Four: 4,
+			Five: 5,
+			Six: 6,
+			Seven: 7,
+			Eight: 8,
+			Nine: 9,
+		},
+		Range: vi.fn(),
+		Position: vi.fn(),
+		Selection: vi.fn(),
+		TextEditorRevealType: {
+			InCenter: 2,
+		},
+		TabInputTextDiff: class TabInputTextDiff {},
+		Uri: {
+			file: vi.fn((path) => ({ fsPath: path })),
+			parse: vi.fn((uri) => ({ with: vi.fn(() => ({})) })),
+		},
+	}
+})
 
 // Mock DecorationController
 vi.mock("../DecorationController", () => ({

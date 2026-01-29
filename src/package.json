@@ -81,7 +81,7 @@
 			},
 			{
 				"command": "roo.startControlPlaneHere",
-				"title": "Start Control-Plane Here",
+				"title": "Start Control-Plane Here (DEV)",
 				"category": "Roo"
 			},
 			{
@@ -414,7 +414,7 @@
 				"roo.experimental.plannerMode": {
 					"type": "boolean",
 					"default": true,
-					"description": "Enable multi-agent planner mode (analyzes tasks and executes sub-transactions in parallel). This is the core feature that enables the multi-agent framework."
+					"description": "Enable multi-agent planner mode (analyzes tasks and executes sub-transactions in parallel). This is the core feature that enables the multi-agent framework. REQUIRED by Transaction Agents Specification."
 				},
 				"roo-cline.experimental.plannerMode": {
 					"type": "boolean",

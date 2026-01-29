@@ -160,6 +160,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 
 		const tx_id = randomUUID()
 		try {
+			console.log(`[tx/begin] repoRoot: ${app.repoRoot}, cwd: ${process.cwd()}, body.base: ${body.base}`)
 			const git = new Git({ repoRoot: app.repoRoot })
 			const base_commit = await git.beginTx(tx_id, body.base)
 			const worktree_path = git.worktreePath(tx_id)
@@ -212,6 +213,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 				progress_baseline: progressBaseline,
 			})
 		} catch (e) {
+			console.error(`[tx/begin] Error:`, e)
 			return reply.code(500).send(errorResponse(e))
 		}
 	})
@@ -650,16 +652,20 @@ export function registerTxRoutes(app: FastifyInstance) {
 		try {
 			const git = new Git({ repoRoot: app.repoRoot })
 			const parentTxId = (req.params as any).tx_id
-			const subTxId = (req.params as any).sub_tx_id
+			const relativeSubTxId = (req.params as any).sub_tx_id
 			const base = body.base || parentTxId
 
-			const worktreePath = await git.beginSubTx(parentTxId, subTxId, base)
+			// Make sub_tx_id globally unique by prefixing with parent tx_id
+			// This ensures "st1" from tx-abc is different from "st1" from tx-def
+			const globalSubTxId = `${parentTxId}:${relativeSubTxId}`
+
+			const worktreePath = await git.beginSubTx(parentTxId, relativeSubTxId, base)
 
 			// Persist sub-transaction to database
 			if (app.db) {
 				const baseCommit = await git.revParse("HEAD", git.worktreePath(parentTxId))
 				await insertSubTransaction(app.db, {
-					sub_tx_id: subTxId,
+					sub_tx_id: globalSubTxId,
 					tx_id: parentTxId,
 					title: body.title,
 					description: body.description,
@@ -675,7 +681,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 
 			return reply.send({
 				worktree_path: worktreePath,
-				sub_tx_id: subTxId,
+				sub_tx_id: globalSubTxId,
 				parent_tx_id: parentTxId,
 			})
 		} catch (e) {
@@ -705,12 +711,14 @@ export function registerTxRoutes(app: FastifyInstance) {
 		try {
 			const git = new Git({ repoRoot: app.repoRoot })
 			const parentTxId = (req.params as any).tx_id
-			const subTxId = (req.params as any).sub_tx_id
+			const relativeSubTxId = (req.params as any).sub_tx_id
+			// Use globally unique sub_tx_id for database operations
+			const globalSubTxId = `${parentTxId}:${relativeSubTxId}`
 
 			// P0 CRITICAL: Check database for safety checks if not provided in request
 			let hasSafetyChecks = body.hasSafetyChecks
 			if (app.db && !hasSafetyChecks) {
-				const subTx = await getSubTransaction(app.db, subTxId)
+				const subTx = await getSubTransaction(app.db, globalSubTxId)
 				if (subTx?.safety_checks && subTx.safety_checks.length > 0) {
 					hasSafetyChecks = true
 				}
@@ -728,7 +736,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 				if (!body.safetyGate.ok) {
 					// Persist the failure
 					if (app.db) {
-						await updateSubTransactionStatus(app.db, subTxId, "ABORTED", undefined, {
+						await updateSubTransactionStatus(app.db, globalSubTxId, "ABORTED", undefined, {
 							kind: "SAFETY_FAIL",
 							message: `Failed at: ${body.safetyGate.failedAt}`,
 						})
@@ -742,12 +750,13 @@ export function registerTxRoutes(app: FastifyInstance) {
 			}
 
 			// R15, R17: Detect conflicts at merge time and abort/rollback on failure
-			const mergeResult = await git.mergeSubTx(parentTxId, subTxId)
+			// Git operations use the relative ID
+			const mergeResult = await git.mergeSubTx(parentTxId, relativeSubTxId)
 
 			if (!mergeResult.merged && mergeResult.conflict) {
 				// R17, R24: Abort and rollback conflicting work
 				if (app.db) {
-					await updateSubTransactionStatus(app.db, subTxId, "ABORTED", undefined, {
+					await updateSubTransactionStatus(app.db, globalSubTxId, "ABORTED", undefined, {
 						kind: "MERGE_CONFLICT",
 						message: mergeResult.conflict,
 					})
@@ -755,19 +764,19 @@ export function registerTxRoutes(app: FastifyInstance) {
 				return reply.code(409).send({
 					code: "MERGE_CONFLICT",
 					message: `Merge conflict detected: ${mergeResult.conflict}`,
-					sub_tx_id: subTxId,
+					sub_tx_id: globalSubTxId,
 				})
 			}
 
 			// Persist successful merge
 			if (app.db && mergeResult.merged) {
 				const endCommit = await git.revParse("HEAD", git.worktreePath(parentTxId))
-				await updateSubTransactionStatus(app.db, subTxId, "COMMITTED", endCommit)
+				await updateSubTransactionStatus(app.db, globalSubTxId, "COMMITTED", endCommit)
 			}
 
 			return reply.send({
 				merged: mergeResult.merged,
-				sub_tx_id: subTxId,
+				sub_tx_id: globalSubTxId,
 				parent_tx_id: parentTxId,
 				safetyGatePassed: body.safetyGate?.ok ?? null,
 			})
@@ -867,11 +876,13 @@ export function registerTxRoutes(app: FastifyInstance) {
 			.parse((req as any).body || {})
 
 		const parentTxId = (req.params as any).tx_id
-		const subTxId = (req.params as any).sub_tx_id
+		const relativeSubTxId = (req.params as any).sub_tx_id
+		// Use globally unique sub_tx_id for database operations
+		const globalSubTxId = `${parentTxId}:${relativeSubTxId}`
 
-		// Get the worktree path for this sub-transaction
+		// Get the worktree path for this sub-transaction (uses relative ID)
 		const git = new Git({ repoRoot: app.repoRoot })
-		const subWt = git.subTxWorktreePath(parentTxId, subTxId)
+		const subWt = git.subTxWorktreePath(parentTxId, relativeSubTxId)
 
 		interface SafetyCheckResult {
 			cmd: string
@@ -918,11 +929,11 @@ export function registerTxRoutes(app: FastifyInstance) {
 					passed: false,
 				})
 
-				// Persist results to database
+				// Persist results to database (use global sub_tx_id)
 				if (app.db) {
 					await insertSafetyCheckResults(
 						app.db,
-						subTxId,
+						globalSubTxId,
 						results.map((r) => ({
 							cmd: r.cmd,
 							exit_code: r.exitCode,
@@ -932,7 +943,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 							passed: r.passed,
 						})),
 					)
-					await insertSafetyGate(app.db, subTxId, { ok: false, failed_at: cmd })
+					await insertSafetyGate(app.db, globalSubTxId, { ok: false, failed_at: cmd })
 				}
 
 				// Stop on first failure - this is the safety gate
@@ -944,11 +955,11 @@ export function registerTxRoutes(app: FastifyInstance) {
 			}
 		}
 
-		// Persist successful results to database
+		// Persist successful results to database (use global sub_tx_id)
 		if (app.db) {
 			await insertSafetyCheckResults(
 				app.db,
-				subTxId,
+				globalSubTxId,
 				results.map((r) => ({
 					cmd: r.cmd,
 					exit_code: r.exitCode,
@@ -958,7 +969,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 					passed: r.passed,
 				})),
 			)
-			await insertSafetyGate(app.db, subTxId, { ok: true })
+			await insertSafetyGate(app.db, globalSubTxId, { ok: true })
 		}
 
 		// All checks passed

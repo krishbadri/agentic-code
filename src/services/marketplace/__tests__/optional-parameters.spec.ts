@@ -1,4 +1,4 @@
-import { mcpParameterSchema } from "@agentic-code/types"
+import { mcpParameterSchema } from "@roo-code/types"
 
 describe("Optional Parameters", () => {
 	describe("McpParameter Schema", () => {

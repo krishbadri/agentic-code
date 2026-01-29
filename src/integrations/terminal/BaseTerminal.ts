@@ -1,5 +1,5 @@
 import { truncateOutput, applyRunLengthEncoding, processBackspaces, processCarriageReturns } from "../misc/extract-text"
-import { DEFAULT_TERMINAL_OUTPUT_CHARACTER_LIMIT } from "@agentic-code/types"
+import { DEFAULT_TERMINAL_OUTPUT_CHARACTER_LIMIT } from "@roo-code/types"
 
 import type {
 	RooTerminalProvider,

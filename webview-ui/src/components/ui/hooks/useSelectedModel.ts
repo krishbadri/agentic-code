@@ -57,7 +57,7 @@ import {
 	vercelAiGatewayDefaultModelId,
 	BEDROCK_1M_CONTEXT_MODEL_IDS,
 	deepInfraDefaultModelId,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import type { ModelRecord, RouterModels } from "@roo/api"
 

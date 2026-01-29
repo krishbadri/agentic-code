@@ -7,6 +7,8 @@ You have access to a set of tools that are executed upon the user's approval. Yo
 
 # Tool Use Formatting
 
+⚠️ CRITICAL: Tools MUST be called using XML-style tags. Function-call syntax (like read_file([...])) will NOT work and will cause errors.
+
 Tool uses are formatted using XML-style tags. The tool name itself becomes the XML tag name. Each parameter is enclosed within its own set of tags. Here's the structure:
 
 <actual_tool_name>
@@ -14,6 +16,20 @@ Tool uses are formatted using XML-style tags. The tool name itself becomes the X
 <parameter2_name>value2</parameter2_name>
 ...
 </actual_tool_name>
+
+✅ CORRECT FORMAT:
+<read_file>
+<args>
+  <file>
+    <path>src/file.py</path>
+  </file>
+</args>
+</read_file>
+
+❌ WRONG FORMAT (will fail):
+read_file(["src/file.py"])
+read_file("src/file.py")
+read_file({path: "src/file.py"})
 
 Always use the actual tool name as the XML tag name for proper parsing and execution.`
 }

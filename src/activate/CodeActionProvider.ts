@@ -1,10 +1,10 @@
 import * as vscode from "vscode"
 
-import { CodeActionName, CodeActionId } from "@agentic-code/types"
-import { Package } from "../shared/package"
+import { CodeActionId, CodeActionName } from "@roo-code/types"
 
-import { getCodeActionCommand } from "../utils/commands"
+import { CONFIG_SECTION, LEGACY_CONFIG_SECTION } from "../constants/ids"
 import { EditorUtils } from "../integrations/editor/EditorUtils"
+import { getCodeActionCommand } from "../utils/commands"
 
 export const TITLES: Record<CodeActionName, string> = {
 	EXPLAIN: "Explain with Roo Code",
@@ -37,7 +37,13 @@ export class CodeActionProvider implements vscode.CodeActionProvider {
 		context: vscode.CodeActionContext,
 	): vscode.ProviderResult<(vscode.CodeAction | vscode.Command)[]> {
 		try {
-			if (!vscode.workspace.getConfiguration(Package.name).get<boolean>("enableCodeActions", true)) {
+			// Canonical settings section: "roo-cline"
+			// Keep the same get() default signature that tests (and prior behavior) expect.
+			const enableCodeActions = vscode.workspace
+				.getConfiguration(CONFIG_SECTION)
+				.get<boolean>("enableCodeActions", true)
+
+			if (!enableCodeActions) {
 				return []
 			}
 

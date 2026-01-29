@@ -7,7 +7,7 @@ import {
 	OrganizationSettings,
 	organizationSettingsSchema,
 	ORGANIZATION_ALLOW_ALL,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 export class StaticSettingsService implements SettingsService {
 	private settings: OrganizationSettings

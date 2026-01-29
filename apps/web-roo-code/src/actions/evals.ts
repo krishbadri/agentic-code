@@ -1,7 +1,7 @@
 "use server"
 
-import { getModelId, rooCodeSettingsSchema } from "@agentic-code/types"
-import { getRuns, getLanguageScores } from "@agentic-code/evals"
+import { getModelId, rooCodeSettingsSchema } from "@roo-code/types"
+import { getRuns, getLanguageScores } from "@roo-code/evals"
 
 import { formatScore } from "@/lib"
 

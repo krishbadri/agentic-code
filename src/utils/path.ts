@@ -106,7 +106,85 @@ export const toRelativePath = (filePath: string, cwd: string) => {
 	return filePath.endsWith("/") ? relativePath + "/" : relativePath
 }
 
+/**
+ * Detects the actual project root by searching for project indicators.
+ * If the workspace root doesn't contain project files, searches nested directories.
+ * This handles cases where VS Code opens a parent folder but the project is nested.
+ */
+async function detectProjectRoot(candidateRoot: string): Promise<string> {
+	const fs = await import("fs/promises")
+	
+	// Check if candidate root itself is a project root
+	const projectIndicators = ["pyproject.toml", "package.json", "setup.py", "requirements.txt"]
+	const hasProjectFile = await Promise.all(
+		projectIndicators.map((indicator) =>
+			fs.access(path.join(candidateRoot, indicator))
+				.then(() => true)
+				.catch(() => false),
+		),
+	).then((results) => results.some((r) => r))
+	
+	// Check for src/ or tests/ directories
+	let hasProjectStructure = false
+	try {
+		const entries = await fs.readdir(candidateRoot, { withFileTypes: true })
+		hasProjectStructure = entries.some(
+			(e) => e.isDirectory() && (e.name === "src" || e.name === "tests" || e.name === "test"),
+		)
+	} catch {
+		// Can't read directory
+	}
+	
+	if (hasProjectFile || hasProjectStructure) {
+		return candidateRoot
+	}
+	
+	// Search nested directories for project root
+	try {
+		const entries = await fs.readdir(candidateRoot, { withFileTypes: true })
+		const directories = entries.filter((e) => e.isDirectory())
+		
+		// Try each subdirectory
+		for (const dir of directories) {
+			const nestedPath = path.join(candidateRoot, dir.name)
+			const nestedRoot = await detectProjectRoot(nestedPath)
+			if (nestedRoot !== nestedPath) {
+				// Found a project root deeper
+				return nestedRoot
+			}
+			
+			// Check if this nested directory is a project root
+			const nestedHasProjectFile = await Promise.all(
+				projectIndicators.map((indicator) =>
+					fs.access(path.join(nestedPath, indicator))
+						.then(() => true)
+						.catch(() => false),
+				),
+			).then((results) => results.some((r) => r))
+			
+			if (nestedHasProjectFile) {
+				console.log(`[path] Detected nested project root: ${nestedPath}`)
+				return nestedPath
+			}
+		}
+	} catch {
+		// Can't search nested directories
+	}
+	
+	// No project root found, return original
+	return candidateRoot
+}
+
 export const getWorkspacePath = (defaultCwdPath = "") => {
+	// VERIFICATION-ONLY: If TEST_TORTURE_REPO_WORKSPACE is set, use it as the workspace root
+	// This ensures deterministic workspace root for torture repo e2e tests
+	if (process.env.TEST_TORTURE_REPO_WORKSPACE) {
+		const overridePath = process.env.TEST_TORTURE_REPO_WORKSPACE
+		// Normalize the path to handle any trailing slashes or path separators
+		const normalizedPath = path.normalize(overridePath).replace(/[\/\\]+$/, "")
+		return normalizedPath
+	}
+
 	const cwdPath = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath).at(0) || defaultCwdPath
 	const currentFileUri = vscode.window.activeTextEditor?.document.uri
 	if (currentFileUri) {
@@ -114,6 +192,15 @@ export const getWorkspacePath = (defaultCwdPath = "") => {
 		return workspaceFolder?.uri.fsPath || cwdPath
 	}
 	return cwdPath
+}
+
+/**
+ * Gets the workspace path with automatic detection of nested project roots.
+ * This is async because it may need to scan the filesystem.
+ */
+export async function getWorkspacePathWithDetection(defaultCwdPath = ""): Promise<string> {
+	const basePath = getWorkspacePath(defaultCwdPath)
+	return await detectProjectRoot(basePath)
 }
 
 export const getWorkspacePathForContext = (contextPath?: string): string => {
@@ -129,4 +216,65 @@ export const getWorkspacePathForContext = (contextPath?: string): string => {
 
 	// Fall back to current behavior
 	return getWorkspacePath()
+}
+
+/**
+ * Resolves a relative file path against the workspace root with fallback to nested project directory.
+ * This handles cases where VS Code opens a parent directory but the actual project is in a subdirectory.
+ * 
+ * @param workspaceRoot - The workspace root path
+ * @param relPath - Relative path from workspace root (e.g., "src/file.py")
+ * @returns Resolved absolute path, or null if file doesn't exist and no fallback found
+ */
+export async function resolveFilePathWithFallback(
+	workspaceRoot: string,
+	relPath: string,
+): Promise<string | null> {
+	const fs = await import("fs/promises")
+	
+	// First try: resolve against workspace root
+	const primaryPath = path.resolve(workspaceRoot, relPath)
+	try {
+		await fs.access(primaryPath)
+		return primaryPath
+	} catch {
+		// File not found at primary path
+	}
+	
+	// Fallback: if workspace root has exactly one child directory that looks like a project root,
+	// try resolving against that nested directory
+	try {
+		const entries = await fs.readdir(workspaceRoot, { withFileTypes: true })
+		const directories = entries.filter((e) => e.isDirectory())
+		
+		// Only try fallback if there's exactly one subdirectory
+		if (directories.length === 1) {
+			const nestedRoot = path.join(workspaceRoot, directories[0]!.name)
+			
+			// Check if nested root looks like a project (has common project indicators)
+			const projectIndicators = ["pyproject.toml", "package.json", "src", "tests", "test"]
+			const nestedEntries = await fs.readdir(nestedRoot, { withFileTypes: true })
+			const hasProjectIndicator = nestedEntries.some((e) => 
+				projectIndicators.some((indicator) => 
+					e.name === indicator || (e.isDirectory() && e.name === indicator)
+				)
+			)
+			
+			if (hasProjectIndicator) {
+				const fallbackPath = path.resolve(nestedRoot, relPath)
+				try {
+					await fs.access(fallbackPath)
+					console.log(`[path] Resolved ${relPath} via fallback: ${fallbackPath}`)
+					return fallbackPath
+				} catch {
+					// Fallback path also doesn't exist
+				}
+			}
+		}
+	} catch {
+		// Error reading directory - skip fallback
+	}
+	
+	// No fallback found, return primary path (caller will handle the error)
+	return primaryPath
 }

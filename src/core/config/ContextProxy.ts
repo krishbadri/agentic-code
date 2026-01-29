@@ -15,8 +15,8 @@ import {
 	providerSettingsSchema,
 	globalSettingsSchema,
 	isSecretStateKey,
-} from "@agentic-code/types"
-import { TelemetryService } from "@agentic-code/telemetry"
+} from "@roo-code/types"
+import { TelemetryService } from "@roo-code/telemetry"
 
 import { logger } from "../../utils/logging"
 

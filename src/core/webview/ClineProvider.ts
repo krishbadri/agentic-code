@@ -41,9 +41,11 @@ import {
 	DEFAULT_WRITE_DELAY_MS,
 	ORGANIZATION_ALLOW_ALL,
 	DEFAULT_MODES,
-} from "@agentic-code/types"
-import { TelemetryService } from "@agentic-code/telemetry"
-import { CloudService, BridgeOrchestrator, getRooCodeApiUrl } from "@agentic-code/cloud"
+	getApiProtocol,
+	getModelId,
+} from "@roo-code/types"
+import { TelemetryService } from "@roo-code/telemetry"
+import { CloudService, BridgeOrchestrator, getRooCodeApiUrl } from "@roo-code/cloud"
 
 import { Package } from "../../shared/package"
 import { findLast } from "../../shared/array"
@@ -90,7 +92,7 @@ import { Task } from "../task/Task"
 import { getSystemPromptFilePath } from "../prompts/sections/custom-system-prompt"
 
 import { webviewMessageHandler } from "./webviewMessageHandler"
-import type { ClineMessage } from "@agentic-code/types"
+import type { ClineMessage } from "@roo-code/types"
 import { readApiMessages, saveApiMessages, saveTaskMessages } from "../task-persistence"
 import { getNonce } from "./getNonce"
 import { getUri } from "./getUri"
@@ -2543,7 +2545,7 @@ export class ClineProvider
 		}
 
 		const {
-			apiConfiguration,
+			apiConfiguration: stateApiConfiguration,
 			organizationAllowList,
 			diffEnabled: enableDiff,
 			enableCheckpoints,
@@ -2553,17 +2555,60 @@ export class ClineProvider
 			remoteControlEnabled,
 		} = await this.getState()
 
+		// Merge configuration parameter with state - configuration parameter takes precedence
+		// This ensures that API keys and settings passed to createTask() override VS Code settings
+		// After setValues(), get fresh provider settings which includes secrets that were just set
+		const freshProviderSettings = this.contextProxy.getProviderSettings()
+		
+		// Build final API configuration: state -> fresh settings -> configuration parameter (last wins)
+		// This ensures configuration parameter (including API keys) always overrides VS Code settings
+		const apiConfiguration = {
+			...stateApiConfiguration,
+			...freshProviderSettings, // Get fresh provider settings after setValues() (includes secrets from cache)
+			// Configuration parameter fields override everything - extract ProviderSettings-compatible fields
+			...(configuration.apiProvider && { apiProvider: configuration.apiProvider }),
+			...(configuration.openRouterApiKey && { openRouterApiKey: configuration.openRouterApiKey }),
+			...(configuration.openRouterModelId && { openRouterModelId: configuration.openRouterModelId }),
+			...(configuration.openRouterBaseUrl && { openRouterBaseUrl: configuration.openRouterBaseUrl }),
+			...(configuration.openAiNativeApiKey && { openAiNativeApiKey: configuration.openAiNativeApiKey }),
+			...(configuration.apiModelId && { apiModelId: configuration.apiModelId }),
+			...(configuration.modelMaxTokens !== undefined && { modelMaxTokens: configuration.modelMaxTokens }),
+			...(configuration.includeMaxTokens !== undefined && { includeMaxTokens: configuration.includeMaxTokens }),
+		} as ProviderSettings
+
 		if (!ProfileValidator.isProfileAllowed(apiConfiguration, organizationAllowList)) {
 			throw new OrganizationAllowListViolationError(t("common:errors.violated_organization_allowlist"))
 		}
 
+		// Ensure subtask inherits parent's configuration
+		const inheritedApiConfiguration = parentTask
+			? parentTask.apiConfiguration
+			: apiConfiguration
+		const inheritedWorkspacePath = parentTask
+			? parentTask.workspacePath
+			: (options as any).workspacePath
+
+		// Logging: Track subtask creation and inheritance
+		if (process.env.ROO_DEBUG_TOOL_EXECUTION) {
+			const modelId = getModelId(inheritedApiConfiguration)
+			const apiProtocol = getApiProtocol(inheritedApiConfiguration.apiProvider, modelId)
+			this.log(
+				`[createTask] Creating ${parentTask ? "child" : "parent"} task - Provider: ${inheritedApiConfiguration.apiProvider}, Model: ${modelId}, Protocol: ${apiProtocol}, Workspace: ${inheritedWorkspacePath || "default"}`,
+			)
+			if (parentTask) {
+				this.log(
+					`[createTask] Subtask inheriting from parent - Parent provider: ${parentTask.apiConfiguration.apiProvider}, Parent model: ${getModelId(parentTask.apiConfiguration)}`,
+				)
+			}
+		}
+
 		const task = new Task({
 			provider: this,
-			apiConfiguration,
+			apiConfiguration: inheritedApiConfiguration, // Use inherited config
 			enableDiff,
 			enableCheckpoints,
 			fuzzyMatchThreshold,
-			consecutiveMistakeLimit: apiConfiguration.consecutiveMistakeLimit,
+			consecutiveMistakeLimit: inheritedApiConfiguration.consecutiveMistakeLimit,
 			task: text,
 			images,
 			experiments,
@@ -2573,6 +2618,7 @@ export class ClineProvider
 			onCreated: this.taskCreationCallback,
 			enableBridge: BridgeOrchestrator.isEnabled(cloudUserInfo, remoteControlEnabled),
 			initialTodos: options.initialTodos,
+			workspacePath: inheritedWorkspacePath, // Use inherited workspace
 			...options,
 		})
 

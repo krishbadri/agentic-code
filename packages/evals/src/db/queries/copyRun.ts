@@ -1,5 +1,7 @@
 import { eq } from "drizzle-orm"
-import type { NodePgDatabase } from "drizzle-orm/node-postgres"
+// import type { NodePgDatabase } from "drizzle-orm/node-postgres"
+import type { PostgresJsDatabase } from "drizzle-orm/postgres-js"
+
 
 import type { InsertRun, InsertTask, InsertTaskMetrics, InsertToolError } from "../schema.js"
 import { schema } from "../schema.js"
@@ -11,8 +13,9 @@ export const copyRun = async ({
 	targetDb,
 	runId,
 }: {
-	sourceDb: NodePgDatabase<typeof schema>
-	targetDb: NodePgDatabase<typeof schema>
+	sourceDb: PostgresJsDatabase<typeof schema>
+	targetDb: PostgresJsDatabase<typeof schema>
+
 	runId: number
 }) => {
 	const sourceRun = await sourceDb.query.runs.findFirst({

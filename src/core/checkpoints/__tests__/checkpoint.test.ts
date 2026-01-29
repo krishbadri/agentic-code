@@ -5,23 +5,35 @@ import { checkpointSave, checkpointRestore, checkpointDiff, getCheckpointService
 import * as vscode from "vscode"
 
 // Mock vscode
-vi.mock("vscode", () => ({
-	window: {
-		showErrorMessage: vi.fn(),
-		createTextEditorDecorationType: vi.fn(() => ({})),
-		showInformationMessage: vi.fn(),
-	},
-	Uri: {
-		file: vi.fn((path: string) => ({ fsPath: path })),
-		parse: vi.fn((uri: string) => ({ with: vi.fn(() => ({})) })),
-	},
-	commands: {
-		executeCommand: vi.fn(),
-	},
-}))
+vi.mock("vscode", async () => {
+	const base = await vi.importActual<any>("vscode")
+	return {
+		...base,
+		window: {
+			...(base.window ?? {}),
+			showErrorMessage: vi.fn(),
+			createTextEditorDecorationType: vi.fn(() => ({})),
+			showInformationMessage: vi.fn(),
+		},
+		workspace: {
+			...(base.workspace ?? {}),
+			// getCheckpointService reads transactional mode flags via workspace.getConfiguration()
+			getConfiguration: vi.fn(() => ({ get: vi.fn().mockReturnValue(false), update: vi.fn() })),
+		},
+		Uri: {
+			...(base.Uri ?? {}),
+			file: vi.fn((path: string) => ({ fsPath: path })),
+			parse: vi.fn((uri: string) => ({ with: vi.fn(() => ({})) })),
+		},
+		commands: {
+			...(base.commands ?? {}),
+			executeCommand: vi.fn(),
+		},
+	}
+})
 
 // Mock other dependencies
-vi.mock("@agentic-code/telemetry", () => ({
+vi.mock("@roo-code/telemetry", () => ({
 	TelemetryService: {
 		instance: {
 			captureCheckpointCreated: vi.fn(),
@@ -209,10 +221,10 @@ describe("Checkpoint functionality", () => {
 			})
 
 			expect(mockCheckpointService.restoreCheckpoint).toHaveBeenCalledWith("abc123")
-			expect(mockTask.overwriteApiConversationHistory).toHaveBeenCalledWith([
-				{ ts: 1, role: "user", content: [{ type: "text", text: "Message 1" }] },
-			])
-			expect(mockTask.overwriteClineMessages).toHaveBeenCalledWith([{ ts: 1, say: "user", text: "Message 1" }])
+			// AgentState (chat history, API history) is preserved during rollback
+			// Only SystemState (repo) is restored
+			expect(mockTask.overwriteApiConversationHistory).not.toHaveBeenCalled()
+			expect(mockTask.overwriteClineMessages).not.toHaveBeenCalled()
 			expect(mockProvider.cancelTask).toHaveBeenCalled()
 		})
 
@@ -225,14 +237,10 @@ describe("Checkpoint functionality", () => {
 			})
 
 			expect(mockCheckpointService.restoreCheckpoint).toHaveBeenCalledWith("abc123")
-			expect(mockTask.overwriteApiConversationHistory).toHaveBeenCalledWith([
-				{ ts: 1, role: "user", content: [{ type: "text", text: "Message 1" }] },
-			])
-			// For edit operation, should include the message being edited
-			expect(mockTask.overwriteClineMessages).toHaveBeenCalledWith([
-				{ ts: 1, say: "user", text: "Message 1" },
-				{ ts: 2, say: "assistant", text: "Message 2" },
-			])
+			// AgentState (chat history, API history) is preserved during rollback
+			// Only SystemState (repo) is restored
+			expect(mockTask.overwriteApiConversationHistory).not.toHaveBeenCalled()
+			expect(mockTask.overwriteClineMessages).not.toHaveBeenCalled()
 			expect(mockProvider.cancelTask).toHaveBeenCalled()
 		})
 
@@ -405,7 +413,7 @@ describe("Checkpoint functionality", () => {
 			mockTask.checkpointService = undefined
 			mockTask.checkpointServiceInitializing = false
 
-			const service = getCheckpointService(mockTask)
+			await getCheckpointService(mockTask)
 
 			const checkpointsModule = await import("../../../services/checkpoints")
 			expect(vi.mocked(checkpointsModule.RepoPerTaskCheckpointService.create)).toHaveBeenCalledWith({

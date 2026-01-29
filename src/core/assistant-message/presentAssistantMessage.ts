@@ -1,8 +1,9 @@
 import cloneDeep from "clone-deep"
 import { serializeError } from "serialize-error"
 
-import type { ToolName, ClineAsk, ToolProgressStatus } from "@agentic-code/types"
-import { TelemetryService } from "@agentic-code/telemetry"
+import type { ToolName, ClineAsk, ToolProgressStatus, ClineAskResponse } from "@roo-code/types"
+import { getApiProtocol, getModelId } from "@roo-code/types"
+import { TelemetryService } from "@roo-code/telemetry"
 
 import { defaultModeSlug, getModeBySlug } from "../../shared/modes"
 import type { ToolParamName, ToolResponse } from "../../shared/tools"
@@ -11,7 +12,7 @@ import { fetchInstructionsTool } from "../tools/fetchInstructionsTool"
 import { listFilesTool } from "../tools/listFilesTool"
 import { getReadFileToolDescription, readFileTool } from "../tools/readFileTool"
 import { getSimpleReadFileToolDescription, simpleReadFileTool } from "../tools/simpleReadFileTool"
-import { shouldUseSingleFileRead } from "@agentic-code/types"
+import { shouldUseSingleFileRead } from "@roo-code/types"
 import { writeToFileTool } from "../tools/writeToFileTool"
 import { applyDiffTool } from "../tools/multiApplyDiffTool"
 import { insertContentTool } from "../tools/insertContentTool"
@@ -153,7 +154,20 @@ export async function presentAssistantMessage(cline: Task) {
 			await cline.say("text", content, undefined, block.partial)
 			break
 		}
-		case "tool_use":
+		case "tool_use": {
+			// Logging: Track tool execution dispatch
+			const modelId = cline.api.getModel().id
+			const apiProtocol = getApiProtocol(
+				(cline.apiConfiguration as any)?.apiProvider,
+				modelId,
+			)
+			const provider = await cline.providerRef.deref()
+			if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
+				provider.log(
+					`[presentAssistantMessage] Tool call detected - Name: ${block.name}, Protocol: ${apiProtocol}, Provider: ${(cline.apiConfiguration as any)?.apiProvider}, Model: ${modelId}, Params: ${JSON.stringify(block.params).substring(0, 200)}`,
+				)
+			}
+
 			const toolDescription = (): string => {
 				switch (block.name) {
 					case "execute_command":
@@ -279,13 +293,33 @@ export async function presentAssistantMessage(cline: Task) {
 				progressStatus?: ToolProgressStatus,
 				isProtected?: boolean,
 			) => {
-				const { response, text, images } = await cline.ask(
-					type,
-					partialMessage,
-					false,
-					progressStatus,
-					isProtected || false,
-				)
+				let response: ClineAskResponse
+				let text: string | undefined
+				let images: string[] | undefined
+				try {
+					const askResult = await cline.ask(
+						type,
+						partialMessage,
+						false,
+						progressStatus,
+						isProtected || false,
+					)
+					response = askResult.response
+					text = askResult.text
+					images = askResult.images
+				} catch (error) {
+					// Fix #4: Catch "ask promise ignored" errors and log internally instead of leaking to LLM
+					if (error instanceof Error && error.message.includes("Current ask promise was ignored")) {
+						const provider = await cline.providerRef.deref()
+						provider?.log(
+							`[presentAssistantMessage] Ask promise was ignored (task ${cline.taskId}, ask type: ${type}) - this is an internal cancellation, not a user-visible error`,
+						)
+						// Return false to indicate approval was not granted (but don't add error to conversation)
+						return false
+					}
+					// Re-throw other errors to be handled by outer catch
+					throw error
+				}
 
 				if (response !== "yesButtonClicked") {
 					// Handle both messageResponse and noButtonClicked with text.
@@ -365,6 +399,14 @@ export async function presentAssistantMessage(cline: Task) {
 
 				// P3 Replay: Log full tool call with input for reproducibility
 				cline.logToolCall(block.name, block.params as Record<string, unknown>)
+				
+				// Fix #4: Audit logging - Executed tool calls
+				const provider = cline.providerRef.deref()
+				if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
+					provider.log(
+						`[Task#${cline.taskId}] [AUDIT:EXECUTED] Executing tool: ${block.name} with params: ${JSON.stringify(block.params)}`,
+					)
+				}
 			}
 
 			// Validate tool use before execution.
@@ -393,10 +435,35 @@ export async function presentAssistantMessage(cline: Task) {
 				// If execution is not allowed, notify user and break.
 				if (!repetitionCheck.allowExecution && repetitionCheck.askUser) {
 					// Handle repetition similar to mistake_limit_reached pattern.
-					const { response, text, images } = await cline.ask(
-						repetitionCheck.askUser.messageKey as ClineAsk,
-						repetitionCheck.askUser.messageDetail.replace("{toolName}", block.name),
-					)
+					let response: ClineAskResponse
+					let text: string | undefined
+					let images: string[] | undefined
+					try {
+						const askResult = await cline.ask(
+							repetitionCheck.askUser.messageKey as ClineAsk,
+							repetitionCheck.askUser.messageDetail.replace("{toolName}", block.name),
+						)
+						response = askResult.response
+						text = askResult.text
+						images = askResult.images
+					} catch (error) {
+						// Fix #4: Catch "ask promise ignored" errors and log internally instead of leaking to LLM
+						if (error instanceof Error && error.message.includes("Current ask promise was ignored")) {
+							const provider = await cline.providerRef.deref()
+							provider?.log(
+								`[presentAssistantMessage] Ask promise was ignored during repetition check (task ${cline.taskId}) - this is an internal cancellation, not a user-visible error`,
+							)
+							// Return tool result about repetition without adding error to conversation
+							pushToolResult(
+								formatResponse.toolError(
+									`Tool call repetition limit reached for ${block.name}. Please try a different approach.`,
+								),
+							)
+							break
+						}
+						// Re-throw other errors to be handled by outer catch
+						throw error
+					}
 
 					if (response === "messageResponse") {
 						// Add user feedback to userContent.
@@ -423,6 +490,13 @@ export async function presentAssistantMessage(cline: Task) {
 					)
 					break
 				}
+			}
+
+			// Logging: Track tool execution
+			if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
+				provider.log(
+					`[presentAssistantMessage] Executing tool: ${block.name}, Partial: ${block.partial}`,
+				)
 			}
 
 			switch (block.name) {
@@ -564,6 +638,7 @@ export async function presentAssistantMessage(cline: Task) {
 			}
 
 			break
+		}
 	}
 
 	// Seeing out of bounds is fine, it means that the next too call is being

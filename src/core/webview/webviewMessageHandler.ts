@@ -12,9 +12,9 @@ import {
 	type TelemetrySetting,
 	TelemetryEventName,
 	UserSettingsConfig,
-} from "@agentic-code/types"
-import { CloudService } from "@agentic-code/cloud"
-import { TelemetryService } from "@agentic-code/telemetry"
+} from "@roo-code/types"
+import { CloudService } from "@roo-code/cloud"
+import { TelemetryService } from "@roo-code/telemetry"
 
 import { type ApiMessage } from "../task-persistence/apiMessages"
 import { saveTaskMessages } from "../task-persistence"
@@ -22,7 +22,7 @@ import { saveTaskMessages } from "../task-persistence"
 import { ClineProvider } from "./ClineProvider"
 import { handleCheckpointRestoreOperation } from "./checkpointRestoreHandler"
 import { changeLanguage, t } from "../../i18n"
-import { Package } from "../../shared/package"
+import { CONFIG_SECTION, LEGACY_CONFIG_SECTION } from "../../constants/ids"
 import { type RouterName, type ModelRecord, toRouterName } from "../../shared/api"
 import { MessageEnhancer } from "./messageEnhancer"
 
@@ -1012,10 +1012,18 @@ export const webviewMessageHandler = async (
 
 			await updateGlobalState("allowedCommands", validCommands)
 
-			// Also update workspace settings.
-			await vscode.workspace
-				.getConfiguration(Package.name)
-				.update("allowedCommands", validCommands, vscode.ConfigurationTarget.Global)
+			// Also update workspace settings (prefer canonical section, fall back to legacy for migration only).
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION)
+			await config.update("allowedCommands", validCommands, vscode.ConfigurationTarget.Global)
+
+			// Best-effort legacy update; ignore failures.
+			try {
+				await vscode.workspace
+					.getConfiguration(LEGACY_CONFIG_SECTION)
+					.update("allowedCommands", validCommands, vscode.ConfigurationTarget.Global)
+			} catch {
+				// ignore
+			}
 
 			break
 		}
@@ -1028,10 +1036,18 @@ export const webviewMessageHandler = async (
 
 			await updateGlobalState("deniedCommands", validCommands)
 
-			// Also update workspace settings.
-			await vscode.workspace
-				.getConfiguration(Package.name)
-				.update("deniedCommands", validCommands, vscode.ConfigurationTarget.Global)
+			// Also update workspace settings (prefer canonical section, fall back to legacy for migration only).
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION)
+			await config.update("deniedCommands", validCommands, vscode.ConfigurationTarget.Global)
+
+			// Best-effort legacy update; ignore failures.
+			try {
+				await vscode.workspace
+					.getConfiguration(LEGACY_CONFIG_SECTION)
+					.update("deniedCommands", validCommands, vscode.ConfigurationTarget.Global)
+			} catch {
+				// ignore
+			}
 
 			break
 		}

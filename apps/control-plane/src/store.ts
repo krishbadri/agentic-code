@@ -1,7 +1,11 @@
 import type { Pool } from "pg"
+import type { DbPool } from "./db-adapter.js"
 import { randomUUID } from "node:crypto"
 
-export async function getOrCreateRepo(pool: Pool, root_path: string) {
+// Type alias: DbPool is Pool-compatible, so we can use it interchangeably
+type Db = Pool | DbPool
+
+export async function getOrCreateRepo(pool: Db, root_path: string) {
 	const q1 = await pool.query("SELECT repo_id FROM repo WHERE root_path = $1", [root_path])
 	if (q1.rowCount) return q1.rows[0].repo_id as string
 	const repo_id = randomUUID()
@@ -18,23 +22,23 @@ export type TxRow = {
 	base_commit: string
 }
 
-export async function insertTransaction(pool: Pool, row: TxRow) {
+export async function insertTransaction(pool: Db, row: TxRow) {
 	await pool.query(
-		`INSERT INTO transaction (tx_id, repo_id, actor_id, agent_id, isolation_policy, base_commit) VALUES ($1,$2,$3,$4,$5,$6)`,
+		`INSERT INTO "transaction" (tx_id, repo_id, actor_id, agent_id, isolation_policy, base_commit) VALUES ($1,$2,$3,$4,$5,$6)`,
 		[row.tx_id, row.repo_id, row.actor_id, row.agent_id, row.isolation_policy, row.base_commit],
 	)
 }
 
-export async function updateTransactionHead(pool: Pool, tx_id: string, head_commit: string) {
-	await pool.query(`UPDATE transaction SET head_commit = $2 WHERE tx_id = $1`, [tx_id, head_commit])
+export async function updateTransactionHead(pool: Db, tx_id: string, head_commit: string) {
+	await pool.query(`UPDATE "transaction" SET head_commit = $2 WHERE tx_id = $1`, [tx_id, head_commit])
 }
 
-export async function finalizeTransaction(pool: Pool, tx_id: string, state: "committed" | "rolled_back" | "aborted") {
-	await pool.query(`UPDATE transaction SET state = $2, ended_at = now() WHERE tx_id = $1`, [tx_id, state])
+export async function finalizeTransaction(pool: Db, tx_id: string, state: "committed" | "rolled_back" | "aborted") {
+	await pool.query(`UPDATE "transaction" SET state = $2, ended_at = now() WHERE tx_id = $1`, [tx_id, state])
 }
 
 export async function insertVersion(
-	pool: Pool,
+	pool: Db,
 	repo_id: string,
 	commit_sha: string,
 	tag: string,
@@ -49,7 +53,7 @@ export async function insertVersion(
 	return version_id
 }
 
-export async function listVersions(pool: Pool, repo_id: string, limit = 50, after?: string) {
+export async function listVersions(pool: Db, repo_id: string, limit = 50, after?: string) {
 	if (after) {
 		const q = await pool.query(
 			`SELECT version_id, commit_sha, tag, created_at, created_by FROM version WHERE repo_id=$1 AND created_at < (SELECT created_at FROM version WHERE version_id=$2) ORDER BY created_at DESC LIMIT $3`,
@@ -64,9 +68,9 @@ export async function listVersions(pool: Pool, repo_id: string, limit = 50, afte
 	return q.rows
 }
 
-export async function getTransaction(pool: Pool, tx_id: string): Promise<TxRow | null> {
+export async function getTransaction(pool: Db, tx_id: string): Promise<TxRow | null> {
 	const q = await pool.query(
-		`SELECT tx_id, repo_id, actor_id, agent_id, isolation_policy, base_commit FROM transaction WHERE tx_id = $1`,
+		`SELECT tx_id, repo_id, actor_id, agent_id, isolation_policy, base_commit FROM "transaction" WHERE tx_id = $1`,
 		[tx_id],
 	)
 	return q.rowCount ? (q.rows[0] as TxRow) : null
@@ -112,7 +116,7 @@ export type SafetyGateRow = {
 }
 
 export async function insertSubTransaction(
-	pool: Pool,
+	pool: Db,
 	subTx: {
 		sub_tx_id: string
 		tx_id: string
@@ -127,8 +131,16 @@ export async function insertSubTransaction(
 		worktree_path?: string
 	},
 ) {
+	// SQLite can only bind numbers, strings, bigints, buffers, and null
+	// Arrays and Date objects must be serialized
+	const dependsOnJson = subTx.depends_on ? JSON.stringify(subTx.depends_on) : null
+	const safetyChecksJson = subTx.safety_checks ? JSON.stringify(subTx.safety_checks) : null
+	const startedAt = subTx.status === "RUNNING" ? new Date().toISOString() : null
+
+	// Use INSERT OR REPLACE to handle reruns gracefully (idempotency)
+	// This ensures that if a sub_tx_id already exists, we update it instead of failing
 	await pool.query(
-		`INSERT INTO sub_transaction 
+		`INSERT OR REPLACE INTO sub_transaction 
 		 (sub_tx_id, tx_id, title, description, agent_type, prompt, depends_on, safety_checks, 
 		  base_commit, status, worktree_path, started_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
@@ -139,18 +151,18 @@ export async function insertSubTransaction(
 			subTx.description ?? null,
 			subTx.agent_type ?? null,
 			subTx.prompt ?? null,
-			subTx.depends_on ?? null,
-			subTx.safety_checks ?? null,
+			dependsOnJson,
+			safetyChecksJson,
 			subTx.base_commit ?? null,
 			subTx.status ?? "RUNNING",
 			subTx.worktree_path ?? null,
-			subTx.status === "RUNNING" ? new Date() : null,
+			startedAt,
 		],
 	)
 }
 
 export async function updateSubTransactionStatus(
-	pool: Pool,
+	pool: Db,
 	sub_tx_id: string,
 	status: "PENDING" | "RUNNING" | "COMMITTED" | "ABORTED",
 	end_commit?: string,
@@ -164,17 +176,20 @@ export async function updateSubTransactionStatus(
 	)
 }
 
-export async function getSubTransaction(pool: Pool, sub_tx_id: string): Promise<SubTxRow | null> {
+export async function getSubTransaction(pool: Db, sub_tx_id: string): Promise<SubTxRow | null> {
 	const q = await pool.query(`SELECT * FROM sub_transaction WHERE sub_tx_id = $1`, [sub_tx_id])
 	return q.rowCount ? (q.rows[0] as SubTxRow) : null
 }
 
-export async function getSubTransactionsForTx(pool: Pool, tx_id: string): Promise<SubTxRow[]> {
+export async function getSubTransactionsForTx(pool: Db, tx_id: string): Promise<SubTxRow[]> {
 	const q = await pool.query(`SELECT * FROM sub_transaction WHERE tx_id = $1 ORDER BY created_at`, [tx_id])
 	return q.rows as SubTxRow[]
 }
 
-export async function insertSafetyCheckResult(pool: Pool, sub_tx_id: string, result: SafetyCheckResultRow) {
+export async function insertSafetyCheckResult(pool: Db, sub_tx_id: string, result: SafetyCheckResultRow) {
+	// SQLite stores booleans as integers (0 or 1)
+	const passedInt = result.passed ? 1 : 0
+
 	await pool.query(
 		`INSERT INTO safety_check_result (sub_tx_id, cmd, exit_code, duration_ms, stdout_tail, stderr_tail, passed)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -185,26 +200,29 @@ export async function insertSafetyCheckResult(pool: Pool, sub_tx_id: string, res
 			result.duration_ms,
 			result.stdout_tail ?? null,
 			result.stderr_tail ?? null,
-			result.passed,
+			passedInt,
 		],
 	)
 }
 
-export async function insertSafetyCheckResults(pool: Pool, sub_tx_id: string, results: SafetyCheckResultRow[]) {
+export async function insertSafetyCheckResults(pool: Db, sub_tx_id: string, results: SafetyCheckResultRow[]) {
 	for (const r of results) {
 		await insertSafetyCheckResult(pool, sub_tx_id, r)
 	}
 }
 
-export async function insertSafetyGate(pool: Pool, sub_tx_id: string, gate: { ok: boolean; failed_at?: string }) {
+export async function insertSafetyGate(pool: Db, sub_tx_id: string, gate: { ok: boolean; failed_at?: string }) {
+	// SQLite stores booleans as integers (0 or 1)
+	const okInt = gate.ok ? 1 : 0
+
 	await pool.query(`INSERT INTO safety_gate (sub_tx_id, ok, failed_at) VALUES ($1, $2, $3)`, [
 		sub_tx_id,
-		gate.ok,
+		okInt,
 		gate.failed_at ?? null,
 	])
 }
 
-export async function getSafetyCheckResults(pool: Pool, sub_tx_id: string): Promise<SafetyCheckResultRow[]> {
+export async function getSafetyCheckResults(pool: Db, sub_tx_id: string): Promise<SafetyCheckResultRow[]> {
 	const q = await pool.query(
 		`SELECT cmd, exit_code, duration_ms, stdout_tail, stderr_tail, passed 
 		 FROM safety_check_result WHERE sub_tx_id = $1 ORDER BY id`,
@@ -213,7 +231,7 @@ export async function getSafetyCheckResults(pool: Pool, sub_tx_id: string): Prom
 	return q.rows as SafetyCheckResultRow[]
 }
 
-export async function getSafetyGate(pool: Pool, sub_tx_id: string): Promise<SafetyGateRow | null> {
+export async function getSafetyGate(pool: Db, sub_tx_id: string): Promise<SafetyGateRow | null> {
 	const gateQ = await pool.query(
 		`SELECT ok, failed_at FROM safety_gate WHERE sub_tx_id = $1 ORDER BY id DESC LIMIT 1`,
 		[sub_tx_id],
@@ -228,7 +246,7 @@ export async function getSafetyGate(pool: Pool, sub_tx_id: string): Promise<Safe
 	}
 }
 
-export async function insertSubTxRetry(pool: Pool, sub_tx_id: string, retry_policy: string, attempt_number: number) {
+export async function insertSubTxRetry(pool: Db, sub_tx_id: string, retry_policy: string, attempt_number: number) {
 	await pool.query(`INSERT INTO sub_tx_retry (sub_tx_id, retry_policy, attempt_number) VALUES ($1, $2, $3)`, [
 		sub_tx_id,
 		retry_policy,
@@ -254,7 +272,7 @@ export type ToolCallRow = {
 }
 
 export async function insertToolCall(
-	pool: Pool,
+	pool: Db,
 	toolCall: {
 		tx_id: string
 		sub_tx_id?: string
@@ -285,7 +303,7 @@ export async function insertToolCall(
 	return q.rows[0].call_id as number
 }
 
-export async function getToolCallsForTx(pool: Pool, tx_id: string): Promise<ToolCallRow[]> {
+export async function getToolCallsForTx(pool: Db, tx_id: string): Promise<ToolCallRow[]> {
 	const q = await pool.query(
 		`SELECT call_id, tx_id, sub_tx_id, tool_name, args_json, checkpoint_before, started_at, duration_ms, exit_code, result_digest
 		 FROM tool_call WHERE tx_id = $1 ORDER BY started_at`,
@@ -294,7 +312,7 @@ export async function getToolCallsForTx(pool: Pool, tx_id: string): Promise<Tool
 	return q.rows as ToolCallRow[]
 }
 
-export async function getToolCallsForSubTx(pool: Pool, sub_tx_id: string): Promise<ToolCallRow[]> {
+export async function getToolCallsForSubTx(pool: Db, sub_tx_id: string): Promise<ToolCallRow[]> {
 	const q = await pool.query(
 		`SELECT call_id, tx_id, sub_tx_id, tool_name, args_json, checkpoint_before, started_at, duration_ms, exit_code, result_digest
 		 FROM tool_call WHERE sub_tx_id = $1 ORDER BY started_at`,
@@ -320,7 +338,7 @@ export type ModelCallRow = {
 }
 
 export async function insertModelCall(
-	pool: Pool,
+	pool: Db,
 	modelCall: {
 		tx_id: string
 		sub_tx_id?: string
@@ -349,7 +367,7 @@ export async function insertModelCall(
 	return q.rows[0].call_id as number
 }
 
-export async function getModelCallsForTx(pool: Pool, tx_id: string): Promise<ModelCallRow[]> {
+export async function getModelCallsForTx(pool: Db, tx_id: string): Promise<ModelCallRow[]> {
 	const q = await pool.query(
 		`SELECT call_id, tx_id, sub_tx_id, model_id, prompt_hash, message_count, temperature, started_at, duration_ms
 		 FROM model_call WHERE tx_id = $1 ORDER BY started_at`,
@@ -374,7 +392,7 @@ export type MetricRollbackRow = {
 }
 
 export async function insertMetricRollback(
-	pool: Pool,
+	pool: Db,
 	metric: {
 		tx_id?: string
 		sub_tx_id?: string
@@ -402,7 +420,7 @@ export async function insertMetricRollback(
 }
 
 export async function getMetricRollbackStats(
-	pool: Pool,
+	pool: Db,
 	tx_id?: string,
 ): Promise<{
 	total_rollbacks: number
@@ -439,7 +457,7 @@ export type MetricExecutionRow = {
 }
 
 export async function insertMetricExecution(
-	pool: Pool,
+	pool: Db,
 	metric: {
 		tx_id: string
 		execution_mode: "parallel" | "serial"
@@ -458,7 +476,7 @@ export async function insertMetricExecution(
 	return q.rows[0].id as number
 }
 
-export async function getParallelSpeedupStats(pool: Pool): Promise<{
+export async function getParallelSpeedupStats(pool: Db): Promise<{
 	parallel_avg_wall_clock_ms: number
 	serial_avg_wall_clock_ms: number
 	speedup_ratio: number
@@ -493,7 +511,7 @@ export type PlanRow = {
 }
 
 export async function insertPlan(
-	pool: Pool,
+	pool: Db,
 	plan: {
 		tx_id: string
 		title?: string
@@ -503,12 +521,15 @@ export async function insertPlan(
 		sub_tx_count: number
 	},
 ): Promise<string> {
+	// Generate plan_id before insert (SQLite doesn't support DEFAULT with functions in all cases)
+	const plan_id = randomUUID()
 	const q = await pool.query(
 		`INSERT INTO plan 
-		 (tx_id, title, summary, user_prompt, plan_json, sub_tx_count)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		 (plan_id, tx_id, title, summary, user_prompt, plan_json, sub_tx_count)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING plan_id`,
 		[
+			plan_id,
 			plan.tx_id,
 			plan.title ?? null,
 			plan.summary ?? null,
@@ -517,10 +538,10 @@ export async function insertPlan(
 			plan.sub_tx_count,
 		],
 	)
-	return q.rows[0].plan_id as string
+	return plan_id
 }
 
-export async function getPlan(pool: Pool, tx_id: string): Promise<PlanRow | null> {
+export async function getPlan(pool: Db, tx_id: string): Promise<PlanRow | null> {
 	const q = await pool.query(
 		`SELECT plan_id, tx_id, title, summary, user_prompt, plan_json, sub_tx_count, created_at
 		 FROM plan WHERE tx_id = $1 ORDER BY created_at DESC LIMIT 1`,
@@ -529,7 +550,7 @@ export async function getPlan(pool: Pool, tx_id: string): Promise<PlanRow | null
 	return q.rowCount ? (q.rows[0] as PlanRow) : null
 }
 
-export async function getPlanById(pool: Pool, plan_id: string): Promise<PlanRow | null> {
+export async function getPlanById(pool: Db, plan_id: string): Promise<PlanRow | null> {
 	const q = await pool.query(
 		`SELECT plan_id, tx_id, title, summary, user_prompt, plan_json, sub_tx_count, created_at
 		 FROM plan WHERE plan_id = $1`,
@@ -538,7 +559,7 @@ export async function getPlanById(pool: Pool, plan_id: string): Promise<PlanRow 
 	return q.rowCount ? (q.rows[0] as PlanRow) : null
 }
 
-export async function listPlans(pool: Pool, limit = 50): Promise<PlanRow[]> {
+export async function listPlans(pool: Db, limit = 50): Promise<PlanRow[]> {
 	const q = await pool.query(
 		`SELECT plan_id, tx_id, title, summary, user_prompt, plan_json, sub_tx_count, created_at
 		 FROM plan ORDER BY created_at DESC LIMIT $1`,
@@ -560,7 +581,7 @@ export interface ProgressBaseline {
 }
 
 export async function setProgressBaseline(
-	pool: Pool,
+	pool: Db,
 	tx_id: string,
 	passing_count: number,
 	total_count: number,
@@ -577,7 +598,7 @@ export async function setProgressBaseline(
 	)
 }
 
-export async function getProgressBaseline(pool: Pool, tx_id: string): Promise<ProgressBaseline | null> {
+export async function getProgressBaseline(pool: Db, tx_id: string): Promise<ProgressBaseline | null> {
 	const q = await pool.query(
 		`SELECT tx_id, passing_count, total_count, test_command, created_at
 		 FROM progress_baseline WHERE tx_id = $1`,
@@ -587,7 +608,7 @@ export async function getProgressBaseline(pool: Pool, tx_id: string): Promise<Pr
 }
 
 export async function recordProgressCheckpoint(
-	pool: Pool,
+	pool: Db,
 	tx_id: string,
 	checkpoint_sha: string,
 	passing_count: number,
@@ -601,7 +622,7 @@ export async function recordProgressCheckpoint(
 }
 
 export async function getLastProgressCheckpoint(
-	pool: Pool,
+	pool: Db,
 	tx_id: string,
 ): Promise<{ checkpoint_sha: string; passing_count: number } | null> {
 	const q = await pool.query(

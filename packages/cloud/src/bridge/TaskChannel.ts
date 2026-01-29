@@ -12,7 +12,7 @@ import {
 	TaskBridgeEventName,
 	TaskBridgeCommandName,
 	TaskSocketEvents,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import { type BaseChannelOptions, BaseChannel } from "./BaseChannel.js"
 

@@ -9,7 +9,7 @@ import {
 	type ShareVisibility,
 	type QueuedMessage,
 	marketplaceItemSchema,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import { Mode } from "./modes"
 

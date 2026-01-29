@@ -1,5 +1,5 @@
-import type { McpInstallationMethod } from "@agentic-code/types"
-import { mcpInstallationMethodSchema, mcpMarketplaceItemSchema } from "@agentic-code/types"
+import type { McpInstallationMethod } from "@roo-code/types"
+import { mcpInstallationMethodSchema, mcpMarketplaceItemSchema } from "@roo-code/types"
 
 describe("Nested Parameters", () => {
 	describe("McpInstallationMethod Schema", () => {

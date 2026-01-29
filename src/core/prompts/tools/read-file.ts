@@ -15,7 +15,11 @@ Parameters:
   - path: (required) File path (relative to workspace directory ${args.cwd})
   ${args.partialReadsEnabled ? `- line_range: (optional) One or more line range elements in format "start-end" (1-based, inclusive)` : ""}
 
-Usage:
+⚠️ REQUIRED: path must be a non-empty string. Calls missing path will fail and must be corrected. If you do not know the path, use list_files or search_files first to discover available files.
+
+⚠️ CRITICAL: You MUST use XML format. Function-call syntax like read_file([...]) will NOT work.
+
+Usage (XML format ONLY):
 <read_file>
 <args>
   <file>
@@ -24,6 +28,8 @@ Usage:
   </file>
 </args>
 </read_file>
+
+❌ DO NOT use: read_file(["path/to/file"]) or read_file("path/to/file")
 
 Examples:
 

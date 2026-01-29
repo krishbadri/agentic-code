@@ -1,7 +1,7 @@
 import { Anthropic } from "@anthropic-ai/sdk"
 import OpenAI from "openai"
 
-import type { ModelInfo } from "@agentic-code/types"
+import type { ModelInfo } from "@roo-code/types"
 
 import type { ApiHandlerOptions } from "../../shared/api"
 import { ApiStream } from "../transform/stream"
@@ -11,6 +11,8 @@ import type { SingleCompletionHandler, ApiHandlerCreateMessageMetadata } from ".
 import { DEFAULT_HEADERS } from "./constants"
 import { BaseProvider } from "./base-provider"
 import { handleOpenAIError } from "./utils/openai-error-handler"
+import { maybeVcrWrapStream, type VcrRequestDescriptor } from "../vcr/recordReplay"
+import { isVcrEnabled } from "../vcr/vcrConfig"
 
 type BaseOpenAiCompatibleProviderOptions<ModelName extends string> = ApiHandlerOptions & {
 	providerName: string
@@ -97,7 +99,30 @@ export abstract class BaseOpenAiCompatibleProvider<ModelName extends string>
 		messages: Anthropic.Messages.MessageParam[],
 		metadata?: ApiHandlerCreateMessageMetadata,
 	): ApiStream {
-		const stream = await this.createStream(systemPrompt, messages, metadata)
+		let stream = await this.createStream(systemPrompt, messages, metadata)
+
+		// Wrap stream with VCR if enabled
+		if (isVcrEnabled()) {
+			const { id: model } = this.getModel()
+			const temperature = this.options.modelTemperature ?? this.defaultTemperature
+			const {
+				info: { maxTokens: max_tokens },
+			} = this.getModel()
+
+			const descriptor: VcrRequestDescriptor = {
+				providerName: this.providerName,
+				model,
+				endpoint: "openai-chat",
+				params: {
+					messages: [{ role: "system", content: systemPrompt }, ...convertToOpenAiMessages(messages)],
+					temperature,
+					max_tokens: max_tokens ?? undefined,
+					stream: true,
+					stream_options: { include_usage: true },
+				},
+			}
+			stream = (await maybeVcrWrapStream(descriptor, stream)) as typeof stream
+		}
 
 		for await (const chunk of stream) {
 			const delta = chunk.choices[0]?.delta

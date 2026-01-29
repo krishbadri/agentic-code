@@ -10,12 +10,17 @@ vi.mock("vscode", () => ({
 		applyEdit: vi.fn().mockResolvedValue(true),
 	},
 	commands: {
-		executeCommand: vi.fn(async (id: string) => (id === "roo.internal.getCurrentTxId" ? "tx-test" : undefined)),
+		executeCommand: vi.fn(async (id: string) => {
+			if (id === "roo.internal.getCurrentTxId") return "tx-test"
+			if (id === "roo.internal.getCpPort") return 12345
+			return undefined
+		}),
 	},
 	window: {
 		visibleTextEditors: [],
 		tabGroups: { all: [] },
 		showTextDocument: vi.fn().mockResolvedValue({ document: { uri: { scheme: "file", fsPath: "/tmp/x" } } }),
+		createTextEditorDecorationType: vi.fn().mockReturnValue({ dispose: vi.fn() }),
 	},
 	Uri: { file: (p: string) => ({ fsPath: p }) },
 	Range: vi.fn(),

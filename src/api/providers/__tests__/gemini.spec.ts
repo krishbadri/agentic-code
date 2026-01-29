@@ -2,7 +2,7 @@
 
 import { Anthropic } from "@anthropic-ai/sdk"
 
-import { type ModelInfo, geminiDefaultModelId } from "@agentic-code/types"
+import { type ModelInfo, geminiDefaultModelId } from "@roo-code/types"
 
 import { t } from "i18next"
 import { GeminiHandler } from "../gemini"

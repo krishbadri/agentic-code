@@ -15,7 +15,7 @@ import type {
 	UserSettingsConfig,
 	UserSettingsData,
 	UserFeatures,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import { TaskNotFoundError } from "./errors.js"
 import { WebAuthService } from "./WebAuthService.js"

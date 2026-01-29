@@ -7,7 +7,7 @@ import {
 	CLAUDE_CODE_DEFAULT_MAX_OUTPUT_TOKENS,
 	isDynamicProvider,
 	isLocalProvider,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 // ApiHandlerOptions
 // Extend ProviderSettings (minus apiProvider) with handler-specific toggles.
@@ -94,6 +94,16 @@ export const getModelMaxOutputTokens = ({
 	// Check for Claude Code specific max output tokens setting
 	if (settings?.apiProvider === "claude-code") {
 		return settings.claudeCodeMaxOutputTokens || CLAUDE_CODE_DEFAULT_MAX_OUTPUT_TOKENS
+	}
+
+	// Torture test: force lower output tokens for OpenRouter to avoid 402 credit failures
+	// Use smaller chunks (2048 tokens) to break work into more parts
+	if (
+		process.env.TEST_TORTURE_REPO === "1" &&
+		(format === "openrouter" || settings?.apiProvider === "openrouter")
+	) {
+		const desired = settings?.modelMaxTokens || 2048
+		return model.maxTokens ? Math.min(model.maxTokens, desired) : desired
 	}
 
 	if (shouldUseReasoningBudget({ model, settings })) {

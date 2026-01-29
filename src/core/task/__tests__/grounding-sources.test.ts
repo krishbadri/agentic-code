@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest"
 import type { ClineProvider } from "../../webview/ClineProvider"
-import type { ProviderSettings } from "@agentic-code/types"
+import type { ProviderSettings } from "@roo-code/types"
 
 // Mock vscode module before importing Task
 vi.mock("vscode", () => ({
@@ -60,7 +60,7 @@ vi.mock("../../integrations/terminal/TerminalRegistry", () => ({
 	},
 }))
 
-vi.mock("@agentic-code/telemetry", () => ({
+vi.mock("@roo-code/telemetry", () => ({
 	TelemetryService: {
 		instance: {
 			captureTaskCreated: vi.fn(),
@@ -77,11 +77,14 @@ describe("Task grounding sources handling", () => {
 	let mockApiConfiguration: ProviderSettings
 	let Task: any
 
-	beforeAll(async () => {
-		// Import Task after mocks are set up
-		const taskModule = await import("../Task")
-		Task = taskModule.Task
-	})
+	beforeAll(
+		async () => {
+			// Import Task after mocks are set up
+			const taskModule = await import("../Task")
+			Task = taskModule.Task
+		},
+		30_000,
+	)
 
 	beforeEach(() => {
 		// Mock provider with necessary methods

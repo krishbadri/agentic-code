@@ -42,13 +42,26 @@ export async function startServer(config: ServerConfig) {
 	app.decorate("databaseUrl", config.databaseUrl || "")
 	// R31, R32: Server-side allowlist for test file modifications (NOT agent-controlled)
 	app.decorate("testModifyAllowlist", config.testModifyAllowlist || [])
-	// R33: In-memory progress baselines for DB-less mode (testing)
+	// R33: In-memory progress baselines for DB-less mode (testing) - only used if database fails
 	app.decorate("progressBaselines", new Map<string, { passing_count: number; total_count: number; test_command: string; last_checkpoint_count?: number; last_checkpoint_sha?: string }>())
 
-	if (!config.disableDb && config.databaseUrl) {
-		const pool = createPool(config.databaseUrl)
-		await migrate(pool)
-		app.decorate("db", pool)
+	// Initialize database (PostgreSQL if URL provided, otherwise SQLite fallback)
+	if (!config.disableDb) {
+		try {
+			const { createDatabase } = await import("./db.js")
+			const db = await createDatabase(config.databaseUrl, config.repoRoot)
+			if (db) {
+				app.decorate("db", db)
+				app.log.info("Database initialized successfully")
+			} else {
+				app.log.warn("Database initialization failed - continuing with in-memory storage only")
+			}
+		} catch (error) {
+			app.log.error({ err: error }, "Database initialization threw an error - continuing without database")
+			// Server continues without database (graceful degradation)
+		}
+	} else {
+		app.log.info("Database disabled via flag")
 	}
 
 	// P3 FIX: Clean up stale worktrees on startup
@@ -79,7 +92,7 @@ declare module "fastify" {
 	interface FastifyInstance {
 		repoRoot: string
 		databaseUrl: string
-		db?: import("pg").Pool
+		db?: import("./db-adapter.js").DbPool
 		// R31, R32: Server-side allowlist for test file modifications (NOT agent-controlled)
 		testModifyAllowlist: string[]
 		// R33: In-memory progress baselines for DB-less mode (testing)
@@ -111,7 +124,7 @@ async function cleanupStaleWorktreesOnStartup(app: import("fastify").FastifyInst
 			try {
 				// Query for transactions that are still in progress (not committed/aborted)
 				const result = await app.db.query(
-					`SELECT tx_id FROM transaction WHERE state IS NULL OR state = 'active'`,
+					`SELECT tx_id FROM "transaction" WHERE state IS NULL OR state = 'active'`,
 				)
 				for (const row of result.rows) {
 					activeTxIds.add(row.tx_id)

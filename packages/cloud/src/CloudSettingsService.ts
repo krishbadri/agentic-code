@@ -17,7 +17,7 @@ import {
 	organizationSettingsSchema,
 	userSettingsDataSchema,
 	ORGANIZATION_ALLOW_ALL,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import { getRooCodeApiUrl } from "./config.js"
 import { RefreshTimer } from "./RefreshTimer.js"

@@ -9,7 +9,7 @@ import {
 	RooCodeEventName,
 	ExtensionBridgeEventName,
 	ExtensionSocketEvents,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import { ExtensionChannel } from "../ExtensionChannel.js"
 

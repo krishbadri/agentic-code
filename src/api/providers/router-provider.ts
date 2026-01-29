@@ -1,6 +1,6 @@
 import OpenAI from "openai"
 
-import type { ModelInfo } from "@agentic-code/types"
+import type { ModelInfo } from "@roo-code/types"
 
 import { ApiHandlerOptions, RouterName, ModelRecord } from "../../shared/api"
 

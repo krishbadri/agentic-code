@@ -1,6 +1,6 @@
 import type { Plan, SubTransaction, ChildResult, ExecutionResult } from "./types"
 import type { Task } from "../task/Task"
-import type { SafetyGate, SafetyCheckResult } from "@agentic-code/types"
+import type { SafetyGate, SafetyCheckResult } from "@roo-code/types"
 import delay from "delay"
 import * as vscode from "vscode"
 import * as path from "path"
@@ -20,6 +20,15 @@ export class PlanExecutor {
 		if (!plan.subTransactions || plan.subTransactions.length === 0) {
 			provider.log("[PlanExecutor] Plan has no sub-transactions")
 			return { success: true, parentTxId: undefined }
+		}
+
+		// Limit maximum number of sub-transactions to prevent excessive API calls
+		const MAX_SUB_TRANSACTIONS = 10
+		if (plan.subTransactions.length > MAX_SUB_TRANSACTIONS) {
+			provider.log(
+				`[PlanExecutor] Plan has ${plan.subTransactions.length} sub-transactions, limiting to ${MAX_SUB_TRANSACTIONS} to prevent excessive API calls`
+			)
+			plan.subTransactions = plan.subTransactions.slice(0, MAX_SUB_TRANSACTIONS)
 		}
 
 		// 1. Create Control-Plane transaction for parent
@@ -144,6 +153,17 @@ export class PlanExecutor {
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : String(error)
 				provider.log(`[PlanExecutor] Error executing group: ${errorMessage}`)
+				
+				// E2E mode: If error is due to blocked Task#ask in child, abort parent immediately
+				const isE2EMode = !!(process.env.TEST_TORTURE_REPO || process.env.TEST_TORTURE_REPO_WORKSPACE)
+				if (isE2EMode && errorMessage.includes("Blocked Task#ask in e2e mode")) {
+					provider.log(`[PlanExecutor] E2E mode: Child blocked Task#ask detected - Aborting parent task ${this.parentTask.taskId}`)
+					// Abort the parent task immediately
+					await this.parentTask.abortTask()
+					// Re-throw to propagate the error
+					throw error
+				}
+				
 				// Clean up failed children from tracking
 				for (const child of groupChildTasks) {
 					this.parentTask.removeChildTaskId(child.taskId)
@@ -199,22 +219,40 @@ export class PlanExecutor {
 	 */
 	private async beginParentTransaction(): Promise<string | undefined> {
 		const provider = this.parentTask.providerRef.deref()
-		const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
+		
+		// Debug: check context availability
+		console.log(`[PlanExecutor#beginParentTransaction] Provider available: ${!!provider}`)
+		console.log(`[PlanExecutor#beginParentTransaction] Context available: ${!!provider?.context}`)
+		console.log(`[PlanExecutor#beginParentTransaction] GlobalState available: ${!!provider?.context?.globalState}`)
+		
+		// Wait for cpPort to be set (handles race with extension activation)
+		// This gives the extension IIFE up to 5 seconds to complete
+		let cpPort: number | undefined
+		for (let i = 0; i < 10; i++) {
+			cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
+			console.log(`[PlanExecutor#beginParentTransaction] Attempt ${i + 1}: cpPort = ${cpPort}`)
+			if (cpPort) break
+			await new Promise(r => setTimeout(r, 500))
+			provider?.log(`[PlanExecutor] Waiting for Control-Plane port (attempt ${i + 1}/10)...`)
+		}
 
 		if (!cpPort) {
+			provider?.log(`[PlanExecutor] Control-Plane port not found after waiting`)
 			return undefined
 		}
 
 		try {
+			// Use HEAD as base instead of a specific branch name
+			// This works regardless of whether the repo uses 'main' or 'master'
 			const res = await fetch(`http://127.0.0.1:${cpPort}/tx/begin`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
-					"X-Actor-Id": "human",
+					"x-actor-id": "human",
 				},
 				body: JSON.stringify({
 					isolation: "hybrid",
-					base: "main",
+					base: "HEAD",
 				}),
 			})
 
@@ -642,6 +680,54 @@ export class PlanExecutor {
 				}
 			}
 		}
+	}
+
+	/**
+	 * Rollback ALL sub-transactions from a plan (used when planner fails catastrophically)
+	 * This ensures all worktrees are cleaned up even if execution didn't complete
+	 */
+	async rollbackAllSubTransactions(plan: Plan, parentTxId: string): Promise<void> {
+		const provider = this.parentTask.providerRef.deref()
+		const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
+
+		if (!cpPort || !plan.subTransactions || plan.subTransactions.length === 0) {
+			return
+		}
+
+		provider?.log(
+			`[PlanExecutor] Rolling back all ${plan.subTransactions.length} sub-transactions due to planner failure`,
+		)
+
+		// Rollback all sub-transactions in parallel (faster cleanup)
+		await Promise.all(
+			plan.subTransactions.map(async (subTx) => {
+				try {
+					const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${parentTxId}/sub-tx/${subTx.id}/rollback`, {
+						method: "POST",
+						headers: {
+							"Content-Type": "application/json",
+							"X-Actor-Id": "human",
+						},
+						body: JSON.stringify({
+							reason: "Planner mode failed - cleaning up all sub-transactions",
+							failureKind: "RUNTIME_ERROR",
+						}),
+					})
+
+					// 404 is OK - sub-transaction may not have been created yet
+					if (!res.ok && res.status !== 404) {
+						const errorText = await res.text()
+						provider?.log(`[PlanExecutor] Failed to rollback ${subTx.id}: ${errorText}`)
+					} else {
+						provider?.log(`[PlanExecutor] Rolled back sub-transaction ${subTx.id}`)
+					}
+				} catch (error) {
+					const errorMessage = error instanceof Error ? error.message : String(error)
+					provider?.log(`[PlanExecutor] Error rolling back ${subTx.id}: ${errorMessage}`)
+					// Continue with other rollbacks even if one fails
+				}
+			}),
+		)
 	}
 
 	/**

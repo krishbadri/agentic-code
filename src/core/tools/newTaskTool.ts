@@ -1,6 +1,6 @@
 import * as vscode from "vscode"
 
-import { TodoItem } from "@agentic-code/types"
+import { TodoItem } from "@roo-code/types"
 
 import { ToolUse, AskApproval, HandleError, PushToolResult, RemoveClosingTag } from "../../shared/tools"
 import { Task } from "../task/Task"
@@ -9,6 +9,7 @@ import { formatResponse } from "../prompts/responses"
 import { t } from "../../i18n"
 import { parseMarkdownChecklist } from "./updateTodoListTool"
 import { Package } from "../../shared/package"
+import { extractFilePathsFromText, validateFilePaths } from "../../utils/fs"
 
 export async function newTaskTool(
 	task: Task,
@@ -92,6 +93,30 @@ export async function newTaskTool(
 			// Un-escape one level of backslashes before '@' for hierarchical subtasks
 			// Un-escape one level: \\@ -> \@ (removes one backslash for hierarchical subtasks)
 			const unescapedMessage = message.replace(/\\\\@/g, "\\@")
+
+			// Validate file paths mentioned in the subtask message
+			// This prevents LLM hallucinations where subtasks are told to work with non-existent files
+			const extractedPaths = extractFilePathsFromText(unescapedMessage)
+			if (extractedPaths.length > 0) {
+				const { nonExistent } = await validateFilePaths(extractedPaths, task.cwd)
+				if (nonExistent.length > 0) {
+					// Log warning for debugging
+					const logProvider = task.providerRef.deref()
+					logProvider?.log(
+						`[newTaskTool] Warning: Subtask message references non-existent files: ${nonExistent.join(", ")}`
+					)
+					
+					// Return error to the LLM so it can correct itself
+					task.consecutiveMistakeCount++
+					task.recordToolError("new_task")
+					pushToolResult(formatResponse.toolError(
+						`Cannot create subtask: The following files do not exist in the workspace:\n` +
+						nonExistent.map((f) => `  - ${f}`).join("\n") +
+						`\n\nPlease verify these files exist before creating the subtask, or use search_files to find the correct paths.`
+					))
+					return
+				}
+			}
 
 			// Verify the mode exists
 			const targetMode = getModeBySlug(mode, state?.customModes)

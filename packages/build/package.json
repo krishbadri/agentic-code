@@ -1,5 +1,5 @@
 {
-	"name": "@agentic-code/build",
+	"name": "@roo-code/build",
 	"description": "ESBuild utilities for Agentic Code.",
 	"private": true,
 	"type": "module",
@@ -16,8 +16,8 @@
 		"zod": "^3.25.61"
 	},
 	"devDependencies": {
-		"@agentic-code/config-eslint": "workspace:^",
-		"@agentic-code/config-typescript": "workspace:^",
+		"@roo-code/config-eslint": "workspace:^",
+		"@roo-code/config-typescript": "workspace:^",
 		"@types/node": "20.x",
 		"vitest": "^3.2.3"
 	}

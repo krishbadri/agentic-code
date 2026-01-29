@@ -1,8 +1,8 @@
 import path from "path"
 import fs from "fs/promises"
 
-import { TelemetryService } from "@agentic-code/telemetry"
-import { DEFAULT_WRITE_DELAY_MS } from "@agentic-code/types"
+import { TelemetryService } from "@roo-code/telemetry"
+import { DEFAULT_WRITE_DELAY_MS } from "@roo-code/types"
 
 import { ClineSayTool } from "../../shared/ExtensionMessage"
 import { getReadablePath } from "../../utils/path"
@@ -13,6 +13,9 @@ import { fileExistsAtPath } from "../../utils/fs"
 import { RecordSource } from "../context-tracking/FileContextTrackerTypes"
 import { unescapeHtmlEntities } from "../../utils/text-normalization"
 import { EXPERIMENT_IDS, experiments } from "../../shared/experiments"
+
+// Maximum number of consecutive apply_diff failures on the same file before forcing a different approach
+const MAX_CONSECUTIVE_DIFF_FAILURES = 3
 
 export async function applyDiffToolLegacy(
 	cline: Task,
@@ -106,6 +109,31 @@ export async function applyDiffToolLegacy(
 				cline.consecutiveMistakeCountForApplyDiff.set(relPath, currentCount)
 				let formattedError = ""
 				TelemetryService.instance.captureDiffApplicationError(cline.taskId, currentCount)
+
+				// Check if we've hit the maximum retry limit for this file
+				if (currentCount >= MAX_CONSECUTIVE_DIFF_FAILURES) {
+					// Reset the counter to allow future attempts after the user/LLM takes corrective action
+					cline.consecutiveMistakeCountForApplyDiff.delete(relPath)
+					
+					const forcedActionError = `CRITICAL: apply_diff has failed ${currentCount} consecutive times on "${relPath}".
+
+You MUST take a different approach. Do NOT attempt apply_diff on this file again until you have:
+
+1. REQUIRED: Use read_file to get the CURRENT content of "${relPath}"
+2. Then either:
+   a) Use write_to_file to completely replace the file content, OR
+   b) Use apply_diff with the EXACT content from the file (copy-paste the search content exactly)
+
+The diff is failing because your SEARCH content does not match the actual file content.
+You must read the file first to see what it actually contains.
+
+Previous error: ${diffResult.error || "Unknown error"}`
+
+					await cline.say("diff_error", forcedActionError)
+					cline.recordToolError("apply_diff", forcedActionError)
+					pushToolResult(formatResponse.toolError(forcedActionError))
+					return
+				}
 
 				if (diffResult.failParts && diffResult.failParts.length > 0) {
 					for (const failPart of diffResult.failParts) {

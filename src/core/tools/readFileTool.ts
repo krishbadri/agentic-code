@@ -8,7 +8,7 @@ import { t } from "../../i18n"
 import { ToolUse, AskApproval, HandleError, PushToolResult, RemoveClosingTag } from "../../shared/tools"
 import { RecordSource } from "../context-tracking/FileContextTrackerTypes"
 import { isPathOutsideWorkspace } from "../../utils/pathUtils"
-import { getReadablePath } from "../../utils/path"
+import { getReadablePath, resolveFilePathWithFallback } from "../../utils/path"
 import { countFileLines } from "../../integrations/misc/line-counter"
 import { readLines } from "../../integrations/misc/read-lines"
 import { extractTextFromFile, addLineNumbers, getSupportedBinaryFormats } from "../../integrations/misc/extract-text"
@@ -119,7 +119,11 @@ export async function readFileTool(
 			...sharedMessageProps,
 			content: undefined,
 		} satisfies ClineSayTool)
-		await cline.ask("tool", partialMessage, block.partial).catch(() => {})
+		// In E2E mode, skip partial asks to avoid race conditions with full tool calls
+		const isE2EMode = !!(process.env.TEST_TORTURE_REPO || process.env.TEST_TORTURE_REPO_WORKSPACE)
+		if (!isE2EMode) {
+			await cline.ask("tool", partialMessage, block.partial).catch(() => {})
+		}
 		return
 	}
 
@@ -156,7 +160,9 @@ export async function readFileTool(
 		} catch (error) {
 			const errorMessage = `Failed to parse read_file XML args: ${error instanceof Error ? error.message : String(error)}`
 			await handleError("parsing read_file args", new Error(errorMessage))
-			pushToolResult(`<files><error>${errorMessage}</error></files>`)
+			// Provide specific fix guidance when XML parsing fails
+			const fixGuidance = `\n\n⚠️ XML PARSING FAILED - FIX YOUR FORMAT:\n\n✅ CORRECT FORMAT:\n<read_file>\n<args>\n  <file>\n    <path>README.md</path>\n  </file>\n</args>\n</read_file>\n\n❌ COMMON MISTAKES:\n- Missing <args> wrapper\n- Missing <file> wrapper\n- Using <path> directly instead of <file><path>...</path></file>\n- Malformed XML tags`
+			pushToolResult(`<files><error>${errorMessage}${fixGuidance}</error></files>`)
 			return
 		}
 	} else if (legacyPath) {
@@ -186,10 +192,37 @@ export async function readFileTool(
 	if (fileEntries.length === 0) {
 		cline.consecutiveMistakeCount++
 		cline.recordToolError("read_file")
-		const errorMsg = await cline.sayAndCreateMissingParamError("read_file", "args (containing valid file paths)")
-		pushToolResult(`<files><error>${errorMsg}</error></files>`)
+		
+		// Fix #3: Track consecutive read_file validation errors
+		cline.consecutiveReadFileValidationErrors = (cline.consecutiveReadFileValidationErrors || 0) + 1
+		
+		// Fix #1: Return structured XML validation error (machine-grabbable)
+		const structuredError = `<tool_result tool="read_file" status="error" code="VALIDATION_ERROR" retryable="true">
+  <message>Missing required attribute: path</message>
+  <expected_call><![CDATA[<read_file>
+<args>
+  <file>
+    <path>src/index.ts</path>
+  </file>
+</args>
+</read_file>]]></expected_call>
+  <recovery><![CDATA[If you don't know the path, call <list_files><path>.</path></list_files> or <search_files><path>.</path><regex>.*</regex></search_files> first.]]></recovery>
+</tool_result>`
+		
+		// Fix #2: Trigger hard constraint injection for next turn
+		cline.forceConstraintNextTurn = true
+		cline.pendingValidationError = {
+			tool: "read_file",
+			code: "VALIDATION_ERROR",
+			message: "Missing required attribute: path",
+		}
+		
+		pushToolResult(structuredError)
 		return
 	}
+	
+	// Fix #3: Reset consecutive read_file validation errors on successful read
+	cline.consecutiveReadFileValidationErrors = 0
 
 	// Create an array to track the state of each file
 	const fileResults: FileResult[] = fileEntries.map((entry) => ({
@@ -450,11 +483,61 @@ export async function readFileTool(
 			}
 
 			const relPath = fileResult.path
-			const fullPath = path.resolve(cline.cwd, relPath)
-
-			// Process approved files
+			
+			// Resolve path with fallback to nested project directory
+			let fullPath: string
 			try {
-				const [totalLines, isBinary] = await Promise.all([countFileLines(fullPath), isBinaryFile(fullPath)])
+				const resolvedPath = await resolveFilePathWithFallback(cline.cwd, relPath)
+				fullPath = resolvedPath || path.resolve(cline.cwd, relPath)
+			} catch {
+				// If resolveFilePathWithFallback fails, fall back to simple resolve
+				fullPath = path.resolve(cline.cwd, relPath)
+			}
+			
+			// Verify file exists and provide helpful error if not
+			const fs = await import("fs/promises")
+			try {
+				await fs.access(fullPath)
+			} catch (error) {
+				// File doesn't exist - try to find similar files
+				const errorCode = (error as NodeJS.ErrnoException)?.code
+				if (errorCode === "ENOENT") {
+					// Search for similar file names in the workspace
+					const workspaceRoot = cline.cwd
+					const fileName = path.basename(relPath)
+					const dirName = path.dirname(relPath)
+					
+					let suggestions: string[] = []
+					try {
+						// Try to list files in the directory
+						const searchDir = path.resolve(workspaceRoot, dirName)
+						const entries = await fs.readdir(searchDir, { withFileTypes: true })
+						const files = entries
+							.filter((e) => e.isFile())
+							.map((e) => e.name)
+							.filter((name) => name.toLowerCase().includes(fileName.toLowerCase().slice(0, 3)))
+						suggestions = files.slice(0, 3).map((f) => path.join(dirName, f))
+					} catch {
+						// Can't search for suggestions
+					}
+					
+					const suggestionText = suggestions.length > 0 
+						? ` Did you mean: ${suggestions.map(s => `"${s}"`).join(", ")}?`
+						: ""
+					
+					const errorMsg = `File not found: "${relPath}" (resolved to: ${fullPath}). Workspace root: ${workspaceRoot}.${suggestionText}`
+					throw new Error(errorMsg)
+				}
+				throw error
+			}
+
+			// Process approved files with retry logic for ENOENT errors
+			let retries = 3
+			let lastError: Error | null = null
+			
+			while (retries > 0) {
+				try {
+					const [totalLines, isBinary] = await Promise.all([countFileLines(fullPath), isBinaryFile(fullPath)])
 
 				// Handle binary files (but allow specific file types that extractTextFromFile can handle)
 				if (isBinary) {
@@ -594,8 +677,16 @@ export async function readFileTool(
 					continue
 				}
 
-				// Handle normal file read
-				const content = await extractTextFromFile(fullPath)
+				// Handle normal file read with character limit to avoid 429 TPM errors
+				const MAX_FILE_CHARS = 50000 // Hard cap: 50k chars per file to reduce request size
+				let content = await extractTextFromFile(fullPath)
+				
+				// Truncate if exceeds limit (deterministic: always truncate at same point)
+				if (content.length > MAX_FILE_CHARS) {
+					content = content.substring(0, MAX_FILE_CHARS) + `\n\n[File truncated: showing first ${MAX_FILE_CHARS} of ${content.length} characters. Use line_range to read specific sections.]`
+					console.log(`[readFileTool] Truncated ${relPath}: ${content.length} -> ${MAX_FILE_CHARS} chars`)
+				}
+				
 				const lineRangeAttr = ` lines="1-${totalLines}"`
 				let xmlInfo = totalLines > 0 ? `<content${lineRangeAttr}>\n${content}</content>\n` : `<content/>`
 
@@ -606,17 +697,50 @@ export async function readFileTool(
 				// Track file read
 				await cline.fileContextTracker.trackFileContext(relPath, "read_tool" as RecordSource)
 
+				// Reset the consecutive diff failure counter for this file
+				// This allows apply_diff to be attempted again after reading the file
+				if (cline.consecutiveMistakeCountForApplyDiff.has(relPath)) {
+					cline.consecutiveMistakeCountForApplyDiff.delete(relPath)
+				}
+
 				updateFileResult(relPath, {
 					xmlContent: `<file><path>${relPath}</path>\n${xmlInfo}</file>`,
 				})
-			} catch (error) {
-				const errorMsg = error instanceof Error ? error.message : String(error)
-				updateFileResult(relPath, {
-					status: "error",
-					error: `Error reading file: ${errorMsg}`,
-					xmlContent: `<file><path>${relPath}</path><error>Error reading file: ${errorMsg}</error></file>`,
-				})
-				await handleError(`reading file ${relPath}`, error instanceof Error ? error : new Error(errorMsg))
+				// Success - break out of retry loop
+				break
+				} catch (error) {
+					lastError = error instanceof Error ? error : new Error(String(error))
+					const errorCode = (error as NodeJS.ErrnoException)?.code
+					
+					// Retry on ENOENT (file not found) if we have retries left
+					if (errorCode === "ENOENT" && retries > 1) {
+						retries--
+						// Short delay before retry (200ms)
+						await new Promise((resolve) => setTimeout(resolve, 200))
+						
+						// Try resolving path again in case workspace wasn't ready
+						try {
+							const resolvedPath = await resolveFilePathWithFallback(cline.cwd, relPath)
+							if (resolvedPath && resolvedPath !== fullPath) {
+								fullPath = resolvedPath
+								console.log(`[readFileTool] Retry: resolved ${relPath} to ${fullPath}`)
+							}
+						} catch {
+							// Path resolution failed, continue with original path
+						}
+						continue
+					}
+					
+					// No more retries or non-ENOENT error - report error
+					const errorMsg = lastError.message
+					updateFileResult(relPath, {
+						status: "error",
+						error: `Error reading file: ${errorMsg}`,
+						xmlContent: `<file><path>${relPath}</path><error>Error reading file: ${errorMsg}</error></file>`,
+					})
+					await handleError(`reading file ${relPath}`, lastError)
+					break
+				}
 			}
 		}
 

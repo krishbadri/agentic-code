@@ -14,7 +14,7 @@ import {
 	internationalZAiModels,
 	mainlandZAiModels,
 	ZAI_DEFAULT_TEMPERATURE,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 
 import { ZAiHandler } from "../zai"
 

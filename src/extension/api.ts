@@ -2,6 +2,7 @@ import { EventEmitter } from "events"
 import fs from "fs/promises"
 import * as path from "path"
 import * as os from "os"
+import * as net from "net"
 
 import * as vscode from "vscode"
 
@@ -18,8 +19,8 @@ import {
 	isSecretStateKey,
 	IpcOrigin,
 	IpcMessageType,
-} from "@agentic-code/types"
-import { IpcServer } from "@agentic-code/ipc"
+} from "@roo-code/types"
+import { IpcServer } from "@roo-code/ipc"
 
 import { Package } from "../shared/package"
 import { ClineProvider } from "../core/webview/ClineProvider"
@@ -199,6 +200,76 @@ export class API extends EventEmitter<RooCodeEvents> implements RooCodeAPI {
 
 	public isReady() {
 		return this.sidebarProvider.viewLaunched
+	}
+
+	private async isControlPlaneHealthy(port: number, timeoutMs = 1500): Promise<boolean> {
+		if (typeof (globalThis as any).fetch !== "function") {
+			return false
+		}
+		const controller = new AbortController()
+		const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+		try {
+			const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal })
+			return res.ok
+		} catch {
+			return false
+		} finally {
+			clearTimeout(timeoutId)
+		}
+	}
+
+	private async isPortInUse(port: number, host = "127.0.0.1", timeoutMs = 500): Promise<boolean> {
+		return new Promise((resolve) => {
+			const socket = new net.Socket()
+			const onDone = (inUse: boolean) => {
+				socket.removeAllListeners()
+				socket.destroy()
+				resolve(inUse)
+			}
+
+			socket.setTimeout(timeoutMs)
+			socket.once("connect", () => onDone(true))
+			socket.once("timeout", () => onDone(false))
+			socket.once("error", (err: NodeJS.ErrnoException) => {
+				if (err.code === "ECONNREFUSED" || err.code === "ENOTFOUND" || err.code === "EHOSTUNREACH") {
+					onDone(false)
+					return
+				}
+				onDone(true)
+			})
+
+			socket.connect(port, host)
+		})
+	}
+
+	/**
+	 * Set the Control-Plane port for e2e testing
+	 * This ensures the planner can connect to the Control-Plane
+	 */
+	public async setCpPort(port: number): Promise<void> {
+		const isHealthy = await this.isControlPlaneHealthy(port)
+		if (!isHealthy) {
+			const inUse = await this.isPortInUse(port)
+			if (inUse) {
+				throw new Error(
+					`Control-Plane port ${port} is already in use by another process. Free the port or choose a different one.`,
+				)
+			}
+		}
+
+		// VS Code globalState can be async in ways that make immediate reads return stale data
+		// Retry with small delays to ensure persistence
+		for (let attempt = 0; attempt < 5; attempt++) {
+			await this.context.globalState.update("roo.cpPort", port)
+			// Small delay to let the write persist
+			await new Promise((resolve) => setTimeout(resolve, 100))
+			const storedPort = this.context.globalState.get<number>("roo.cpPort")
+			console.log(`[API#setCpPort] Attempt ${attempt + 1}: Set port to ${port}, read back: ${storedPort}`)
+			if (storedPort === port) {
+				return
+			}
+		}
+		console.error(`[API#setCpPort] Failed to persist port ${port} after 5 attempts`)
 	}
 
 	private registerListeners(provider: ClineProvider) {

@@ -1,5 +1,5 @@
 {
-	"name": "@agentic-code/vscode-nightly",
+	"name": "@roo-code/vscode-nightly",
 	"description": "Nightly build for the Roo Code VSCode extension.",
 	"private": true,
 	"packageManager": "pnpm@10.8.1",
@@ -9,6 +9,6 @@
 		"clean": "rimraf build .turbo"
 	},
 	"devDependencies": {
-		"@agentic-code/build": "workspace:^"
+		"@roo-code/build": "workspace:^"
 	}
 }

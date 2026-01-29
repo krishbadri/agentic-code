@@ -5,7 +5,7 @@ import {
 	claudeCodeModels,
 	type ModelInfo,
 	getClaudeCodeModelId,
-} from "@agentic-code/types"
+} from "@roo-code/types"
 import { type ApiHandler } from ".."
 import { ApiStreamUsageChunk, type ApiStream } from "../transform/stream"
 import { runClaudeCode } from "../../integrations/claude-code/run"

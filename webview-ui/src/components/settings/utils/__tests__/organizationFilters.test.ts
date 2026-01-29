@@ -1,4 +1,4 @@
-import type { ModelInfo, OrganizationAllowList } from "@agentic-code/types"
+import type { ModelInfo, OrganizationAllowList } from "@roo-code/types"
 
 import { filterProviders, filterModels } from "../organizationFilters"
 

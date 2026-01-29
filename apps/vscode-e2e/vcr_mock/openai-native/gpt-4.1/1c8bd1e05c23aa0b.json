@@ -1,0 +1,20 @@
+{
+  "id": "mock-completion-1",
+  "model": "gpt-4.1",
+  "created": 1700000000,
+  "usage": {
+    "completion_tokens": 50,
+    "prompt_tokens": 500,
+    "total_tokens": 550
+  },
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": "I have completed the task. I updated app/store.py to include SqliteKV and updated make_store. All tests passed."
+      },
+      "finish_reason": "stop",
+      "index": 0
+    }
+  ]
+}

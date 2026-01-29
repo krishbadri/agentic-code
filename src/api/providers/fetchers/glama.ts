@@ -1,6 +1,6 @@
 import axios from "axios"
 
-import type { ModelInfo } from "@agentic-code/types"
+import type { ModelInfo } from "@roo-code/types"
 
 import { parseApiPrice } from "../../../shared/cost"
 
