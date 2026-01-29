@@ -69,7 +69,7 @@ Functional Requirements
    - Implement it for MemoryKV and SqliteKV.
    - bulk_add must use this transaction mechanism so the operation is atomic.
    Notes:
-   - SqliteKV currently commits inside each operation via `with self._conn:`. You must refactor so that multiple put/delete operations can participate in ONE transaction when running inside KVStore.transaction().
+   - SqliteKV currently commits inside each operation via \`with self._conn:\`. You must refactor so that multiple put/delete operations can participate in ONE transaction when running inside KVStore.transaction().
    - MemoryKV should snapshot and restore state on rollback (thread-safe).
 
 4) CLI + docs:
