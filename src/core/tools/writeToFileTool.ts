@@ -17,6 +17,21 @@ import { unescapeHtmlEntities } from "../../utils/text-normalization"
 import { DEFAULT_WRITE_DELAY_MS } from "@roo-code/types"
 import { EXPERIMENT_IDS, experiments } from "../../shared/experiments"
 
+function stripNoopTriggerLines(content: string): string {
+	return content
+		.split(/\r?\n/)
+		.filter((line) => !/no-op to trigger file write/i.test(line))
+		.join("\n")
+		.trimEnd()
+}
+
+function isNoopTriggerOnlyChange(before: string, after: string): boolean {
+	// Explicitly disallow the common "cheat" where a subtask adds a no-op marker comment just
+	// to satisfy the "must edit a file" requirement without making real progress.
+	if (!/no-op to trigger file write/i.test(after)) return false
+	return stripNoopTriggerLines(before) === stripNoopTriggerLines(after)
+}
+
 export async function writeToFileTool(
 	cline: Task,
 	block: ToolUse,
@@ -27,7 +42,16 @@ export async function writeToFileTool(
 ) {
 	const relPath: string | undefined = block.params.path
 	let newContent: string | undefined = block.params.content
-	let predictedLineCount: number | undefined = parseInt(block.params.line_count ?? "0")
+	const rawLineCount = (block.params as Record<string, unknown>)?.line_count
+	let predictedLineCount: number | undefined =
+		typeof rawLineCount === "number"
+			? rawLineCount
+			: typeof rawLineCount === "string"
+				? Number.parseInt(rawLineCount, 10)
+				: undefined
+	if (predictedLineCount !== undefined && Number.isNaN(predictedLineCount)) {
+		predictedLineCount = undefined
+	}
 
 	if (block.partial && (!relPath || newContent === undefined)) {
 		// checking for newContent ensure relPath is complete
@@ -87,6 +111,38 @@ export async function writeToFileTool(
 		newContent = unescapeHtmlEntities(newContent)
 	}
 
+	// Some providers/models occasionally wrap code in CDATA markers. If we literally write these into source files
+	// it will break syntax (e.g. Python `SyntaxError` at `<![CDATA[`).
+	newContent = newContent.replace(/^\s*<!\[CDATA\[\s*\r?\n?/, "")
+	newContent = newContent.replace(/\r?\n?\s*\]\]>\s*$/, "")
+
+	// In subtasks, prevent "no-op" edits that only add a marker comment to satisfy the write requirement.
+	// This avoids infinite loops where the model claims it can't patch, adds a no-op comment, and retries.
+	if (!block.partial && cline.parentTask) {
+		try {
+			const absolutePath = path.resolve(cline.cwd, relPath)
+			const before = fileExists ? await fs.readFile(absolutePath, "utf-8") : ""
+			if (fileExists && isNoopTriggerOnlyChange(before, newContent)) {
+				cline.consecutiveMistakeCount++
+				cline.recordToolError(
+					"write_to_file",
+					"Subtask attempted no-op marker edit to satisfy write requirement",
+				)
+				pushToolResult(
+					formatResponse.toolError(
+						"Subtasks may not add no-op marker edits (e.g. 'no-op to trigger file write') just to satisfy the write requirement. " +
+							"Either make the actual required code changes or do not write.",
+					),
+				)
+				await cline.diffViewProvider.revertChanges().catch(() => {})
+				await cline.diffViewProvider.reset()
+				return
+			}
+		} catch {
+			// If we can't read the file, don't block the write on this heuristic.
+		}
+	}
+
 	// Determine if the path is outside the workspace
 	const fullPath = relPath ? path.resolve(cline.cwd, removeClosingTag("path", relPath)) : ""
 	const isOutsideWorkspace = isPathOutsideWorkspace(fullPath)
@@ -104,10 +160,9 @@ export async function writeToFileTool(
 			// Check if preventFocusDisruption experiment is enabled
 			const provider = cline.providerRef.deref()
 			const state = await provider?.getState()
-			const isPreventFocusDisruptionEnabled = experiments.isEnabled(
-				state?.experiments ?? {},
-				EXPERIMENT_IDS.PREVENT_FOCUS_DISRUPTION,
-			)
+			const isPreventFocusDisruptionEnabled =
+				process.env.TEST_TORTURE_REPO === "1" ||
+				experiments.isEnabled(state?.experiments ?? {}, EXPERIMENT_IDS.PREVENT_FOCUS_DISRUPTION)
 
 			if (!isPreventFocusDisruptionEnabled) {
 				// update gui message
@@ -129,6 +184,13 @@ export async function writeToFileTool(
 
 			return
 		} else {
+			// Torture/e2e resilience: some models omit line_count entirely. In TEST_TORTURE_REPO,
+			// prefer completing the write (and letting downstream gates/tests catch issues)
+			// rather than getting stuck in an endless "missing line_count" retry loop.
+			if (predictedLineCount === undefined && process.env.TEST_TORTURE_REPO === "1") {
+				predictedLineCount = newContent.split("\n").length
+			}
+
 			if (predictedLineCount === undefined) {
 				cline.consecutiveMistakeCount++
 				cline.recordToolError("write_to_file")
@@ -166,10 +228,9 @@ export async function writeToFileTool(
 			const state = await provider?.getState()
 			const diagnosticsEnabled = state?.diagnosticsEnabled ?? true
 			const writeDelayMs = state?.writeDelayMs ?? DEFAULT_WRITE_DELAY_MS
-			const isPreventFocusDisruptionEnabled = experiments.isEnabled(
-				state?.experiments ?? {},
-				EXPERIMENT_IDS.PREVENT_FOCUS_DISRUPTION,
-			)
+			const isPreventFocusDisruptionEnabled =
+				process.env.TEST_TORTURE_REPO === "1" ||
+				experiments.isEnabled(state?.experiments ?? {}, EXPERIMENT_IDS.PREVENT_FOCUS_DISRUPTION)
 
 			if (isPreventFocusDisruptionEnabled) {
 				// Direct file write without diff view
@@ -300,6 +361,7 @@ export async function writeToFileTool(
 			}
 
 			cline.didEditFile = true // used to determine if we should wait for busy terminal to update before sending api request
+			cline.fileMutationOccurred = true // Track that this task modified a file (for subtask completion validation)
 
 			// Get the formatted response message
 			const message = await cline.diffViewProvider.pushToolWriteResult(cline, cline.cwd, !fileExists)

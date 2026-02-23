@@ -121,6 +121,13 @@ export interface SubTransaction {
 	/** Commands to run as safety checks before commit (e.g. ["pnpm test", "pnpm lint"]) */
 	safetyChecks?: string[]
 
+	/**
+	 * When true, skip safety checks for this sub-transaction.
+	 * Use for: rollback drills, steps where tests are expected to fail before a subsequent action,
+	 * or verification steps that intentionally break things before rollback.
+	 */
+	skipSafetyChecks?: boolean
+
 	/** Discrete steps/actions planned for this sub-transaction (planner-specific) */
 	steps?: Step[]
 

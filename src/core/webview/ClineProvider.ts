@@ -228,6 +228,11 @@ export class ClineProvider
 							error instanceof Error ? error.message : String(error)
 						}`,
 					)
+					vscode.window.showErrorMessage(
+						`Task recovery failed after streaming error. Please retry your last action. Error: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					)
 				}
 			}
 			const onTaskFocused = () => this.emit(RooCodeEventName.TaskFocused, instance.taskId)
@@ -435,7 +440,7 @@ export class ClineProvider
 
 	// Removes and destroys the top Cline instance (the current finished task),
 	// activating the previous one (resuming the parent task).
-	async removeClineFromStack() {
+	async removeClineFromStack(skipAbort: boolean = false) {
 		if (this.clineStack.length === 0) {
 			return
 		}
@@ -446,14 +451,20 @@ export class ClineProvider
 		if (task) {
 			task.emit(RooCodeEventName.TaskUnfocused)
 
-			try {
-				// Abort the running task and set isAbandoned to true so
-				// all running promises will exit as well.
-				await task.abortTask(true)
-			} catch (e) {
-				this.log(
-					`[ClineProvider#removeClineFromStack] abortTask() failed ${task.taskId}.${task.instanceId}: ${e.message}`,
-				)
+			// Skip abort for completed subtasks - they finished successfully
+			// and shouldn't be marked as aborted (which would cause waitForChildren to see them as failed)
+			if (!skipAbort) {
+				try {
+					// Abort the running task and set isAbandoned to true so
+					// all running promises will exit as well.
+					await task.abortTask(true)
+				} catch (e) {
+					this.log(
+						`[ClineProvider#removeClineFromStack] abortTask() failed ${task.taskId}.${task.instanceId}: ${e.message}`,
+					)
+				}
+			} else {
+				this.log(`[ClineProvider#removeClineFromStack] Skipping abort for completed task ${task.taskId}`)
 			}
 
 			// Remove event listeners before clearing the reference.
@@ -484,9 +495,16 @@ export class ClineProvider
 	// This is used when a subtask is finished and the parent task needs to be
 	// resumed.
 	async finishSubTask(lastMessage: string) {
+		// Mark the subtask as finished successfully BEFORE removing from stack
+		// This flag is checked by waitForChildren to determine success
+		const subtask = this.getCurrentTask()
+		if (subtask) {
+			subtask.finishedSuccessfully = true
+		}
 		// Remove the last cline instance from the stack (this is the finished
-		// subtask).
-		await this.removeClineFromStack()
+		// subtask). Pass skipAbort=true because this subtask completed successfully
+		// and should NOT be marked as aborted (which would cause waitForChildren to see it as failed)
+		await this.removeClineFromStack(true)
 		// Resume the last cline instance in the stack (if it exists - this is
 		// the 'parent' calling task).
 		await this.getCurrentTask()?.completeSubtask(lastMessage)
@@ -2559,7 +2577,7 @@ export class ClineProvider
 		// This ensures that API keys and settings passed to createTask() override VS Code settings
 		// After setValues(), get fresh provider settings which includes secrets that were just set
 		const freshProviderSettings = this.contextProxy.getProviderSettings()
-		
+
 		// Build final API configuration: state -> fresh settings -> configuration parameter (last wins)
 		// This ensures configuration parameter (including API keys) always overrides VS Code settings
 		const apiConfiguration = {
@@ -2581,12 +2599,12 @@ export class ClineProvider
 		}
 
 		// Ensure subtask inherits parent's configuration
-		const inheritedApiConfiguration = parentTask
-			? parentTask.apiConfiguration
-			: apiConfiguration
-		const inheritedWorkspacePath = parentTask
-			? parentTask.workspacePath
-			: (options as any).workspacePath
+		const inheritedApiConfiguration = parentTask ? parentTask.apiConfiguration : apiConfiguration
+		// Allow an explicit workspacePath in options (e.g. a pre-created worktree)
+		// to override the parent's workspacePath.  This is used by PlanExecutor
+		// to set the child's cwd before the task starts running.
+		const inheritedWorkspacePath =
+			(options as any).workspacePath || (parentTask ? parentTask.workspacePath : undefined)
 
 		// Logging: Track subtask creation and inheritance
 		if (process.env.ROO_DEBUG_TOOL_EXECUTION) {

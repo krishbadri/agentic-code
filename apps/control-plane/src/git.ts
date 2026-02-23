@@ -1,18 +1,94 @@
-import { execFile } from "node:child_process"
+import { execFile, exec } from "node:child_process"
 import { promisify } from "node:util"
 import * as path from "node:path"
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import { CPError } from "./errors.js"
 const pexec = promisify(execFile)
+const pexecShell = promisify(exec)
 
 export type GitConfig = { repoRoot: string }
+
+/** Cached resolved git binary path (module-level so it persists across Git instances). */
+let resolvedGitBinary: string | undefined
+
+/**
+ * Resolve the git binary path. Tries (in order):
+ * 1. GIT_BINARY_PATH environment variable (set by the VS Code extension)
+ * 2. "git" on PATH via shell (handles Windows PATH/PATHEXT quirks)
+ * 3. `where git` (Windows) / `which git` (Unix) to discover the full path
+ * 4. Common Windows install locations
+ */
+async function resolveGitBinary(): Promise<string> {
+	if (resolvedGitBinary) return resolvedGitBinary
+
+	// 1. Check environment variable (passed by VS Code extension host)
+	if (process.env.GIT_BINARY_PATH) {
+		try {
+			await pexec(process.env.GIT_BINARY_PATH, ["--version"], { windowsHide: true })
+			resolvedGitBinary = process.env.GIT_BINARY_PATH
+			console.log(`[CP/Git] Using GIT_BINARY_PATH: ${resolvedGitBinary}`)
+			return resolvedGitBinary
+		} catch {
+			// env var set but path invalid, continue
+		}
+	}
+
+	// 2. Try plain "git" via shell (handles PATH + PATHEXT correctly on Windows)
+	try {
+		const { stdout } = await pexecShell("git --version", { windowsHide: true })
+		if (stdout.includes("git version")) {
+			// "git" works via shell – now find the actual path for execFile use
+			const findCmd = process.platform === "win32" ? "where git" : "which git"
+			try {
+				const { stdout: pathOut } = await pexecShell(findCmd, { windowsHide: true })
+				const gitPath = pathOut.trim().split(/\r?\n/)[0]?.trim()
+				if (gitPath) {
+					resolvedGitBinary = gitPath
+					console.log(`[CP/Git] Resolved git binary: ${resolvedGitBinary}`)
+					return resolvedGitBinary
+				}
+			} catch {
+				// where/which failed but git works via shell – use "git" with shell fallback
+			}
+			// Shell can find git but we couldn't get the path; use "git" and hope execFile works
+			resolvedGitBinary = "git"
+			return resolvedGitBinary
+		}
+	} catch {
+		// git not available via shell either
+	}
+
+	// 3. Windows: try common install locations
+	if (process.platform === "win32") {
+		const candidates = [
+			path.join("C:", "Program Files", "Git", "cmd", "git.exe"),
+			path.join("C:", "Program Files", "Git", "bin", "git.exe"),
+			path.join("C:", "Program Files", "Git", "mingw64", "bin", "git.exe"),
+			path.join("C:", "Program Files (x86)", "Git", "cmd", "git.exe"),
+			path.join("C:", "Program Files (x86)", "Git", "bin", "git.exe"),
+		]
+		for (const candidate of candidates) {
+			try {
+				await pexec(candidate, ["--version"], { windowsHide: true })
+				resolvedGitBinary = candidate
+				console.log(`[CP/Git] Found git at fallback path: ${resolvedGitBinary}`)
+				return resolvedGitBinary
+			} catch {
+				// try next
+			}
+		}
+	}
+
+	throw new Error("git not found: checked PATH, GIT_BINARY_PATH env, where/which, and common install locations")
+}
 
 export class Git {
 	constructor(private cfg: GitConfig) {}
 
 	private async git(args: string[], cwd?: string) {
-		return pexec("git", args, { cwd: cwd ?? this.cfg.repoRoot, windowsHide: true })
+		const binary = await resolveGitBinary()
+		return pexec(binary, args, { cwd: cwd ?? this.cfg.repoRoot, windowsHide: true })
 	}
 
 	/**

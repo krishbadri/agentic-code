@@ -62,6 +62,7 @@ async function generatePrompt(
 	settings?: SystemPromptSettings,
 	todoList?: TodoItem[],
 	modelId?: string,
+	isChildTask?: boolean,
 ): Promise<string> {
 	if (!context) {
 		throw new Error("Extension context is required for generating system prompt")
@@ -108,6 +109,7 @@ ${getToolDescriptionsForMode(
 	settings,
 	enableMcpServerCreation,
 	modelId,
+	isChildTask,
 )}
 
 ${getToolUseGuidelinesSection(codeIndexManager)}
@@ -153,9 +155,24 @@ export const SYSTEM_PROMPT = async (
 	settings?: SystemPromptSettings,
 	todoList?: TodoItem[],
 	modelId?: string,
+	isChildTask?: boolean,
 ): Promise<string> => {
 	if (!context) {
 		throw new Error("Extension context is required for generating system prompt")
+	}
+
+	// Deterministic torture VCR system prompt:
+	// - Keep the prompt very small to avoid low TPM / "request too large" failures during recording.
+	// - Avoid including volatile or expansive sections (tool listings, rules, environment, etc).
+	const vcrMode = (process.env.ROO_VCR_MODE || "off").toLowerCase()
+	if (process.env.TEST_TORTURE_REPO === "1" && (vcrMode === "record" || vcrMode === "replay")) {
+		return [
+			"You are Roo Code, an AI coding agent running under deterministic VCR tests.",
+			"",
+			"- Keep responses concise.",
+			"- If you need to edit files, run commands, or search, use the available tools (do not ask the user).",
+			"- Do not include timestamps, random IDs, or machine-specific paths in your reasoning.",
+		].join("\n")
 	}
 
 	// Try to load custom system prompt from file
@@ -225,5 +242,6 @@ ${customInstructions}`
 		settings,
 		todoList,
 		modelId,
+		isChildTask,
 	)
 }

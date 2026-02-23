@@ -22,12 +22,9 @@ describe("getToolUseGuidelinesSection", () => {
 
 			// Check that the guidelines include the codebase_search enforcement
 			expect(guidelines).toContain(
-				"CRITICAL: For ANY exploration of code you haven't examined yet in this conversation, you MUST use the `codebase_search` tool FIRST",
+				"CRITICAL: Always use `codebase_search` FIRST before other search/exploration tools",
 			)
-			expect(guidelines).toContain("before any other search or file exploration tools")
-			expect(guidelines).toContain(
-				"semantic search to find relevant code based on meaning rather than just keywords",
-			)
+			expect(guidelines).toContain("semantic search based on meaning")
 		})
 
 		it("should maintain proper numbering with codebase_search", () => {
@@ -49,10 +46,7 @@ describe("getToolUseGuidelinesSection", () => {
 			const guidelines = getToolUseGuidelinesSection(mockCodeIndexManagerDisabled)
 
 			// Check that the guidelines do not include the codebase_search enforcement
-			expect(guidelines).not.toContain(
-				"CRITICAL: For ANY exploration of code you haven't examined yet in this conversation, you MUST use the `codebase_search` tool FIRST",
-			)
-			expect(guidelines).not.toContain("semantic search to find relevant code based on meaning")
+			expect(guidelines).not.toContain("codebase_search")
 		})
 
 		it("should maintain proper numbering without codebase_search", () => {
@@ -68,17 +62,13 @@ describe("getToolUseGuidelinesSection", () => {
 		})
 	})
 
-	it("should include iterative process guidelines regardless of codebase_search availability", () => {
+	it("should include wait-for-confirmation guideline regardless of codebase_search availability", () => {
 		const guidelinesEnabled = getToolUseGuidelinesSection(mockCodeIndexManagerEnabled)
 		const guidelinesDisabled = getToolUseGuidelinesSection(mockCodeIndexManagerDisabled)
 
-		// Check that the iterative process section is included in both cases
+		// Check that the wait-for-confirmation guideline is included in both cases
 		for (const guidelines of [guidelinesEnabled, guidelinesDisabled]) {
-			expect(guidelines).toContain("It is crucial to proceed step-by-step")
-			expect(guidelines).toContain("1. Confirm the success of each step before proceeding")
-			expect(guidelines).toContain("2. Address any issues or errors that arise immediately")
-			expect(guidelines).toContain("3. Adapt your approach based on new information")
-			expect(guidelines).toContain("4. Ensure that each action builds correctly")
+			expect(guidelines).toContain("ALWAYS wait for user confirmation")
 		}
 	})
 })

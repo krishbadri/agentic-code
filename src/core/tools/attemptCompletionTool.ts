@@ -52,6 +52,53 @@ export async function attemptCompletionTool(
 		return
 	}
 
+	const isTortureStage1 = process.env.TEST_TORTURE_REPO === "1" && process.env.TEST_TORTURE_STAGE === "1"
+
+	// SUBTASK FILE MUTATION ENFORCEMENT
+	// Subtasks must modify at least one file before completing.
+	// Returning code in the result text is NOT sufficient - the code must be written to disk.
+	// This prevents subtasks from "succeeding" by just generating code without actually modifying the repo.
+	//
+	// Torture Stage 1 is explicitly a code-writing exercise; enforce the same rule at the top-level task
+	// to prevent a "text-only completion" that then fails hard gates and wastes the full timeout.
+	if ((cline.parentTask || isTortureStage1) && !cline.fileMutationOccurred) {
+		cline.consecutiveMistakeCount++
+		// IMPORTANT: This is an enforcement block, not an infrastructure/tool failure.
+		// Do NOT emit a TaskToolFailed event here (it triggers fast-fail in e2e and can abort
+		// otherwise-correct runs where the model tries to complete early once or twice).
+		cline.recordToolError("attempt_completion")
+
+		const provider = cline.providerRef.deref()
+		const scopeLabel = cline.parentTask ? "Subtask" : "Task"
+		provider?.log(
+			`[attemptCompletionTool] BLOCKED: ${scopeLabel} ${cline.taskId} attempted to complete without modifying any files. ` +
+				`File-mutating tools (write_to_file, apply_diff, insert_content) must be used before completion.`,
+		)
+
+		// Inject a hard constraint on the NEXT turn to prevent the model from repeatedly
+		// attempting text-only completion. This reuses the existing "tool validation" constraint
+		// injection mechanism to keep the behavior deterministic in e2e torture runs.
+		cline.pendingValidationError = {
+			tool: "attempt_completion",
+			code: cline.parentTask ? "SUBTASK_NO_FILE_MUTATION" : "TASK_NO_FILE_MUTATION",
+			message:
+				`You attempted to complete a ${cline.parentTask ? "subtask" : "task"} without modifying any files. REQUIRED NEXT STEP: ` +
+				"Use a file-mutating tool (write_to_file or insert_content) to write the implementation/tests to disk. " +
+				`Do NOT call <attempt_completion> again until you have successfully modified at least one file in this ${cline.parentTask ? "subtask" : "task"}.`,
+		}
+		cline.forceConstraintNextTurn = true
+
+		pushToolResult(
+			formatResponse.toolError(
+				`Cannot complete ${cline.parentTask ? "subtask" : "task"} without modifying any files. You must use file-editing tools ` +
+					"(write_to_file, apply_diff, insert_content) to actually write the code to disk before completing. " +
+					"Returning code in the completion result is not sufficient - the changes must be saved to the repository.",
+			),
+		)
+
+		return
+	}
+
 	try {
 		const lastMessage = cline.clineMessages.at(-1)
 
@@ -132,11 +179,15 @@ export async function attemptCompletionTool(
 				throw error
 			}
 
-			// Signals to recursive loop to stop (for now
-			// cline never happens since yesButtonClicked
-			// will trigger a new task).
+			// When the user (or e2e auto-approve) clicks "yes" on completion,
+			// do NOT push a tool result. Leaving userMessageContent empty
+			// signals the recursive loop to exit cleanly.
+			// In the normal UI, clicking "yes" triggers a new task anyway.
+			// In e2e mode, pushToolResult("") was producing a confusing
+			// "(tool did not return anything)" message that caused the model
+			// to loop indefinitely (re-running tests, re-reading files, etc.).
 			if (response === "yesButtonClicked") {
-				pushToolResult("")
+				cline.finishedSuccessfully = true
 				return
 			}
 

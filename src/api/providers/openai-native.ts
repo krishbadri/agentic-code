@@ -20,6 +20,8 @@ import { calculateApiCostOpenAI } from "../../shared/cost"
 
 import { ApiStream, ApiStreamUsageChunk } from "../transform/stream"
 import { getModelParams } from "../transform/model-params"
+import { isVcrEnabled } from "../vcr/vcrConfig"
+import { maybeVcrWrapStreamLazy, type VcrRequestDescriptor } from "../vcr/recordReplay"
 
 import { BaseProvider } from "./base-provider"
 import type { SingleCompletionHandler, ApiHandlerCreateMessageMetadata } from "../index"
@@ -300,9 +302,34 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 		systemPrompt?: string,
 		messages?: Anthropic.Messages.MessageParam[],
 	): ApiStream {
+		const buildVcrDescriptor = (body: any): VcrRequestDescriptor => ({
+			providerName: "openai-native",
+			model: model.id,
+			endpoint: "openai-responses",
+			params: {
+				// NOTE: Keep this minimal but sufficient for stable replay keying.
+				model: body?.model,
+				input: body?.input,
+				instructions: body?.instructions,
+				temperature: body?.temperature,
+				max_output_tokens: body?.max_output_tokens,
+				previous_response_id: body?.previous_response_id,
+				reasoning: body?.reasoning,
+				text: body?.text,
+				service_tier: body?.service_tier,
+				store: body?.store,
+				stream: true,
+			},
+		})
+
 		try {
 			// Use the official SDK
-			const stream = (await (this.client as any).responses.create(requestBody)) as AsyncIterable<any>
+			// IMPORTANT: In replay mode, do NOT create the real stream (would make a live network call).
+			const stream = isVcrEnabled()
+				? await maybeVcrWrapStreamLazy(buildVcrDescriptor(requestBody), async () => {
+						return (await (this.client as any).responses.create(requestBody)) as AsyncIterable<any>
+					})
+				: ((await (this.client as any).responses.create(requestBody)) as AsyncIterable<any>)
 
 			if (typeof (stream as any)[Symbol.asyncIterator] !== "function") {
 				throw new Error(
@@ -340,9 +367,14 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 
 				try {
 					// Retry with the SDK
-					const retryStream = (await (this.client as any).responses.create(
-						retryRequestBody,
-					)) as AsyncIterable<any>
+					// IMPORTANT: In replay mode, do NOT create the real stream (would make a live network call).
+					const retryStream = isVcrEnabled()
+						? await maybeVcrWrapStreamLazy(buildVcrDescriptor(retryRequestBody), async () => {
+								return (await (this.client as any).responses.create(
+									retryRequestBody,
+								)) as AsyncIterable<any>
+							})
+						: ((await (this.client as any).responses.create(retryRequestBody)) as AsyncIterable<any>)
 
 					if (typeof (retryStream as any)[Symbol.asyncIterator] !== "function") {
 						// If SDK fails, fall back to SSE

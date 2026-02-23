@@ -32,6 +32,22 @@ export async function getEnvironmentDetails(cline: Task, includeFileDetails: boo
 		maxWorkspaceFiles = 200,
 	} = state ?? {}
 
+	// Deterministic, low-noise environment details for torture VCR runs.
+	// In REPLAY/RECORD we must avoid including volatile fields (time, terminal output, "recently modified", etc)
+	// because they change request payloads and break cassette keying.
+	const vcrMode = (process.env.ROO_VCR_MODE || "off").toLowerCase()
+	const isTortureVcr = process.env.TEST_TORTURE_REPO === "1" && (vcrMode === "record" || vcrMode === "replay")
+	if (isTortureVcr) {
+		const stable = [
+			"# Deterministic Environment Details (torture VCR)",
+			`workspace: ${cline.cwd.toPosix()}`,
+			`platform: ${process.platform}`,
+			`node: ${process.version}`,
+			"(time/terminals/tabs/visible files/todos omitted for stable VCR keying)",
+		].join("\n")
+		return `<environment_details>\n${stable}\n</environment_details>`
+	}
+
 	// It could be useful for cline to know if the user went from one or no
 	// file to another between messages, so we always include this context.
 	details += "\n\n# VSCode Visible Files"

@@ -4,7 +4,12 @@ import * as vscode from "vscode"
 
 import delay from "delay"
 
-import { CommandExecutionStatus, DEFAULT_TERMINAL_OUTPUT_CHARACTER_LIMIT, getApiProtocol, getModelId } from "@roo-code/types"
+import {
+	CommandExecutionStatus,
+	DEFAULT_TERMINAL_OUTPUT_CHARACTER_LIMIT,
+	getApiProtocol,
+	getModelId,
+} from "@roo-code/types"
 import { TelemetryService } from "@roo-code/telemetry"
 
 import { Task } from "../task/Task"
@@ -54,6 +59,107 @@ export async function executeCommandTool(
 			task.consecutiveMistakeCount = 0
 
 			command = unescapeHtmlEntities(command) // Unescape HTML entities.
+
+			// Guard: Detect when the model tries to run XML tools as shell commands.
+			// GPT-5 and similar models sometimes confuse tool calls with CLI commands.
+			// Uses forceConstraintNextTurn to inject a hard directive on the next turn.
+			const lowerCmdCheck = command.toLowerCase().trim()
+			if (lowerCmdCheck.startsWith("rollback_to_checkpoint") || lowerCmdCheck.startsWith("save_checkpoint")) {
+				task.consecutiveMistakeCount++
+				task.recordToolError("execute_command", `Tried to run XML tool as shell command: ${command}`)
+				const toolName = lowerCmdCheck.startsWith("rollback") ? "rollback_to_checkpoint" : "save_checkpoint"
+				const paramName = toolName === "rollback_to_checkpoint" ? "checkpoint_name" : "name"
+				// Extract the argument from the command (e.g. rollback_to_checkpoint "C1_tests" → C1_tests)
+				const argMatch = command.match(/["']([^"']+)["']/) || command.match(/\s+(\S+)$/)
+				const argValue = argMatch ? argMatch[1] : "C1_tests"
+
+				const correctXml = `<${toolName}>\n<${paramName}>${argValue}</${paramName}>\n</${toolName}>`
+
+				// Inject hard constraint on next turn so the model uses the correct XML format
+				task.pendingValidationError = {
+					tool: "execute_command",
+					code: "TOOL_IS_NOT_CLI_COMMAND",
+					message:
+						`CRITICAL: ${toolName} is an XML tool, NOT a shell command or CLI executable. ` +
+						`It does not exist in the terminal. Do NOT use execute_command, do NOT ask the user how to run it, ` +
+						`do NOT look for a script or executable. ` +
+						`Your ONLY correct action is to output this exact XML on your next turn:\n\n${correctXml}\n\n` +
+						`This XML is interpreted by the tool system directly. Just output it as your next tool call.`,
+				}
+				task.forceConstraintNextTurn = true
+
+				pushToolResult(
+					formatResponse.toolError(
+						`${toolName} is NOT a shell command — it is an XML tool built into this system.\n\n` +
+							`Do NOT use execute_command. Do NOT ask the user. Do NOT look for a script.\n\n` +
+							`Output this XML as your next tool call:\n${correctXml}`,
+					),
+				)
+				return
+			}
+
+			// Guard: Forbid manual git rollback commands when checkpoints are enabled
+			// During rollback drills (Stage 2), only the rollback_to_checkpoint tool should be used
+			if (task.enableCheckpoints) {
+				const lowerCmd = command.toLowerCase().trim()
+				const forbiddenPatterns = [
+					/git\s+reset(\s+--hard)?/,
+					/git\s+restore/,
+					/git\s+checkout\s+[a-f0-9]{7,40}/, // git checkout <hash>
+					/git\s+revert/,
+					/git\s+clean\s+-[fFdD]/,
+				]
+
+				for (const pattern of forbiddenPatterns) {
+					if (pattern.test(lowerCmd)) {
+						task.consecutiveMistakeCount++
+						task.recordToolError("execute_command", `Forbidden git rollback command: ${command}`)
+						pushToolResult(
+							formatResponse.toolError(
+								`FORBIDDEN: Manual git rollback commands are not allowed when checkpoints are enabled.\n\n` +
+									`Command attempted: ${command}\n\n` +
+									`To rollback, you MUST use the rollback_to_checkpoint tool:\n` +
+									`<rollback_to_checkpoint>\n` +
+									`<checkpoint_name>C1_tests</checkpoint_name>\n` +
+									`</rollback_to_checkpoint>\n\n` +
+									`Do NOT use git reset, git restore, git checkout <hash>, git revert, or git clean. ` +
+									`These commands bypass the checkpoint mechanism and will cause verification failures.`,
+							),
+						)
+						return
+					}
+				}
+			}
+
+			// Guard against runaway loops where the model repeats the same command over and over.
+			// This is especially common in torture runs (and can burn the entire timeout budget).
+			if (process.env.TEST_TORTURE_REPO === "1") {
+				const normalized = command.trim().replace(/\s+/g, " ")
+				if (task.lastExecuteCommandNormalized === normalized) {
+					task.consecutiveExecuteCommandSameCount++
+				} else {
+					task.lastExecuteCommandNormalized = normalized
+					task.consecutiveExecuteCommandSameCount = 1
+				}
+
+				// Allow a few repeats (sometimes a command is legitimately retried),
+				// but stop the runaway case.
+				if (task.consecutiveExecuteCommandSameCount >= 6) {
+					task.consecutiveMistakeCount++
+					task.recordToolError(
+						"execute_command",
+						`Repeated same command ${task.consecutiveExecuteCommandSameCount} times: ${normalized}`,
+					)
+					pushToolResult(
+						formatResponse.toolError(
+							`Repeated the same command ${task.consecutiveExecuteCommandSameCount} times. ` +
+								`Stop repeating and proceed with code changes/tests. Command: ${normalized}`,
+						),
+					)
+					return
+				}
+			}
+
 			const didApprove = await askApproval("command", command)
 
 			if (!didApprove) {
@@ -64,11 +170,15 @@ export async function executeCommandTool(
 			const provider = await task.providerRef.deref()
 			const providerState = await provider?.getState()
 
+			const isStage2 = process.env.TEST_TORTURE_STAGE === "2"
 			const {
-				terminalOutputLineLimit = 500,
-				terminalOutputCharacterLimit = DEFAULT_TERMINAL_OUTPUT_CHARACTER_LIMIT,
+				terminalOutputLineLimit: stateLineLimit = 500,
+				terminalOutputCharacterLimit: stateCharLimit = DEFAULT_TERMINAL_OUTPUT_CHARACTER_LIMIT,
 				terminalShellIntegrationDisabled = false,
 			} = providerState ?? {}
+			// Payload control: stricter limits for Stage 2 to avoid "request too large" errors
+			const terminalOutputLineLimit = isStage2 ? 200 : stateLineLimit
+			const terminalOutputCharacterLimit = isStage2 ? 12_000 : stateCharLimit
 
 			// Get command execution timeout from VSCode configuration (in seconds)
 			const commandExecutionTimeoutSeconds = vscode.workspace
@@ -103,7 +213,7 @@ export async function executeCommandTool(
 					cfg.get<boolean>("roo.experimental.transactionalMode") ||
 					cfg.get<boolean>("roo-cline.experimental.transactionalMode")
 
-				if (transactional) {
+				if (transactional && !task.skipTransactionalWrites) {
 					const txId = await vscode.commands.executeCommand<string>("roo.internal.getCurrentTxId")
 					const provider = task.providerRef.deref()
 					const port = provider?.context?.globalState.get<number>("roo.cpPort")
@@ -125,7 +235,30 @@ export async function executeCommandTool(
 							const body = await res.json().catch(() => ({}))
 							const stdout = Buffer.from(body.stdout_base64 || "", "base64").toString("utf8")
 							const stderr = Buffer.from(body.stderr_base64 || "", "base64").toString("utf8")
-							const output = [stdout, stderr].filter(Boolean).join("\n")
+							const rawOutput = [stdout, stderr].filter(Boolean).join("\n")
+							// Payload control: compress large outputs to avoid "request too large" errors
+							let output = rawOutput
+							if (rawOutput && rawOutput.length > 0) {
+								const compressed = Terminal.compressTerminalOutput(
+									rawOutput,
+									terminalOutputLineLimit,
+									terminalOutputCharacterLimit,
+								)
+								if (isStage2 && rawOutput.length > 12_000) {
+									// Save full output to file, pass summary + path
+									const outPath = path.join(task.cwd || "", ".roo-output.txt")
+									try {
+										await fs.writeFile(outPath, rawOutput, "utf8")
+										const exitHint =
+											body.exit_code !== undefined ? ` Exit code: ${body.exit_code}.` : ""
+										output = `${compressed}\n\n[Full output saved to .roo-output.txt]${exitHint}`
+									} catch {
+										output = compressed
+									}
+								} else {
+									output = compressed
+								}
+							}
 							pushToolResult(output || "<no output>")
 							return
 						}
@@ -136,10 +269,7 @@ export async function executeCommandTool(
 				const provider = await task.providerRef.deref()
 				if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
 					const modelId = task.api.getModel().id
-					const apiProtocol = getApiProtocol(
-						(task.apiConfiguration as any)?.apiProvider,
-						modelId,
-					)
+					const apiProtocol = getApiProtocol((task.apiConfiguration as any)?.apiProvider, modelId)
 					provider.log(
 						`[executeCommandTool] Executing command - Protocol: ${apiProtocol}, Provider: ${(task.apiConfiguration as any)?.apiProvider}, Model: ${modelId}, Command: ${command.substring(0, 100)}`,
 					)
@@ -154,7 +284,8 @@ export async function executeCommandTool(
 				// Logging: Track tool execution result
 				const providerForLogging = await task.providerRef.deref()
 				if (providerForLogging && process.env.ROO_DEBUG_TOOL_EXECUTION) {
-					const resultPreview = typeof result === "string" ? result.substring(0, 200) : JSON.stringify(result).substring(0, 200)
+					const resultPreview =
+						typeof result === "string" ? result.substring(0, 200) : JSON.stringify(result).substring(0, 200)
 					providerForLogging.log(
 						`[executeCommandTool] Command execution completed - Rejected: ${rejected}, Result preview: ${resultPreview}`,
 					)
@@ -400,14 +531,16 @@ export async function executeCommand(
 						// Common case: command not found or no matches (ripgrep returns 1 for no matches)
 						exitStatus += "Command execution completed but may indicate:\n"
 						exitStatus += "- Command not found (check if the command is installed and in PATH)\n"
-						exitStatus += "- No matches found (for search commands like grep/ripgrep, this is normal if nothing matches)\n"
+						exitStatus +=
+							"- No matches found (for search commands like grep/ripgrep, this is normal if nothing matches)\n"
 						exitStatus += "- Command failed silently (check command syntax and permissions)\n"
 					} else {
 						exitStatus += "Command execution was not successful. "
 						if (result.trim()) {
 							exitStatus += "Error output:\n"
 						} else {
-							exitStatus += "No output was produced. This may indicate the command failed or was not found.\n"
+							exitStatus +=
+								"No output was produced. This may indicate the command failed or was not found.\n"
 						}
 					}
 				}

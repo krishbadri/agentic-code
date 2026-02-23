@@ -15,7 +15,8 @@ const TORTURE_REPO = "C:\\Users\\kpb20\\Downloads\\txn-agent-torture-repo2\\txn-
 
 // Hard timeout for torture test - MUST complete within this time
 // Increased to allow slow models to complete complex tasks
-const TORTURE_TIMEOUT_MS = 600_000 // 600 seconds (10 minutes) - correctness matters more than speed
+// Temporarily increased to 900s for recording complete successful run
+const TORTURE_TIMEOUT_MS = 900_000 // 900 seconds (15 minutes) - temporarily increased for recording
 
 // Fast-fail threshold for consecutive API failures
 const MAX_CONSECUTIVE_API_FAILURES = 3
@@ -26,121 +27,86 @@ I should be able to switch via CLI: --store sqlite and env var TXN_TODO_DB for t
 
 Requirements:
 - Create a SqliteKV class that implements the KVStore interface in app/store.py
-- Update make_store() to return SqliteKV when kind="sqlite"
-- Add unit tests that cover SQLite persistence across process restarts
+- IMPORTANT: Update make_store() function to REPLACE the "raise NotImplementedError" with "return SqliteKV(sqlite_path)" when kind="sqlite"
+  - You MUST use write_to_file to rewrite app/store.py with both the SqliteKV class AND the updated make_store() function
+  - The current make_store() has a stub that raises NotImplementedError - this stub MUST be removed
+- Add unit tests for SQLite persistence (create tests/test_sqlite_store.py with at least 3 tests)
 - Update README with usage examples
 
 Success criteria:
 - All existing tests pass
-- New SQLite tests pass
-- CLI works with --store sqlite`
+- New SQLite tests pass (at least 3 new tests)
+- CLI works with --store sqlite (must NOT raise NotImplementedError)`
 
+const stage_2_prompt = `Implement "named projects" for todos so one store can hold multiple independent todo lists. A todo belongs to a project string. Default project is "default".
 
-const stage_2_prompt = `
-STAGE 2 TORTURE TASK (Single agent + checkpoints + rollback required)
+Functional requirements
+1) Isolation by project
+- Todos must be isolated by project. Listing project A must never show items from project B.
+- done/delete must only affect items within the selected project.
 
-You are operating on the txn-agent-torture-repo workspace (NOT the Roo-Code monorepo). Confirm you are in the right repo by locating:
-- app/core.py
-- app/store.py
-- tests/test_basic.py
-If these do not exist in the current workspace, locate the torture repo root via environment variables (TORTURE_REPO_ROOT / TEST_TORTURE_REPO_WORKSPACE / TXN_AGENT_TORTURE_REPO) and switch to that directory before making changes.
+2) Works for both backends
+- Behavior must be correct for both the in-memory backend and the sqlite backend.
+- Persistence for sqlite must preserve project isolation across process restarts.
 
-Goal
-Implement an atomic bulk-add operation for todos, and prove atomicity via unit tests, for BOTH backends (memory + sqlite).
-This task is specifically meant to exercise CHECKPOINTS and ROLLBACK in the agent system.
+CLI requirements
+- Add a global CLI option: --project <name> with default "default".
+- Commands add/list/done/delete must operate within the selected project.
+- Keep existing output formats unless you must change them. If you change output, keep it minimal.
 
-Functional Requirements
-1) Add a new service API:
-   - In app/core.py, add TodoService.bulk_add(titles: list[str]) -> list[str]
-   - It creates one todo per title (same semantics as add(): strip, reject empty).
-   - Returns the created todo IDs in the same order as input titles.
+Tests (this is required)
+- Add new unit tests covering:
+  a) project isolation in-memory
+  b) project isolation in sqlite
+  c) sqlite persistence across a fresh store instance (simulate restart) does not mix projects
+- Do not modify existing tests except for necessary imports/fixtures if absolutely required. Prefer adding new tests only.
+- All tests must pass at the end.
 
-2) Atomicity requirement (must be enforced):
-   - bulk_add is ALL-OR-NOTHING.
-   - If ANY title is invalid (empty or whitespace after strip), then:
-     - bulk_add raises ValueError
-     - and NO todos from that call are persisted (no partial writes).
-   - Atomicity must hold for both backends:
-     - store.kind == "memory"
-     - store.kind == "sqlite" (file-backed)
+Checkpoint + rollback protocol
+Complete the work in three transaction boundaries with checkpoints.
+IMPORTANT: save_checkpoint and rollback_to_checkpoint are XML tools, NOT shell commands.
+Do NOT run them with execute_command. Use them as XML tool calls like this:
 
-3) Store-level transaction support (so atomicity is real, not best-effort deletes):
-   - Extend the KVStore abstraction to support a transaction context manager.
-   - Implement it for MemoryKV and SqliteKV.
-   - bulk_add must use this transaction mechanism so the operation is atomic.
-   Notes:
-   - SqliteKV currently commits inside each operation via \`with self._conn:\`. You must refactor so that multiple put/delete operations can participate in ONE transaction when running inside KVStore.transaction().
-   - MemoryKV should snapshot and restore state on rollback (thread-safe).
+To save a checkpoint:
+<save_checkpoint>
+<name>C1_tests</name>
+</save_checkpoint>
 
-4) CLI + docs:
-   - Add a new CLI command:
-       todo bulk-add <titles...>
-     Example:
-       python -m app.cli bulk-add "a" "b" "c"
-   - It should print the created IDs (one per line is fine).
-   - Update README.md with a short example.
+To rollback to a checkpoint:
+<rollback_to_checkpoint>
+<checkpoint_name>C1_tests</checkpoint_name>
+</rollback_to_checkpoint>
 
-Testing Requirements
-Add tests (pytest) that prove atomicity, at minimum:
-- Memory backend:
-  - calling bulk_add(["ok1", "   ", "ok2"]) raises ValueError
-  - and leaves the todo list unchanged (no ok1 added).
-- Sqlite backend:
-  - same invalid-input test verifies no partial writes.
-  - also add a “success” test that bulk_add adds N items and they persist.
+Do NOT use git reset, git restore, or any git commands for rollback.
 
-Put tests in a new file tests/test_bulk_add.py (preferred) or the most appropriate existing tests file.
-Do not delete existing tests.
+Boundary 1: tests/spec
+- Make any interface/type updates needed for project scoping.
+- Add the new tests first (they should fail before implementation).
+- Run tests to confirm they fail for the expected reason.
+- Save checkpoint C1_tests using the save_checkpoint XML tool shown above.
 
-Mandatory Stage 2 Checkpoints + Rollback (THIS IS THE POINT OF STAGE 2)
-You MUST create checkpoints and you MUST perform at least one rollback, even if you could implement everything correctly on the first try.
+Rollback drill (mandatory)
+- After C1_tests checkpoint, create ROLLBACK_SENTINEL.txt at repo root.
+- Make a small intentional incorrect code change to force test failure.
+- Run tests and confirm failure.
+- Roll back to C1_tests using the rollback_to_checkpoint XML tool shown above.
+- Confirm ROLLBACK_SENTINEL.txt no longer exists and repo state matches C1_tests.
 
-Follow this exact process:
+Boundary 2: implementation
+- Implement project scoping end-to-end (store keys/schema, service logic, CLI wiring).
+- Ensure both backends pass all tests.
+- Save checkpoint C2_impl using the save_checkpoint XML tool.
 
-Checkpoint C1 — “tests+spec”
-A) First implement ONLY:
-   - the new tests
-   - the new method signature in TodoService (can be stubbed to raise NotImplementedError)
-   - any minimal interface scaffolding needed to compile/import
-B) Run tests and confirm the new tests fail for the right reason.
-C) Create checkpoint named: C1 tests+spec
+Boundary 3: docs/cleanup
+- Update README with examples (default project, named project, sqlite + project usage).
+- Any small cleanup required (formatting/refactor) with no behavior change.
+- Run full tests again.
+- Save checkpoint C3_docs using the save_checkpoint XML tool.
 
-Checkpoint C2 — “naive-impl”
-A) Implement a naive bulk_add that is NOT atomic (sequential adds; will partially write before failing).
-B) Run tests; confirm the atomicity tests fail due to partial writes.
-C) Create checkpoint named: C2 naive-impl
-
-Rollback (required)
-Rollback from C2 back to C1. After rollback:
-- verify the workspace reflects C1 state (naive changes gone)
-- then proceed to the real implementation.
-
-Checkpoint C3 — “atomic-impl”
-A) Implement the real atomic solution:
-   - KVStore.transaction()
-   - MemoryKV + SqliteKV transaction behavior
-   - TodoService.bulk_add uses transaction()
-   - CLI command bulk-add
-B) Run full tests and ensure all pass.
-C) Create checkpoint named: C3 atomic-impl
-
-Checkpoint C4 — “docs+cleanup”
-A) Update README.md docs and do any cleanup (formatting, typing, small refactors).
-B) Run tests again; ensure pass.
-C) Create checkpoint named: C4 docs+cleanup
-
-Output / Reporting (end of task)
-At the end, output:
-- files changed (list)
-- exact commands run
-- test results summary
-- the checkpoint/rollback sequence you performed (C1 -> C2 -> rollback to C1 -> C3 -> C4)
-
-Constraints
-- Do not ask me questions.
-- Do not introduce new heavy dependencies.
-- Keep existing behavior intact except for adding the bulk-add functionality.
-- Prefer small, well-scoped changes over large refactors.
+Completion output
+- The exact commands you ran for tests
+- Confirmation that the rollback drill removed ROLLBACK_SENTINEL.txt
+- A concise summary of code changes (files touched and what changed)
 `
 
 // Lifecycle checkpoints
@@ -184,12 +150,12 @@ const originalConsoleLog = console.log
 const originalConsoleError = console.error
 function captureConsole() {
 	console.log = (...args: unknown[]) => {
-		const msg = args.map(a => String(a)).join(" ")
+		const msg = args.map((a) => String(a)).join(" ")
 		consoleBuffer.push(`[LOG] ${msg}`)
 		originalConsoleLog.apply(console, args)
 	}
 	console.error = (...args: unknown[]) => {
-		const msg = args.map(a => String(a)).join(" ")
+		const msg = args.map((a) => String(a)).join(" ")
 		consoleBuffer.push(`[ERR] ${msg}`)
 		originalConsoleError.apply(console, args)
 	}
@@ -212,6 +178,9 @@ async function killProcessByPort(port: number): Promise<void> {
 		return
 	}
 	return new Promise((resolve) => {
+		// IMPORTANT: netstat output includes both LISTENERS and CLIENT connections.
+		// We MUST ONLY kill the LISTENING process bound to the local port, otherwise we can kill
+		// the VS Code extension host itself (it may have an ESTABLISHED connection to the port).
 		child_process.exec(`netstat -ano | findstr :${port}`, (error, stdout) => {
 			if (error || !stdout) {
 				resolve()
@@ -219,18 +188,33 @@ async function killProcessByPort(port: number): Promise<void> {
 			}
 			const pids = new Set<number>()
 			for (const line of stdout.split(/\r?\n/)) {
-				const parts = line.trim().split(/\s+/)
+				const trimmed = line.trim()
+				if (!trimmed) continue
+
+				const parts = trimmed.split(/\s+/)
+				// Typical Windows netstat formats:
+				// TCP  0.0.0.0:8899     0.0.0.0:0        LISTENING       1234
+				// TCP  [::]:8899        [::]:0           LISTENING       1234
+				// TCP  127.0.0.1:12345  127.0.0.1:8899   ESTABLISHED     5678
+				const local = parts[1]
+				const state = parts[3]
+				if (!local || !state) continue
+
+				// Only kill the listener bound to the local port.
+				if (!local.endsWith(`:${port}`)) continue
+				if (state.toUpperCase() !== "LISTENING") continue
+
 				const pidStr = parts[parts.length - 1]
 				const pid = Number(pidStr)
-				if (Number.isFinite(pid)) {
-					pids.add(pid)
-				}
+				if (Number.isFinite(pid)) pids.add(pid)
 			}
 			if (pids.size === 0) {
 				resolve()
 				return
 			}
-			const killCmd = `taskkill /T /F ${Array.from(pids).map((pid) => `/PID ${pid}`).join(" ")}`
+			const killCmd = `taskkill /T /F ${Array.from(pids)
+				.map((pid) => `/PID ${pid}`)
+				.join(" ")}`
 			child_process.exec(killCmd, () => resolve())
 		})
 	})
@@ -248,19 +232,19 @@ async function waitForPort(port: number, timeoutMs = 60000): Promise<void> {
 			})
 			socket.once("timeout", () => {
 				socket.destroy()
-			if (Date.now() - start > timeoutMs) {
-				reject(new Error(`Control-Plane port ${port} did not open within ${timeoutMs}ms`))
-			} else {
-				setTimeout(tryConnect, 250)
-			}
+				if (Date.now() - start > timeoutMs) {
+					reject(new Error(`Control-Plane port ${port} did not open within ${timeoutMs}ms`))
+				} else {
+					setTimeout(tryConnect, 250)
+				}
 			})
 			socket.once("error", () => {
 				socket.destroy()
-			if (Date.now() - start > timeoutMs) {
-				reject(new Error(`Control-Plane port ${port} did not open within ${timeoutMs}ms`))
-			} else {
-				setTimeout(tryConnect, 250)
-			}
+				if (Date.now() - start > timeoutMs) {
+					reject(new Error(`Control-Plane port ${port} did not open within ${timeoutMs}ms`))
+				} else {
+					setTimeout(tryConnect, 250)
+				}
 			})
 			socket.connect(port, "127.0.0.1")
 		}
@@ -271,15 +255,15 @@ async function waitForPort(port: number, timeoutMs = 60000): Promise<void> {
 suite("Roo Code Task", function () {
 	setDefaultSuiteTimeout(this)
 
-		test("Should handle prompt and response correctly", async function () {
+	test("Should handle prompt and response correctly", async function () {
 		// VERIFICATION-ONLY: If TEST_TORTURE_REPO is set, run torture repo scenario instead
 		if (process.env.TEST_TORTURE_REPO) {
 			// Hard timeout - test MUST complete within this time
 			this.timeout(TORTURE_TIMEOUT_MS + 5000) // Mocha timeout slightly longer than our internal timeout
-			
+
 			// Start capturing console output for potential timeout dump
 			captureConsole()
-			
+
 			// Log test start with comprehensive context
 			const testStartTime = Date.now()
 			console.log(`[TEST-LIFECYCLE] ========================================`)
@@ -289,16 +273,16 @@ suite("Roo Code Task", function () {
 			console.log(`[TEST-LIFECYCLE] Node version: ${process.version}`)
 			console.log(`[TEST-LIFECYCLE] Platform: ${process.platform}`)
 			console.log(`[TEST-LIFECYCLE] ========================================`)
-			
+
 			// Track VS Code process
 			let vscodeProcessPid: number | null = null
 			let vscodeProcessExited = false
 			let vscodeExitCode: number | null = null
 			let vscodeExitSignal: string | null = null
-			
+
 			// Track unhandled rejections
 			const unhandledRejections: Array<{ reason: unknown; promise: Promise<unknown> }> = []
-			process.on('unhandledRejection', (reason, promise) => {
+			process.on("unhandledRejection", (reason, promise) => {
 				console.error(`[TEST-LIFECYCLE] ========================================`)
 				console.error(`[TEST-LIFECYCLE] UNHANDLED REJECTION DETECTED!`)
 				console.error(`[TEST-LIFECYCLE] Reason:`, reason)
@@ -307,9 +291,9 @@ suite("Roo Code Task", function () {
 				console.error(`[TEST-LIFECYCLE] ========================================`)
 				unhandledRejections.push({ reason, promise })
 			})
-			
+
 			// Track uncaught exceptions
-			process.on('uncaughtException', (error) => {
+			process.on("uncaughtException", (error) => {
 				console.error(`[TEST-LIFECYCLE] ========================================`)
 				console.error(`[TEST-LIFECYCLE] UNCAUGHT EXCEPTION DETECTED!`)
 				console.error(`[TEST-LIFECYCLE] Error:`, error)
@@ -317,7 +301,7 @@ suite("Roo Code Task", function () {
 				console.error(`[TEST-LIFECYCLE] Test duration: ${Date.now() - testStartTime}ms`)
 				console.error(`[TEST-LIFECYCLE] ========================================`)
 			})
-			
+
 			checkpoint("VS Code launched")
 			console.log(`[torture-test] Starting with hard timeout of ${TORTURE_TIMEOUT_MS / 1000}s`)
 
@@ -327,18 +311,25 @@ suite("Roo Code Task", function () {
 				const actualWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
 				const expectedPath = path.normalize(expectedWorkspace).replace(/[\/\\]+$/, "")
 				const actualPath = actualWorkspace ? path.normalize(actualWorkspace).replace(/[\/\\]+$/, "") : ""
-				
+
 				// Check if the expected file exists at the correct location
 				const correctFilePath = path.join(expectedPath, "app", "store.py")
 				const wrongFilePath = path.join(path.dirname(expectedPath), "app", "store.py")
-				const correctFileExists = await fs.access(correctFilePath).then(() => true).catch(() => false)
-				const wrongFileExists = await fs.access(wrongFilePath).then(() => true).catch(() => false)
-				
-				// Case-insensitive comparison on Windows
-				const pathsMatch = process.platform === "win32" 
-					? expectedPath.toLowerCase() === actualPath.toLowerCase()
-					: expectedPath === actualPath
-				
+				const correctFileExists = await fs
+					.access(correctFilePath)
+					.then(() => true)
+					.catch(() => false)
+				const wrongFileExists = await fs
+					.access(wrongFilePath)
+					.then(() => true)
+					.catch(() => false)
+
+				// Case-insensitive comparison on Windows2222
+				const pathsMatch =
+					process.platform === "win32"
+						? expectedPath.toLowerCase() === actualPath.toLowerCase()
+						: expectedPath === actualPath
+
 				if (!pathsMatch) {
 					const errorMsg = `[torture-vcr] WORKSPACE ROOT MISMATCH:
   Expected: ${expectedPath}
@@ -351,7 +342,7 @@ suite("Roo Code Task", function () {
 					console.error(errorMsg)
 					assert.fail(errorMsg)
 				}
-				
+
 				if (!correctFileExists) {
 					const errorMsg = `[torture-vcr] EXPECTED FILE NOT FOUND:
   Expected workspace: ${expectedPath}
@@ -362,73 +353,243 @@ suite("Roo Code Task", function () {
 					console.error(errorMsg)
 					assert.fail(errorMsg)
 				}
-				
+
 				console.log(`[torture-vcr] ✓ Workspace root verified: ${expectedPath}`)
 			}
 
 			checkpoint("Workspace ready")
 
+			// Reset test repo to clean state before starting
+			// This ensures we start from an unimplemented state
+			console.log(`[torture-test] Resetting test repo to clean state...`)
+			try {
+				const repoPath = expectedWorkspace || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+				if (repoPath) {
+					// Always reset to a clean upstream ref first for deterministic torture runs.
+					// IMPORTANT: Do NOT try to infer cleanliness from file contents (e.g. "NotImplementedError"),
+					// because the baseline file may mention that string in comments/docstrings even after implementation,
+					// which can cause us to incorrectly "reset" to HEAD and keep a dirty repo.
+					const storePyPath = path.join(repoPath, "app", "store.py")
+					const resetTargets = ["origin/main", "origin/master", "HEAD"]
+					let resetSucceeded = false
+					let lastResetError: unknown = null
+					for (const target of resetTargets) {
+						await new Promise<void>((resolve) => {
+							child_process.exec(`git reset --hard ${target}`, { cwd: repoPath }, (err) => {
+								if (err) {
+									lastResetError = err
+									console.warn(`[torture-test] git reset failed for ${target}: ${String(err)}`)
+									resolve()
+									return
+								}
+								resetSucceeded = true
+								console.log(`[torture-test] ✓ git reset --hard ${target}`)
+								resolve()
+							})
+						})
+						if (resetSucceeded) break
+					}
+					if (!resetSucceeded) {
+						throw new Error(
+							`git reset failed for all targets (${resetTargets.join(", ")}): ${String(lastResetError)}`,
+						)
+					}
+
+					// Clean untracked files
+					await new Promise<void>((resolve, reject) => {
+						child_process.exec("git clean -fdx -e .cp", { cwd: repoPath }, (err) => {
+							if (err) {
+								console.warn(`[torture-test] git clean warning: ${err.message}`)
+							}
+							resolve()
+						})
+					})
+
+					// Verify the repo is in clean state (SqliteKV should NOT be implemented)
+					try {
+						const storeContent = await fs.readFile(storePyPath, "utf-8")
+						if (storeContent.includes("class SqliteKV") && !storeContent.includes("NotImplementedError")) {
+							console.error(
+								`[torture-test] ERROR: Repo still contains SqliteKV implementation after reset!`,
+							)
+							console.error(`[torture-test] This means the implementation was committed to the repo.`)
+							console.error(`[torture-test] Please ensure the test repo starts with NotImplementedError.`)
+							assert.fail("Test repo must start with unimplemented SQLite backend")
+						}
+					} catch (e) {
+						// File doesn't exist, that's fine - it will be created
+					}
+
+					console.log(`[torture-test] ✓ Test repo reset to clean state`)
+				}
+			} catch (e) {
+				console.error(`[torture-test] Failed to reset test repo: ${e}`)
+				assert.fail(`Failed to reset test repo: ${e}`)
+			}
+			checkpoint("Repo reset")
+
 			const api = globalThis.api
 			let cpPortForCleanup: number | null = null
-			
-			// Determine provider dynamically
+			const useStage1 = process.env.TEST_TORTURE_STAGE === "1"
+
+			// Determine provider dynamically.
+			// Can be explicitly set via TEST_API_PROVIDER env var, otherwise uses priority:
+			// GEMINI_API_KEY > OPENROUTER_API_KEY > OPENAI_API_KEY > settings
 			let apiProvider = "openai-native"
 			let apiKey: string | undefined
-			let apiModelId = "gpt-4.1"
+			let apiModelId = "gpt-4o-mini" // Use widely-available, stable model
+			const config = vscode.workspace.getConfiguration("roo-cline")
+			const openRouterModel = config.get<string>("openRouterModelId") || "openai/gpt-oss-120b"
 
-			// 1. Try OpenAI Native (Env)
-			if (process.env.OPENAI_API_KEY) {
-				apiProvider = "openai-native"
-				apiKey = process.env.OPENAI_API_KEY
-				apiModelId = "gpt-4.1"
-			} 
-			// 2. Try OpenRouter (Env)
-			else if (process.env.OPENROUTER_API_KEY) {
+			const isTortureTest = process.env.TEST_TORTURE_REPO === "1"
+
+			// Explicit provider override
+			const explicitProvider = process.env.TEST_API_PROVIDER
+
+			if (explicitProvider === "gemini" && process.env.GEMINI_API_KEY) {
+				apiProvider = "gemini"
+				apiKey = process.env.GEMINI_API_KEY
+				apiModelId = "gemini-2.0-flash-exp"
+			} else if (explicitProvider === "openrouter" && process.env.OPENROUTER_API_KEY) {
 				apiProvider = "openrouter"
 				apiKey = process.env.OPENROUTER_API_KEY
-				// Check VS Code settings for model, fallback to default
-				const config = vscode.workspace.getConfiguration("roo-cline")
-				apiModelId = config.get<string>("openRouterModelId") || "liquid/lfm-2.5-1.2b-instruct:free"
-			}
-			// 3. Try Settings (VS Code)
-			else {
-				const config = vscode.workspace.getConfiguration("roo-cline")
+				apiModelId = openRouterModel
+			} else if (explicitProvider === "openai-native" && process.env.OPENAI_API_KEY) {
+				apiProvider = "openai-native"
+				apiKey = process.env.OPENAI_API_KEY
+				apiModelId = "gpt-4o-mini"
+			} else if (!explicitProvider) {
+				// Auto-detect based on priority
+				// TORTURE TEST MODE: Prefer OpenAI for reliability and cost
+				if (isTortureTest) {
+					// Fail fast if OpenAI key is missing in torture test mode
+					if (!process.env.OPENAI_API_KEY) {
+						const error =
+							`[torture-test] FAST-FAIL: OPENAI_API_KEY is required for torture tests. ` +
+							`Set OPENAI_API_KEY in ../../.env or export it. ` +
+							`To use a different provider, set TEST_API_PROVIDER=gemini or TEST_API_PROVIDER=openrouter`
+						console.error(error)
+						throw new Error(error)
+					}
+					apiProvider = "openai-native"
+					apiKey = process.env.OPENAI_API_KEY
+					apiModelId = "gpt-4o-mini"
+					console.log(`[torture-test] Using OpenAI (preferred for torture tests)`)
+				} else {
+					// NON-TORTURE MODE: Keep original priority (Gemini → OpenRouter → OpenAI)
+					if (process.env.GEMINI_API_KEY) {
+						apiProvider = "gemini"
+						apiKey = process.env.GEMINI_API_KEY
+						apiModelId = "gemini-2.0-flash-exp"
+					} else if (process.env.OPENROUTER_API_KEY) {
+						apiProvider = "openrouter"
+						apiKey = process.env.OPENROUTER_API_KEY
+						apiModelId = openRouterModel
+					} else if (process.env.OPENAI_API_KEY) {
+						apiProvider = "openai-native"
+						apiKey = process.env.OPENAI_API_KEY
+						apiModelId = "gpt-4o-mini"
+					}
+				}
+			} else {
 				const provider = config.get<string>("apiProvider")
 				if (provider) {
 					apiProvider = provider
 					if (apiProvider === "openai-native") {
 						apiKey = config.get<string>("openAiNativeApiKey")
-						apiModelId = config.get<string>("apiModelId") || "gpt-4.1"
+						apiModelId = config.get<string>("apiModelId") || "gpt-4o-mini"
 					} else if (apiProvider === "openrouter") {
 						apiKey = config.get<string>("openRouterApiKey")
-						apiModelId = config.get<string>("openRouterModelId") || "liquid/lfm-2.5-1.2b-instruct:free"
+						apiModelId = config.get<string>("openRouterModelId") || "openai/gpt-oss-120b"
+					} else if (apiProvider === "gemini") {
+						apiKey = config.get<string>("geminiApiKey")
+						apiModelId = config.get<string>("geminiModelId") || "gemini-2.0-flash-exp"
 					}
 				}
 			}
-			
+
+			// --------------------------------------------------------------------
+			// TORTURE VCR POLICY
+			// - Stage 1 runs in REPLAY by default (deterministic, no live network)
+			// - CI should fail if any live OpenAI call happens (replay mode + lazy VCR wrappers enforce this)
+			// - Developers can opt into ROO_VCR_MODE=record to seed/update cassettes
+			// --------------------------------------------------------------------
+			if (useStage1) {
+				const repoRoot = path.resolve(__dirname, "../../../..")
+				const defaultStage1VcrDir = path.join(repoRoot, "apps", "vscode-e2e", "vcr_torture_stage1")
+
+				if (!process.env.ROO_VCR_MODE) {
+					process.env.ROO_VCR_MODE = "replay"
+				}
+				if (!process.env.ROO_VCR_DIR) {
+					process.env.ROO_VCR_DIR = defaultStage1VcrDir
+				}
+
+				// Force a single deterministic provider+model for VCR runs.
+				// This avoids accidental drift from user settings (e.g. openrouter) and ensures replay finds the cassette.
+				const vcrMode = process.env.ROO_VCR_MODE
+				if (vcrMode === "record" || vcrMode === "replay") {
+					apiProvider = "openai-native"
+					// Use widely-available stable model for reliable tool use.
+					// Replay will be deterministic and fast regardless of model choice.
+					apiModelId = "gpt-4o-mini"
+					// Use real key if present; replay doesn't need a real secret but provider code may require non-empty string.
+					apiKey = process.env.OPENAI_API_KEY || apiKey || "vcr-replay"
+				}
+
+				console.log(`[torture-test] VCR Mode: ${process.env.ROO_VCR_MODE}`)
+				console.log(`[torture-test] VCR Dir: ${process.env.ROO_VCR_DIR}`)
+				console.log(`[torture-test] VCR Provider override: ${apiProvider} / ${apiModelId}`)
+			}
+
 			console.log(`[torture-test] PROVIDER SELECTION:`)
 			console.log(`  Provider: ${apiProvider}`)
 			console.log(`  Model: ${apiModelId}`)
 			console.log(`  Key present: ${!!apiKey}`)
-			
+
 			if (!apiKey || apiKey.trim().length === 0) {
 				const error = `[torture-test] FAST-FAIL: No valid API key found for ${apiProvider}`
 				console.error(error)
 				restoreConsole()
 				assert.fail(error)
 			}
-			
+
 			// Sanitize key for logging (show first 8 and last 4 chars)
-			const sanitizedKey = (apiKey?.length || 0) > 12 
-				? `${apiKey!.substring(0, 8)}...${apiKey!.substring(apiKey!.length - 4)}`
-				: "***REDACTED***"
+			const sanitizedKey =
+				(apiKey?.length || 0) > 12
+					? `${apiKey!.substring(0, 8)}...${apiKey!.substring(apiKey!.length - 4)}`
+					: "***REDACTED***"
 			console.log(`  API Key (sanitized): ${sanitizedKey}`)
-			
+
+			// Prompt selection: TEST_TORTURE_STAGE=1 → TORTURE_PROMPT (SQLite); otherwise → stage_2_prompt (named projects)
+			const prompt = useStage1 ? TORTURE_PROMPT : stage_2_prompt
+			console.log(`[torture-test] Prompt: ${useStage1 ? "stage 1 (SQLite)" : "stage 2 (named projects)"}`)
+
+			// Ensure VCR dir exists (even in replay, so signature files can be read)
 			const vcrDir = process.env.ROO_VCR_DIR || path.join(os.tmpdir(), `vcr-torture-${Date.now()}`)
 			await fs.mkdir(vcrDir, { recursive: true })
 
-			// Use the P1 prompt for SQLite backend implementation
-			const prompt = TORTURE_PROMPT
+			// Stage 1 uses VCR for determinism; prefer reliability over throttling avoidance.
+
+			// Enable planner mode for Stage 1 and Stage 2 - spec requires task decomposition into subtasks
+			// The planner breaks the main task into sub-transactions that are executed and merged
+			try {
+				const cfg = vscode.workspace.getConfiguration()
+				await cfg.update("roo.experimental.plannerMode", true, vscode.ConfigurationTarget.Global)
+				await cfg.update("roo-cline.experimental.plannerMode", true, vscode.ConfigurationTarget.Global)
+				await cfg.update("roo.experimental.transactionalMode", true, vscode.ConfigurationTarget.Global)
+				await cfg.update("roo-cline.experimental.transactionalMode", true, vscode.ConfigurationTarget.Global)
+				console.log(
+					`[torture-test] Stage ${useStage1 ? 1 : 2}: planner + transactional mode ENABLED (spec requirement)`,
+				)
+			} catch (e) {
+				console.warn(`[torture-test] Failed to enable planner/transactional mode: ${e}`)
+			}
+
+			// Track subtask metrics for Stage 1 verification
+			let subtasksCreated = 0
+			let subtasksCompleted = 0
+			const subtaskIds: string[] = []
 			type FirstError = { toolName: string; error: string; taskId: string }
 			let firstError: FirstError | null = null
 			let recordModeError: FirstError | null = null
@@ -463,16 +624,19 @@ suite("Roo Code Task", function () {
 				alwaysAllowReadOnlyOutsideWorkspace: true,
 				alwaysAllowExecute: true,
 				alwaysApproveResubmit: true, // Enable automatic retry for API failures (non-401 errors)
+				enableCheckpoints: true, // Enable checkpoint/rollback tools for Stage 2 rollback drill
 				// Use dynamic provider
 				apiProvider: apiProvider as any,
 				openAiNativeApiKey: apiProvider === "openai-native" ? apiKey : undefined,
 				openRouterApiKey: apiProvider === "openrouter" ? apiKey : undefined,
+				geminiApiKey: apiProvider === "gemini" ? apiKey : undefined,
 				apiModelId: apiProvider === "openai-native" ? apiModelId : undefined,
 				openRouterModelId: apiProvider === "openrouter" ? apiModelId : undefined,
+				geminiModelId: apiProvider === "gemini" ? apiModelId : undefined,
 				includeMaxTokens: true,
 				modelMaxTokens: 512,
 			}
-			
+
 			// Validate provider matches expected
 			if (taskConfig.apiProvider !== apiProvider) {
 				const error = `[torture-test] FAST-FAIL: Provider mismatch. Expected: ${apiProvider}, Got: ${taskConfig.apiProvider}`
@@ -480,13 +644,13 @@ suite("Roo Code Task", function () {
 				restoreConsole()
 				assert.fail(error)
 			}
-			
+
 			// Track consecutive API failures for fast-fail
 			let consecutiveApiFailures = 0
 			let lastApiFailure: { provider: string; model: string; error: string; timestamp: number } | null = null
 			let taskAborted = false
 			let taskId: string | null = null
-			
+
 			const abortTask = async (reason: string) => {
 				if (taskAborted) return
 				taskAborted = true
@@ -543,12 +707,13 @@ suite("Roo Code Task", function () {
 			}
 
 			const fatalFail = (reason: string) => {
+				// IMPORTANT: We must be able to fail even after the task has "completed".
+				// Stage 1 hard-gate verification runs after TaskCompleted and must still be able to fail the test.
 				if (finished) {
-					console.log(`[TEST-LIFECYCLE] fatalFail called but already finished: ${reason}`)
-					return
+					assert.fail(`[torture-test] FAST-FAIL: ${reason}`)
 				}
 				finished = true
-				
+
 				const elapsed = Date.now() - testStartTime
 				console.error(`[TEST-LIFECYCLE] ========================================`)
 				console.error(`[TEST-LIFECYCLE] FATAL FAILURE`)
@@ -598,16 +763,16 @@ suite("Roo Code Task", function () {
 
 				assert.fail(`[torture-test] FAST-FAIL: ${reason}`)
 			}
-			
+
 			// Store original console functions for later override
 			const originalConsoleLogForCapture = console.log
 			const originalConsoleErrorForCapture = console.error
-			
+
 			// Track consecutive failures per tool to allow retries with feedback
 			const toolFailureCounts = new Map<string, number>()
 			const MAX_CONSECUTIVE_TOOL_FAILURES = 5
 			let lastExecutedTool: string | null = null
-			
+
 			const taskToolFailedHandler = (taskIdParam: string, tool: string, errorParam: string) => {
 				// Track first error for VCR signature
 				if (firstError === null) {
@@ -615,20 +780,24 @@ suite("Roo Code Task", function () {
 					const signature = normalizeErrorSignature(firstError)
 					console.error(`[torture-vcr] FIRST ERROR: ${tool} - ${errorParam}`)
 					console.log(`[torture-vcr] FIRST_ERROR_SIGNATURE=${signature}`)
-					
+
 					// Save signature in record mode for replay comparison
 					if (process.env.ROO_VCR_MODE === "record") {
 						fs.writeFile(recordErrorFile, signature, "utf-8").catch(() => {})
 					}
 				}
-				
+
 				// Increment failure count for this tool
 				const currentCount = (toolFailureCounts.get(tool) || 0) + 1
 				toolFailureCounts.set(tool, currentCount)
-				
-				console.log(`[TEST-LIFECYCLE] Tool failure: ${tool} (consecutive failures: ${currentCount}/${MAX_CONSECUTIVE_TOOL_FAILURES})`)
-				console.log(`[TEST-LIFECYCLE] Error: ${errorParam.substring(0, 200)}${errorParam.length > 200 ? '...' : ''}`)
-				
+
+				console.log(
+					`[TEST-LIFECYCLE] Tool failure: ${tool} (consecutive failures: ${currentCount}/${MAX_CONSECUTIVE_TOOL_FAILURES})`,
+				)
+				console.log(
+					`[TEST-LIFECYCLE] Error: ${errorParam.substring(0, 200)}${errorParam.length > 200 ? "..." : ""}`,
+				)
+
 				// Only fail if we've hit the maximum consecutive failures
 				if (currentCount >= MAX_CONSECUTIVE_TOOL_FAILURES) {
 					console.error(`[TEST-LIFECYCLE] ========================================`)
@@ -640,36 +809,40 @@ suite("Roo Code Task", function () {
 					fatalFail(`${tool} failed ${currentCount} consecutive times. Last error: ${errorParam}`)
 				} else {
 					// Allow retry - error feedback will be sent to LLM automatically via pushToolResult
-					console.log(`[TEST-LIFECYCLE] Allowing retry (${currentCount}/${MAX_CONSECUTIVE_TOOL_FAILURES} failures). Error feedback will be sent to LLM.`)
+					console.log(
+						`[TEST-LIFECYCLE] Allowing retry (${currentCount}/${MAX_CONSECUTIVE_TOOL_FAILURES} failures). Error feedback will be sent to LLM.`,
+					)
 				}
 			}
 			api.on(RooCodeEventName.TaskToolFailed, taskToolFailedHandler)
-			
+
 			// Gate to ensure only first terminal event wins (prevents multiple handlers from running)
 			let finished = false
-			
+
 			// Create deferred promise for fast-fail mechanism
 			const failFast = createDeferred<never>()
-			
+
 			// Get VS Code process handle for killing
 			// NOTE: @vscode/test-electron's runTests doesn't expose ChildProcess handle
 			// We use parent process PID as fallback (test runs inside VS Code extension host)
 			// TODO: Modify runTest.ts to spawn VS Code manually and pass process handle via env/global
-			const vscodePid = process.env.VSCODE_PID 
-				? parseInt(process.env.VSCODE_PID, 10) 
-				: (process.platform === "win32" ? process.ppid : null) // Use parent PID on Windows as fallback
+			const vscodePid = process.env.VSCODE_PID
+				? parseInt(process.env.VSCODE_PID, 10)
+				: process.platform === "win32"
+					? process.ppid
+					: null // Use parent PID on Windows as fallback
 			// vscodeProcess will be set if runTest.ts is modified to expose the ChildProcess handle
 			// For now, we only use PID-based killing since @vscode/test-electron doesn't expose the process
 			// When runTest.ts is modified, uncomment and use this:
 			// const vscodeProcess: child_process.ChildProcess | null = (globalThis as any).__vscodeProcess || null
 			const vscodeProcess: child_process.ChildProcess | null = null
-			
+
 			// Store handler references for cleanup
 			let taskStartedHandler: ((taskIdParam: string) => void) | null = null
 			let taskAbortedHandler: ((taskIdParam: string) => void) | null = null
 			let taskCompletedHandler: ((taskIdParam: string) => void) | null = null
 			let messageHandler: (({ message }: { message: any }) => void) | null = null
-			
+
 			// Fast-fail function for blocked Task#ask - called immediately when pattern detected in console
 			const fastFailBlockedAsk = (askType: string, triggerLine: string) => {
 				const errorMsg = `[torture-test] Blocked Task#ask in e2e mode: ${askType} (child task)`
@@ -677,7 +850,7 @@ suite("Roo Code Task", function () {
 				originalConsoleErrorForCapture(`[torture-test] Triggered by: ${triggerLine}`)
 				fatalFail(errorMsg)
 			}
-			
+
 			// Track task lifecycle events for checkpoints
 			taskStartedHandler = (taskIdParam: string) => {
 				if (taskIdParam === taskId) {
@@ -685,13 +858,15 @@ suite("Roo Code Task", function () {
 				}
 			}
 			api.on(RooCodeEventName.TaskStarted, taskStartedHandler)
-			
+
 			// Track task abortion (e.g., from LLM timeout or blocked Task#ask)
 			// Note: fastFailBlockedAsk handles blocked Task#ask immediately in console capture,
 			// so this handler is mainly for other abort reasons
 			taskAbortedHandler = (taskIdParam: string) => {
 				if (finished || taskIdParam !== taskId) {
-					console.log(`[TEST-LIFECYCLE] TaskAborted event ignored: finished=${finished}, taskId match=${taskIdParam === taskId}`)
+					console.log(
+						`[TEST-LIFECYCLE] TaskAborted event ignored: finished=${finished}, taskId match=${taskIdParam === taskId}`,
+					)
 					return
 				}
 				const elapsed = Date.now() - testStartTime
@@ -719,17 +894,19 @@ suite("Roo Code Task", function () {
 				fatalFail("Task aborted")
 			}
 			api.on(RooCodeEventName.TaskAborted, taskAbortedHandler)
-			
+
 			// Track task completion
 			taskCompletedHandler = (taskIdParam: string) => {
 				if (finished || taskIdParam !== taskId) {
-					console.log(`[TEST-LIFECYCLE] TaskCompleted event ignored: finished=${finished}, taskId match=${taskIdParam === taskId}`)
+					console.log(
+						`[TEST-LIFECYCLE] TaskCompleted event ignored: finished=${finished}, taskId match=${taskIdParam === taskId}`,
+					)
 					return
 				}
 				// Reset all failure counts on task completion (all tools succeeded)
 				toolFailureCounts.clear()
 				console.log(`[TEST-LIFECYCLE] Task completed - reset all tool failure counts`)
-				
+
 				const elapsed = Date.now() - testStartTime
 				console.log(`[TEST-LIFECYCLE] ========================================`)
 				console.log(`[TEST-LIFECYCLE] TASK COMPLETED EVENT RECEIVED`)
@@ -741,25 +918,34 @@ suite("Roo Code Task", function () {
 				console.log(`[torture-test] Task completed successfully`)
 			}
 			api.on(RooCodeEventName.TaskCompleted, taskCompletedHandler)
-			
+
 			messageHandler = ({ message }: { message: any }) => {
 				const text = (message?.text ?? "").toString()
 				const lowered = text.toLowerCase()
 				// Fail fast on API request failure/cancel asks (subtask or parent)
-				if (message.type === "ask" && (message.ask === "api_req_failed" || message.ask === "api_req_cancelled")) {
+				if (
+					message.type === "ask" &&
+					(message.ask === "api_req_failed" || message.ask === "api_req_cancelled")
+				) {
 					const errorMsg = `${message.ask}`
 					fatalFail(errorMsg)
 					return
 				}
 				// Allow retries; log a single-line warning for visibility
-				if (message.type === "say" && (message.say === "api_req_retry_delayed" || message.say === "api_req_retried")) {
+				if (
+					message.type === "say" &&
+					(message.say === "api_req_retry_delayed" || message.say === "api_req_retried")
+				) {
 					const warn = `[torture-test] WARN: ${message.say}`
 					consoleBuffer.push(`[WARN] ${warn}`)
 					originalConsoleLogForCapture(warn)
 					return
 				}
 				// Fail fast on terminal API failures (structured say)
-				if (message.type === "say" && (message.say === "api_req_failed" || message.say === "api_req_cancelled")) {
+				if (
+					message.type === "say" &&
+					(message.say === "api_req_failed" || message.say === "api_req_cancelled")
+				) {
 					const errorMsg = `${message.say}`
 					fatalFail(errorMsg)
 					return
@@ -782,14 +968,14 @@ suite("Roo Code Task", function () {
 				}
 			}
 			api.on(RooCodeEventName.Message, messageHandler)
-			
+
 			// NOW override console.log/console.error AFTER fastFailBlockedAsk and handlers are defined
 			// This ensures fastFailBlockedAsk can access all handlers when called
 			console.log = (...args: unknown[]) => {
-				const msg = args.map(a => String(a)).join(" ")
+				const msg = args.map((a) => String(a)).join(" ")
 				consoleBuffer.push(`[LOG] ${msg}`)
 				originalConsoleLogForCapture.apply(console, args)
-				
+
 				// IMMEDIATE DETECTION: Check for blocked Task#ask patterns and fast-fail
 				// Pattern 1: "Blocked Task#ask in e2e mode: <type> (child task)" - preferred
 				const blockedAskMatch = msg.match(/Blocked Task#ask in e2e mode: (\w+)(?:\s*\(child task\))?/)
@@ -798,7 +984,7 @@ suite("Roo Code Task", function () {
 					fastFailBlockedAsk(askType, msg)
 					return // fastFailBlockedAsk rejects promise, no throw needed
 				}
-				
+
 				// Pattern 2: "Task#ask will block -> type: <type>" - fallback
 				const willBlockMatch = msg.match(/Task#ask will block -> type: (\w+)/)
 				if (willBlockMatch) {
@@ -806,7 +992,7 @@ suite("Roo Code Task", function () {
 					fastFailBlockedAsk(askType, msg)
 					return // fastFailBlockedAsk rejects promise, no throw needed
 				}
-				
+
 				// Detect api_req_failed from console output (legacy tracking, but fast-fail takes precedence)
 				if (msg.includes("Task#ask will block -> type: api_req_failed")) {
 					consecutiveApiFailures++
@@ -815,29 +1001,34 @@ suite("Roo Code Task", function () {
 					// Extract error message if available (may be in next log line)
 					const error = "API request failed"
 					lastApiFailure = { provider, model, error, timestamp: Date.now() }
-					
-					originalConsoleErrorForCapture(`[torture-test] API failure #${consecutiveApiFailures}/${MAX_CONSECUTIVE_API_FAILURES}`)
+
+					originalConsoleErrorForCapture(
+						`[torture-test] API failure #${consecutiveApiFailures}/${MAX_CONSECUTIVE_API_FAILURES}`,
+					)
 					originalConsoleErrorForCapture(`  Provider: ${provider}`)
 					originalConsoleErrorForCapture(`  Model: ${model}`)
 					originalConsoleErrorForCapture(`  Error: ${error}`)
-					
+
 					if (consecutiveApiFailures >= MAX_CONSECUTIVE_API_FAILURES) {
 						const sanitizedError = error.replace(/sk-[a-zA-Z0-9_-]+/g, "sk-***REDACTED***")
 						abortTask(
 							`${MAX_CONSECUTIVE_API_FAILURES} consecutive API failures. ` +
-							`Provider: ${provider}, Model: ${model}, Error: ${sanitizedError}`
+								`Provider: ${provider}, Model: ${model}, Error: ${sanitizedError}`,
 						)
 					}
 				} else if (msg.includes("Task#ask will block -> type:") && !msg.includes("api_req_failed")) {
 					// Reset counter on non-API failures (tool calls, etc.)
 					consecutiveApiFailures = 0
 				}
-				
+
 				// Track first tool call
-				if (msg.includes("[Task#logToolCall]") && checkpoints.findIndex(cp => cp.name === "First tool call") === -1) {
+				if (
+					msg.includes("[Task#logToolCall]") &&
+					checkpoints.findIndex((cp) => cp.name === "First tool call") === -1
+				) {
 					checkpoint("First tool call")
 				}
-				
+
 				// Reset failure count when a tool executes successfully
 				// When we see "[AUDIT:EXECUTED] Executing tool:", it means a tool is being executed
 				// If it's a different tool than the last failed one, reset the failure count for the previous tool
@@ -847,30 +1038,49 @@ suite("Roo Code Task", function () {
 					const executedTool = toolExecMatch[1]
 					// If a different tool is executed, reset failure count for the previous tool
 					// This indicates the previous tool succeeded and LLM moved on
-					if (lastExecutedTool && executedTool !== lastExecutedTool && toolFailureCounts.has(lastExecutedTool)) {
+					if (
+						lastExecutedTool &&
+						executedTool !== lastExecutedTool &&
+						toolFailureCounts.has(lastExecutedTool)
+					) {
 						toolFailureCounts.delete(lastExecutedTool)
-						console.log(`[TEST-LIFECYCLE] Tool ${lastExecutedTool} succeeded (different tool ${executedTool} executed). Reset failure count.`)
+						console.log(
+							`[TEST-LIFECYCLE] Tool ${lastExecutedTool} succeeded (different tool ${executedTool} executed). Reset failure count.`,
+						)
 					}
 					lastExecutedTool = executedTool
 				}
-				
-				// Track first sub-tx creation
-				if (msg.includes("[createTask] child task") && checkpoints.findIndex(cp => cp.name === "First sub-tx created") === -1) {
-					checkpoint("First sub-tx created")
+
+				// Track subtask creation
+				if (msg.includes("[createTask] child task")) {
+					subtasksCreated++
+					// Extract task ID if available
+					const childIdMatch = msg.match(/child task ([a-f0-9-]+)/)
+					if (childIdMatch) {
+						subtaskIds.push(childIdMatch[1])
+					}
+					console.log(`[torture-test] Subtask #${subtasksCreated} created`)
+					if (checkpoints.findIndex((cp) => cp.name === "First sub-tx created") === -1) {
+						checkpoint("First sub-tx created")
+					}
 				}
-				
-				// Track first merge
-				if (msg.includes("Successfully merged sub-transaction") && checkpoints.findIndex(cp => cp.name === "First merge") === -1) {
-					checkpoint("First merge")
+
+				// Track subtask completion
+				if (msg.includes("Successfully merged sub-transaction") || msg.includes("child task completed")) {
+					subtasksCompleted++
+					console.log(`[torture-test] Subtask #${subtasksCompleted} completed`)
+					if (checkpoints.findIndex((cp) => cp.name === "First merge") === -1) {
+						checkpoint("First merge")
+					}
 				}
 			}
-			
+
 			// Also capture console.error for blocked Task#ask detection
 			console.error = (...args: unknown[]) => {
-				const msg = args.map(a => String(a)).join(" ")
+				const msg = args.map((a) => String(a)).join(" ")
 				consoleBuffer.push(`[ERR] ${msg}`)
 				originalConsoleErrorForCapture.apply(console, args)
-				
+
 				// IMMEDIATE DETECTION: Check for blocked Task#ask patterns and fast-fail
 				// Pattern 1: "Blocked Task#ask in e2e mode: <type> (child task)" - preferred
 				const blockedAskMatch = msg.match(/Blocked Task#ask in e2e mode: (\w+)(?:\s*\(child task\))?/)
@@ -879,7 +1089,7 @@ suite("Roo Code Task", function () {
 					fastFailBlockedAsk(askType, msg)
 					return // fastFailBlockedAsk rejects promise, no throw needed
 				}
-				
+
 				// Pattern 2: "Task#ask will block -> type: <type>" - fallback
 				const willBlockMatch = msg.match(/Task#ask will block -> type: (\w+)/)
 				if (willBlockMatch) {
@@ -903,8 +1113,8 @@ suite("Roo Code Task", function () {
 			console.log("[torture-test] Cleaning up any existing Control-Plane processes...")
 			await killProcessByPort(8899)
 			// Give it a moment to fully terminate
-			await new Promise(resolve => setTimeout(resolve, 1000))
-			
+			await new Promise((resolve) => setTimeout(resolve, 1000))
+
 			// Start Control-Plane and verify it is reachable BEFORE starting task
 			let cpPort = 8899
 			try {
@@ -952,64 +1162,317 @@ suite("Roo Code Task", function () {
 				if (!taskId) {
 					throw new Error("Task ID not set")
 				}
-				
+
 				console.log(`[TEST-LIFECYCLE] Starting wait for task completion`)
 				console.log(`[TEST-LIFECYCLE] Task ID: ${taskId}`)
 				console.log(`[TEST-LIFECYCLE] Timeout: ${TORTURE_TIMEOUT_MS}ms`)
-				
+
 				// Set up periodic progress logging
 				const progressInterval = setInterval(() => {
 					const elapsed = Date.now() - testStartTime
 					const remaining = TORTURE_TIMEOUT_MS - elapsed
 					if (remaining > 0 && !finished) {
-						console.log(`[TEST-LIFECYCLE] Progress: ${elapsed}ms elapsed, ${remaining}ms remaining (${Math.round(remaining / 1000)}s)`)
+						console.log(
+							`[TEST-LIFECYCLE] Progress: ${elapsed}ms elapsed, ${remaining}ms remaining (${Math.round(remaining / 1000)}s)`,
+						)
 					}
 				}, 30000) // Log every 30 seconds
-				
+
 				// Check if already finished before waiting
 				if (finished) {
 					clearInterval(progressInterval)
 					console.log(`[TEST-LIFECYCLE] Task already finished before wait`)
 					return // Task already aborted/completed, handlers have run
 				}
-				
+
 				// Race between waitUntilCompleted and failFast.promise
 				// If fastFailBlockedAsk is called, failFast.promise will reject immediately
 				console.log(`[TEST-LIFECYCLE] Waiting for task completion or timeout...`)
 				await Promise.race([
-					waitUntilCompleted({ api, taskId, timeout: TORTURE_TIMEOUT_MS }).then(() => {
-						clearInterval(progressInterval)
-						const elapsed = Date.now() - testStartTime
-						console.log(`[TEST-LIFECYCLE] waitUntilCompleted resolved after ${elapsed}ms`)
-					}).catch((err) => {
-						clearInterval(progressInterval)
-						const elapsed = Date.now() - testStartTime
-						console.error(`[TEST-LIFECYCLE] waitUntilCompleted rejected after ${elapsed}ms:`, err)
-						throw err
-					}),
-					failFast.promise.then(() => {
-						clearInterval(progressInterval)
-						console.log(`[TEST-LIFECYCLE] failFast.promise resolved`)
-					}).catch((err) => {
-						clearInterval(progressInterval)
-						console.error(`[TEST-LIFECYCLE] failFast.promise rejected:`, err)
-						throw err
-					}),
+					waitUntilCompleted({ api, taskId, timeout: TORTURE_TIMEOUT_MS })
+						.then(() => {
+							clearInterval(progressInterval)
+							const elapsed = Date.now() - testStartTime
+							console.log(`[TEST-LIFECYCLE] waitUntilCompleted resolved after ${elapsed}ms`)
+						})
+						.catch((err) => {
+							clearInterval(progressInterval)
+							const elapsed = Date.now() - testStartTime
+							console.error(`[TEST-LIFECYCLE] waitUntilCompleted rejected after ${elapsed}ms:`, err)
+							throw err
+						}),
+					failFast.promise
+						.then(() => {
+							clearInterval(progressInterval)
+							console.log(`[TEST-LIFECYCLE] failFast.promise resolved`)
+						})
+						.catch((err) => {
+							clearInterval(progressInterval)
+							console.error(`[TEST-LIFECYCLE] failFast.promise rejected:`, err)
+							throw err
+						}),
 				])
-				
+
 				clearInterval(progressInterval)
-				
-				// Check if finished flag was set (task aborted during wait)
-				if (finished) {
-					console.log(`[TEST-LIFECYCLE] Task finished flag was set during wait`)
-					return // TaskAborted handler already called assert.fail
-				}
-				
+
 				const elapsed = Date.now() - testStartTime
 				console.log(`[TEST-LIFECYCLE] Promise.race completed after ${elapsed}ms`)
+				console.log(`[TEST-LIFECYCLE] Task finished flag was set during wait: ${finished}`)
+
+				// Task completed successfully (either via event or Promise.race)
 				checkpoint("Task completed")
 				console.log(`[torture-test] Task completed successfully`)
 				printCheckpoints()
+
+				// === STAGE 1 VERIFICATION (HARD GATE) ===
+				// This is a HARD GATE - the test MUST fail if any of these conditions are not met.
+				// Task completion does NOT mean success - all requirements must be verified.
+				if (useStage1) {
+					const workspaceRoot =
+						process.env.TEST_TORTURE_REPO_WORKSPACE || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+					if (!workspaceRoot) {
+						fatalFail("STAGE 1 HARD GATE FAILED: Cannot verify - no repo path")
+						return
+					}
+
+					// If planner/Control-Plane transactional mode is in use, edits may land in a tx worktree under `.cp/worktrees/`.
+					// The workspace root stays the original repo, so verification must read/run from the active tx worktree.
+					let repoPath = workspaceRoot
+					try {
+						const txIdRaw = await vscode.commands.executeCommand<string>("roo.internal.getCurrentTxId")
+						const txId = (txIdRaw || "").trim()
+						if (txId) {
+							const txDirName = txId.startsWith("tx_") ? txId : `tx_${txId}`
+							const txWorktree = path.join(workspaceRoot, ".cp", "worktrees", txDirName)
+							const exists = await fs
+								.access(txWorktree)
+								.then(() => true)
+								.catch(() => false)
+							if (exists) {
+								console.log(
+									`[torture-test] Detected active Control-Plane transaction: ${txId}. ` +
+										`Using tx worktree for verification: ${txWorktree}`,
+								)
+								repoPath = txWorktree
+							} else {
+								console.log(
+									`[torture-test] Active Control-Plane transaction detected (${txId}) but worktree not found at ` +
+										`${txWorktree}. Verifying from workspace root instead.`,
+								)
+							}
+						}
+					} catch (e) {
+						// Best-effort only; fall back to workspaceRoot
+						console.log(`[torture-test] WARN: Failed to resolve tx worktree for verification: ${String(e)}`)
+					}
+
+					console.log(`[torture-test] ========================================`)
+					console.log(`[torture-test] STAGE 1 VERIFICATION (HARD GATE)`)
+					console.log(`[torture-test] ========================================`)
+					console.log(`[torture-test] Repo path: ${repoPath}`)
+
+					const failures: string[] = []
+
+					// GATE 1: SqliteKV class must exist in app/store.py
+					console.log(`[torture-test] GATE 1: Checking SqliteKV class exists in app/store.py...`)
+					const storePyPath = path.join(repoPath, "app/store.py")
+					let storePyContent = ""
+					try {
+						storePyContent = await fs.readFile(storePyPath, "utf-8")
+					} catch (e) {
+						failures.push(`GATE 1 FAILED: app/store.py does not exist or cannot be read`)
+					}
+					if (storePyContent && !storePyContent.includes("class SqliteKV")) {
+						failures.push(`GATE 1 FAILED: class SqliteKV not found in app/store.py`)
+					} else if (storePyContent) {
+						console.log(`[torture-test] ✓ GATE 1 PASSED: class SqliteKV exists in app/store.py`)
+					}
+
+					// GATE 2: make_store(kind="sqlite") must return SqliteKV (check the function)
+					console.log(`[torture-test] GATE 2: Checking make_store() returns SqliteKV for kind="sqlite"...`)
+					if (storePyContent) {
+						// Check that make_store handles kind="sqlite" and returns SqliteKV
+						const hasSqliteCase =
+							storePyContent.includes('kind == "sqlite"') ||
+							storePyContent.includes("kind == 'sqlite'") ||
+							storePyContent.includes('kind.lower() == "sqlite"') ||
+							storePyContent.includes("kind.lower() == 'sqlite'")
+
+						// Must have explicit "return SqliteKV" - not just SqliteKV( which could be in class definition
+						const returnsSqliteKV = storePyContent.includes("return SqliteKV")
+
+						// CRITICAL: Check that NotImplementedError is NOT still raised for sqlite case.
+						// The original stub has "raise NotImplementedError" in the sqlite branch.
+						// If this is still present, the implementation is incomplete even if SqliteKV class exists.
+						const stillHasNotImplemented = storePyContent.includes(
+							'raise NotImplementedError("SQLite backend not yet implemented")',
+						)
+
+						if (!hasSqliteCase) {
+							failures.push(`GATE 2 FAILED: make_store() does not handle kind="sqlite"`)
+						} else if (stillHasNotImplemented) {
+							failures.push(
+								`GATE 2 FAILED: make_store() still raises NotImplementedError for sqlite - the function was not updated to return SqliteKV`,
+							)
+						} else if (!returnsSqliteKV) {
+							failures.push(
+								`GATE 2 FAILED: make_store() does not have "return SqliteKV" - the function must explicitly return the SqliteKV instance`,
+							)
+						} else {
+							console.log(
+								`[torture-test] ✓ GATE 2 PASSED: make_store() returns SqliteKV for kind="sqlite"`,
+							)
+						}
+					}
+
+					// GATE 3: New SQLite test file must exist
+					console.log(`[torture-test] GATE 3: Checking for new SQLite test file...`)
+					const possibleTestFiles = [
+						"tests/test_sqlite_store.py",
+						"tests/test_sqlite.py",
+						"tests/test_sqlite_kv.py",
+						"tests/test_store_sqlite.py",
+					]
+					let foundSqliteTestFile: string | null = null
+					for (const testFile of possibleTestFiles) {
+						const testPath = path.join(repoPath, testFile)
+						const exists = await fs
+							.access(testPath)
+							.then(() => true)
+							.catch(() => false)
+						if (exists) {
+							foundSqliteTestFile = testFile
+							break
+						}
+					}
+					// Also check if test_basic.py has new SQLite tests
+					const testBasicPath = path.join(repoPath, "tests/test_basic.py")
+					let testBasicContent = ""
+					try {
+						testBasicContent = await fs.readFile(testBasicPath, "utf-8")
+					} catch (e) {
+						/* ignore */
+					}
+					const hasSqliteTestInBasic =
+						testBasicContent.includes("test_sqlite") &&
+						!testBasicContent.includes("test_sqlite_not_implemented")
+
+					if (!foundSqliteTestFile && !hasSqliteTestInBasic) {
+						failures.push(
+							`GATE 3 FAILED: No new SQLite test file found (checked: ${possibleTestFiles.join(", ")}) and no new sqlite tests in test_basic.py`,
+						)
+					} else {
+						const location = foundSqliteTestFile || "tests/test_basic.py"
+						console.log(`[torture-test] ✓ GATE 3 PASSED: SQLite tests found in ${location}`)
+					}
+
+					// GATE 4: pytest must pass with SQLite persistence tests running
+					console.log(`[torture-test] GATE 4: Running pytest to verify SQLite persistence tests pass...`)
+					const pytestResult = await new Promise<{
+						passed: boolean
+						output: string
+						testCount: number
+						sqliteTestsRan: boolean
+					}>((resolve) => {
+						child_process.exec(
+							"python -m pytest -v",
+							{ cwd: repoPath, timeout: 120000 },
+							(err, stdout, stderr) => {
+								const output = stdout + stderr
+								console.log(`[torture-test] pytest output:\n${output}`)
+
+								// Parse test results
+								const passedMatch = output.match(/(\d+) passed/)
+								const failedMatch = output.match(/(\d+) failed/)
+								const testCount = passedMatch ? parseInt(passedMatch[1], 10) : 0
+								const failedCount = failedMatch ? parseInt(failedMatch[1], 10) : 0
+
+								// Check if any SQLite-related tests ran (not just the "not_implemented" stub)
+								const sqliteTestsRan =
+									(output.includes("test_sqlite") &&
+										!output.match(/test_sqlite.*PASSED.*\[.*100%\]/)) || // not just the single stub test
+									testCount > 5 // more than the original 5 tests
+
+								resolve({
+									passed: err === null && failedCount === 0 && testCount > 0,
+									output,
+									testCount,
+									sqliteTestsRan,
+								})
+							},
+						)
+					})
+
+					if (!pytestResult.passed) {
+						failures.push(`GATE 4 FAILED: pytest failed - ${pytestResult.output.slice(-500)}`)
+					} else if (!pytestResult.sqliteTestsRan && pytestResult.testCount <= 5) {
+						failures.push(
+							`GATE 4 FAILED: Only ${pytestResult.testCount} tests passed - no new SQLite tests were added (original repo has 5 tests)`,
+						)
+					} else {
+						console.log(
+							`[torture-test] ✓ GATE 4 PASSED: pytest passed with ${pytestResult.testCount} tests`,
+						)
+					}
+
+					// GATE 5: CLI --store sqlite must work (quick functional test)
+					console.log(`[torture-test] GATE 5: Testing CLI --store sqlite...`)
+					const cliResult = await new Promise<{ passed: boolean; output: string }>((resolve) => {
+						// Create a temp db path and test basic CLI functionality
+						const tempDbPath = path.join(repoPath, ".test_cli_sqlite.db")
+						child_process.exec(
+							`python -m app.cli --store sqlite add "CLI test item" && python -m app.cli --store sqlite list`,
+							{
+								cwd: repoPath,
+								timeout: 30000,
+								env: { ...process.env, TXN_TODO_DB: tempDbPath },
+							},
+							(err, stdout, stderr) => {
+								const output = stdout + stderr
+								// Clean up temp db
+								fs.unlink(tempDbPath).catch(() => {})
+								fs.unlink(tempDbPath + "-journal").catch(() => {})
+								fs.unlink(tempDbPath + "-wal").catch(() => {})
+								fs.unlink(tempDbPath + "-shm").catch(() => {})
+
+								// Check if CLI worked (should show the added item or not error out completely)
+								const passed =
+									err === null ||
+									output.includes("CLI test item") ||
+									!output.includes("NotImplementedError")
+								resolve({ passed, output })
+							},
+						)
+					})
+
+					if (!cliResult.passed) {
+						failures.push(
+							`GATE 5 FAILED: CLI --store sqlite did not work. Output (tail): ${cliResult.output.slice(-200)}`,
+						)
+					} else {
+						console.log(`[torture-test] ✓ GATE 5 PASSED: CLI --store sqlite works`)
+					}
+
+					// FINAL VERDICT
+					console.log(`[torture-test] ========================================`)
+					if (failures.length > 0) {
+						console.error(`[torture-test] STAGE 1 VERIFICATION FAILED`)
+						console.error(`[torture-test] ${failures.length} gate(s) failed:`)
+						failures.forEach((f, i) => console.error(`[torture-test]   ${i + 1}. ${f}`))
+						console.error(`[torture-test] ========================================`)
+						fatalFail(`STAGE 1 HARD GATE FAILED: ${failures.join("; ")}`)
+						return
+					}
+
+					console.log(`[torture-test] ✓ ALL STAGE 1 GATES PASSED`)
+					console.log(`[torture-test] - SqliteKV class exists`)
+					console.log(`[torture-test] - make_store() returns SqliteKV for sqlite`)
+					console.log(`[torture-test] - SQLite tests exist`)
+					console.log(`[torture-test] - All ${pytestResult.testCount} tests pass`)
+					console.log(`[torture-test] ========================================`)
+					console.log(`[torture-test] STAGE 1 VERIFICATION PASSED`)
+					console.log(`[torture-test] ========================================`)
+				}
 			} catch (error) {
 				const elapsedError = Date.now() - testStartTime
 				console.error(`[TEST-LIFECYCLE] ========================================`)
@@ -1031,7 +1494,7 @@ suite("Roo Code Task", function () {
 					// Console and listeners already cleaned up by fastFailBlockedAsk
 					throw error
 				}
-				
+
 				// If finished flag is set, TaskAborted handler already called assert.fail
 				// and the test should have exited. If we're here, it's a different error.
 				if (finished) {
@@ -1039,12 +1502,12 @@ suite("Roo Code Task", function () {
 					// Re-throw to ensure test fails
 					throw error
 				}
-				
+
 				// Check if error is due to task abortion (from waitUntilCompleted)
 				if (errorMessage.includes("was aborted")) {
 					// Task was aborted but handler didn't catch it - check console buffer
 					const lastLogs = consoleBuffer.slice(-200).join("\n")
-					
+
 					// Detect blocked Task#ask patterns
 					let askType: string | null = null
 					const blockedAskMatch = lastLogs.match(/Blocked Task#ask in e2e mode: (\w+)(?:\s*\(child task\))?/)
@@ -1056,7 +1519,7 @@ suite("Roo Code Task", function () {
 							askType = willBlockMatch[1]
 						}
 					}
-					
+
 					if (askType) {
 						dumpLast200Lines()
 						printCheckpoints()
@@ -1064,7 +1527,7 @@ suite("Roo Code Task", function () {
 						throw new Error(`[torture-test] Blocked Task#ask in e2e mode: ${askType} (child task)`)
 					}
 				}
-				
+
 				// Dump last 200 lines of output on timeout or other error
 				const elapsed = Date.now() - testStartTime
 				console.error(`[TEST-LIFECYCLE] ========================================`)
@@ -1087,11 +1550,11 @@ suite("Roo Code Task", function () {
 				printCheckpoints()
 				restoreConsole()
 				const lastCp = getLastCheckpoint()
-				const lastCpInfo = lastCp 
+				const lastCpInfo = lastCp
 					? `Last checkpoint: ${lastCp.name} at +${lastCp.elapsedMs}ms (${Date.now() - lastCp.timestamp}ms ago)`
 					: "No checkpoints recorded"
 				fatalFail(
-					`TIMEOUT after ${TORTURE_TIMEOUT_MS / 1000}s - task did not complete. ${lastCpInfo}. See output dump above.`
+					`TIMEOUT after ${TORTURE_TIMEOUT_MS / 1000}s - task did not complete. ${lastCpInfo}. See output dump above.`,
 				)
 			} finally {
 				const elapsedFinally = Date.now() - testStartTime
@@ -1155,7 +1618,8 @@ suite("Roo Code Task", function () {
 
 			assert.ok(
 				!!messages.find(
-					({ say, text }) => (say === "completion_result" || say === "text") && text?.includes("My name is Roo"),
+					({ say, text }) =>
+						(say === "completion_result" || say === "text") && text?.includes("My name is Roo"),
 				),
 				`Completion should include "My name is Roo"`,
 			)

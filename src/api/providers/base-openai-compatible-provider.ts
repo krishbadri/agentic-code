@@ -11,7 +11,7 @@ import type { SingleCompletionHandler, ApiHandlerCreateMessageMetadata } from ".
 import { DEFAULT_HEADERS } from "./constants"
 import { BaseProvider } from "./base-provider"
 import { handleOpenAIError } from "./utils/openai-error-handler"
-import { maybeVcrWrapStream, type VcrRequestDescriptor } from "../vcr/recordReplay"
+import { maybeVcrWrapStreamLazy, type VcrRequestDescriptor } from "../vcr/recordReplay"
 import { isVcrEnabled } from "../vcr/vcrConfig"
 
 type BaseOpenAiCompatibleProviderOptions<ModelName extends string> = ApiHandlerOptions & {
@@ -99,30 +99,31 @@ export abstract class BaseOpenAiCompatibleProvider<ModelName extends string>
 		messages: Anthropic.Messages.MessageParam[],
 		metadata?: ApiHandlerCreateMessageMetadata,
 	): ApiStream {
-		let stream = await this.createStream(systemPrompt, messages, metadata)
+		const { id: model } = this.getModel()
+		const temperature = this.options.modelTemperature ?? this.defaultTemperature
+		const {
+			info: { maxTokens: max_tokens },
+		} = this.getModel()
 
-		// Wrap stream with VCR if enabled
-		if (isVcrEnabled()) {
-			const { id: model } = this.getModel()
-			const temperature = this.options.modelTemperature ?? this.defaultTemperature
-			const {
-				info: { maxTokens: max_tokens },
-			} = this.getModel()
-
-			const descriptor: VcrRequestDescriptor = {
-				providerName: this.providerName,
-				model,
-				endpoint: "openai-chat",
-				params: {
-					messages: [{ role: "system", content: systemPrompt }, ...convertToOpenAiMessages(messages)],
-					temperature,
-					max_tokens: max_tokens ?? undefined,
-					stream: true,
-					stream_options: { include_usage: true },
-				},
-			}
-			stream = (await maybeVcrWrapStream(descriptor, stream)) as typeof stream
+		const vcrDescriptor: VcrRequestDescriptor = {
+			providerName: this.providerName,
+			model,
+			endpoint: "openai-chat",
+			params: {
+				messages: [{ role: "system", content: systemPrompt }, ...convertToOpenAiMessages(messages)],
+				temperature,
+				max_tokens: max_tokens ?? undefined,
+				stream: true,
+				stream_options: { include_usage: true },
+			},
 		}
+
+		// IMPORTANT: In replay mode, do NOT create the real stream (would make a live network call).
+		const stream = isVcrEnabled()
+			? ((await maybeVcrWrapStreamLazy(vcrDescriptor, () =>
+					this.createStream(systemPrompt, messages, metadata),
+				)) as any)
+			: await this.createStream(systemPrompt, messages, metadata)
 
 		for await (const chunk of stream) {
 			const delta = chunk.choices[0]?.delta

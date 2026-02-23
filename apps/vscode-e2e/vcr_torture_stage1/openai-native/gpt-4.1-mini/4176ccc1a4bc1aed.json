@@ -1,0 +1,942 @@
+{
+	"meta": {
+		"provider": "openai-native",
+		"model": "gpt-4.1-mini",
+		"protocol": "openai",
+		"createdAt": "2026-02-01T17:09:36.751Z",
+		"version": "1.0.0"
+	},
+	"request": {
+		"providerName": "openai-native",
+		"model": "gpt-4.1-mini",
+		"endpoint": "openai-responses",
+		"params": {
+			"model": "gpt-4.1-mini",
+			"input": [
+				{
+					"role": "user",
+					"content": [
+						{
+							"type": "input_text",
+							"text": "[ERROR] You did not use a tool in your previous response! Please retry with a tool use.\n\n# Reminder: Instructions for Tool Use\n\nTool uses are formatted using XML-style tags. The tool name itself becomes the XML tag name. Each parameter is enclosed within its own set of tags. Here's the structure:\n\n<actual_tool_name>\n<parameter1_name>value1</parameter1_name>\n<parameter2_name>value2</parameter2_name>\n...\n</actual_tool_name>\n\nFor example, to use the attempt_completion tool:\n\n<attempt_completion>\n<result>\nI have completed the task...\n</result>\n</attempt_completion>\n\nAlways use the actual tool name as the XML tag name for proper parsing and execution.\n\n# Next Steps\n\nIf you have completed the user's task, use the attempt_completion tool. \nIf you require additional information from the user, use the ask_followup_question tool. \nOtherwise, if you have not completed the task and do not need additional information, then proceed with the next step of the task. \n(This is an automated message, so do not respond to it conversationally.)"
+						},
+						{
+							"type": "input_text",
+							"text": "<environment_details>\n# Deterministic Environment Details (torture VCR)\nworkspace: C:/Users/kpb20/Downloads/txn-agent-torture-repo2/txn-agent-torture-repo\nplatform: win32\nnode: v22.15.1\n(time/terminals/tabs/visible files/todos omitted for stable VCR keying)\n</environment_details>"
+						}
+					]
+				}
+			],
+			"instructions": "You are a coding agent focused on implementation. Your primary responsibilities:\n- Write clean, efficient, and maintainable code\n- Follow best practices and coding standards\n- Implement features according to specifications\n- Ensure code is well-structured and documented\n- Focus on functionality and correctness\n\nWhen implementing code:\n- Break down complex problems into smaller, manageable pieces\n- Write code that is easy to understand and maintain\n- Add appropriate comments and documentation\n- Consider edge cases and error handling\n- Optimize for readability over premature optimization\n\nCRITICAL: Always use tools (read_file, search_files, etc.) to gather context. Never ask the user for file contents or code.\n\n---\n\n[object Promise]",
+			"temperature": 0,
+			"max_output_tokens": "[REDACTED]",
+			"previous_response_id": "resp_077eda37137f41f900697f88ca0074819fbba20248fcd33e09",
+			"store": true,
+			"stream": true
+		}
+	},
+	"stream": [
+		{
+			"type": "response.created",
+			"response": {
+				"id": "resp_077eda37137f41f900697f88ced260819f97cafb4be1d3392d",
+				"object": "response",
+				"created_at": 1769965774,
+				"status": "in_progress",
+				"background": false,
+				"completed_at": null,
+				"error": null,
+				"frequency_penalty": 0,
+				"incomplete_details": null,
+				"instructions": "You are a coding agent focused on implementation. Your primary responsibilities:\n- Write clean, efficient, and maintainable code\n- Follow best practices and coding standards\n- Implement features according to specifications\n- Ensure code is well-structured and documented\n- Focus on functionality and correctness\n\nWhen implementing code:\n- Break down complex problems into smaller, manageable pieces\n- Write code that is easy to understand and maintain\n- Add appropriate comments and documentation\n- Consider edge cases and error handling\n- Optimize for readability over premature optimization\n\nCRITICAL: Always use tools (read_file, search_files, etc.) to gather context. Never ask the user for file contents or code.\n\n---\n\n[object Promise]",
+				"max_output_tokens": 32768,
+				"max_tool_calls": null,
+				"model": "gpt-4.1-mini-2025-04-14",
+				"output": [],
+				"parallel_tool_calls": true,
+				"presence_penalty": 0,
+				"previous_response_id": "resp_077eda37137f41f900697f88ca0074819fbba20248fcd33e09",
+				"prompt_cache_key": null,
+				"prompt_cache_retention": null,
+				"reasoning": {
+					"effort": null,
+					"summary": null
+				},
+				"safety_identifier": null,
+				"service_tier": "auto",
+				"store": true,
+				"temperature": 0,
+				"text": {
+					"format": {
+						"type": "text"
+					},
+					"verbosity": "medium"
+				},
+				"tool_choice": "auto",
+				"tools": [],
+				"top_logprobs": 0,
+				"top_p": 1,
+				"truncation": "disabled",
+				"usage": null,
+				"user": null,
+				"metadata": {}
+			},
+			"sequence_number": 0
+		},
+		{
+			"type": "response.in_progress",
+			"response": {
+				"id": "resp_077eda37137f41f900697f88ced260819f97cafb4be1d3392d",
+				"object": "response",
+				"created_at": 1769965774,
+				"status": "in_progress",
+				"background": false,
+				"completed_at": null,
+				"error": null,
+				"frequency_penalty": 0,
+				"incomplete_details": null,
+				"instructions": "You are a coding agent focused on implementation. Your primary responsibilities:\n- Write clean, efficient, and maintainable code\n- Follow best practices and coding standards\n- Implement features according to specifications\n- Ensure code is well-structured and documented\n- Focus on functionality and correctness\n\nWhen implementing code:\n- Break down complex problems into smaller, manageable pieces\n- Write code that is easy to understand and maintain\n- Add appropriate comments and documentation\n- Consider edge cases and error handling\n- Optimize for readability over premature optimization\n\nCRITICAL: Always use tools (read_file, search_files, etc.) to gather context. Never ask the user for file contents or code.\n\n---\n\n[object Promise]",
+				"max_output_tokens": 32768,
+				"max_tool_calls": null,
+				"model": "gpt-4.1-mini-2025-04-14",
+				"output": [],
+				"parallel_tool_calls": true,
+				"presence_penalty": 0,
+				"previous_response_id": "resp_077eda37137f41f900697f88ca0074819fbba20248fcd33e09",
+				"prompt_cache_key": null,
+				"prompt_cache_retention": null,
+				"reasoning": {
+					"effort": null,
+					"summary": null
+				},
+				"safety_identifier": null,
+				"service_tier": "auto",
+				"store": true,
+				"temperature": 0,
+				"text": {
+					"format": {
+						"type": "text"
+					},
+					"verbosity": "medium"
+				},
+				"tool_choice": "auto",
+				"tools": [],
+				"top_logprobs": 0,
+				"top_p": 1,
+				"truncation": "disabled",
+				"usage": null,
+				"user": null,
+				"metadata": {}
+			},
+			"sequence_number": 1
+		},
+		{
+			"type": "response.output_item.added",
+			"item": {
+				"id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+				"type": "message",
+				"status": "in_progress",
+				"content": [],
+				"role": "assistant"
+			},
+			"output_index": 0,
+			"sequence_number": 2
+		},
+		{
+			"type": "response.content_part.added",
+			"content_index": 0,
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"output_index": 0,
+			"part": {
+				"type": "output_text",
+				"annotations": [],
+				"logprobs": [],
+				"text": ""
+			},
+			"sequence_number": 3
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "<",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "fuQ5oFONGKU1KWO",
+			"output_index": 0,
+			"sequence_number": 4
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "insert",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "OmEfxLQ6pQ",
+			"output_index": 0,
+			"sequence_number": 5
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "_content",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "fyYYH0Dv",
+			"output_index": 0,
+			"sequence_number": 6
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ">\n",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "KGtZs2Qysie9s1",
+			"output_index": 0,
+			"sequence_number": 7
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "<",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "qThP58WJXLJZy6V",
+			"output_index": 0,
+			"sequence_number": 8
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "path",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "BdG0YovZJoMZ",
+			"output_index": 0,
+			"sequence_number": 9
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ">",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "2wT4D3PeaGJAkaO",
+			"output_index": 0,
+			"sequence_number": 10
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "app",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "k5Vz8ZQ2nF2ly",
+			"output_index": 0,
+			"sequence_number": 11
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "/store",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "eoAatS5K91",
+			"output_index": 0,
+			"sequence_number": 12
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ".py",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "J6dieHj6I9Tzz",
+			"output_index": 0,
+			"sequence_number": 13
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "</",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "NjUOCPJxsf007r",
+			"output_index": 0,
+			"sequence_number": 14
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "path",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "UnDFHUk1p9au",
+			"output_index": 0,
+			"sequence_number": 15
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ">\n",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "xUk9UzQHhGNH89",
+			"output_index": 0,
+			"sequence_number": 16
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "<",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "jfOY9209UK5jokc",
+			"output_index": 0,
+			"sequence_number": 17
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "line",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "jZYsp5tzpx00",
+			"output_index": 0,
+			"sequence_number": 18
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ">",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "tQKTGNWmw9QCZiS",
+			"output_index": 0,
+			"sequence_number": 19
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "66",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "MvXSqYWJoCGign",
+			"output_index": 0,
+			"sequence_number": 20
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "</",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "RNQPJhm058E8z6",
+			"output_index": 0,
+			"sequence_number": 21
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "line",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "BgNKcqDSfOev",
+			"output_index": 0,
+			"sequence_number": 22
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ">\n",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "fakzchvLVwLprV",
+			"output_index": 0,
+			"sequence_number": 23
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "<",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "jUw2KK3DZjdpVOA",
+			"output_index": 0,
+			"sequence_number": 24
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "content",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "0t1KxjvAL",
+			"output_index": 0,
+			"sequence_number": 25
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ">",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "iR3sG6FT8B8b85t",
+			"output_index": 0,
+			"sequence_number": 26
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "   ",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "JUuqdRldhG6wv",
+			"output_index": 0,
+			"sequence_number": 27
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " if",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "JQH8w8gBdxP6K",
+			"output_index": 0,
+			"sequence_number": 28
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " kind",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "8kVoKC7Gn3q",
+			"output_index": 0,
+			"sequence_number": 29
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " ==",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "2KySiAmf0eVb9",
+			"output_index": 0,
+			"sequence_number": 30
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " \"",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "gM378JmR3e57yb",
+			"output_index": 0,
+			"sequence_number": 31
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "sqlite",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "jctFLC7gfM",
+			"output_index": 0,
+			"sequence_number": 32
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "\":\n",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "4s3Zm8QAWeVqa",
+			"output_index": 0,
+			"sequence_number": 33
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "       ",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "axKjGagY0",
+			"output_index": 0,
+			"sequence_number": 34
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " if",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "XVMG2vLht0AZD",
+			"output_index": 0,
+			"sequence_number": 35
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " sqlite",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "h2DMhhlPM",
+			"output_index": 0,
+			"sequence_number": 36
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "_path",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "Sy4FmD8GgZy",
+			"output_index": 0,
+			"sequence_number": 37
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " is",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "6VpKorwm0M0Eu",
+			"output_index": 0,
+			"sequence_number": 38
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " None",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "HeqVjWBYuOH",
+			"output_index": 0,
+			"sequence_number": 39
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ":\n",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "RdaBfnhdx98ksC",
+			"output_index": 0,
+			"sequence_number": 40
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "           ",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "CsD36",
+			"output_index": 0,
+			"sequence_number": 41
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " raise",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "XPqJ0pFE3q",
+			"output_index": 0,
+			"sequence_number": 42
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " Value",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "zS9iHw7y7P",
+			"output_index": 0,
+			"sequence_number": 43
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "Error",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "729eB4p09Cp",
+			"output_index": 0,
+			"sequence_number": 44
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "(\"",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "GKwwcxzJFllk9z",
+			"output_index": 0,
+			"sequence_number": 45
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "sqlite",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "qDVztvUEHB",
+			"output_index": 0,
+			"sequence_number": 46
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "_path",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "CDYrkxJBnqc",
+			"output_index": 0,
+			"sequence_number": 47
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " must",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "tfm9EfCsNU9",
+			"output_index": 0,
+			"sequence_number": 48
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " be",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "utyP76nmcQjpD",
+			"output_index": 0,
+			"sequence_number": 49
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " provided",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "RFs1cQX",
+			"output_index": 0,
+			"sequence_number": 50
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " for",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "tHCiuQvcbGJd",
+			"output_index": 0,
+			"sequence_number": 51
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " sqlite",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "6Ctncptl4",
+			"output_index": 0,
+			"sequence_number": 52
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " store",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "dYurd3tClw",
+			"output_index": 0,
+			"sequence_number": 53
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "\")\n",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "M6OoxMvkPHFMP",
+			"output_index": 0,
+			"sequence_number": 54
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "       ",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "ECs9M0KfI",
+			"output_index": 0,
+			"sequence_number": 55
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " return",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "qst7Xaxon",
+			"output_index": 0,
+			"sequence_number": 56
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " Sql",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "nvrHKzlkVASB",
+			"output_index": 0,
+			"sequence_number": 57
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "ite",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "mxGvKau7YjaGP",
+			"output_index": 0,
+			"sequence_number": 58
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "KV",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "eG9tFTSczhREAr",
+			"output_index": 0,
+			"sequence_number": 59
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "(sql",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "cnUbubuJECbj",
+			"output_index": 0,
+			"sequence_number": 60
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "ite",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "FwpsixIif7D58",
+			"output_index": 0,
+			"sequence_number": 61
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "_path",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "Wx8wypYd0xY",
+			"output_index": 0,
+			"sequence_number": 62
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ")\n",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "cSB3GLXHDD1a9Y",
+			"output_index": 0,
+			"sequence_number": 63
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "</",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "KRZwact5h67xl3",
+			"output_index": 0,
+			"sequence_number": 64
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "content",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "r6baCvYWB",
+			"output_index": 0,
+			"sequence_number": 65
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ">\n",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "pqkUC3uQnIJrse",
+			"output_index": 0,
+			"sequence_number": 66
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "</",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "TOmnecGO1NOHdL",
+			"output_index": 0,
+			"sequence_number": 67
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "insert",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "ffe6ivHDPz",
+			"output_index": 0,
+			"sequence_number": 68
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "_content",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "xnnr32ic",
+			"output_index": 0,
+			"sequence_number": 69
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ">",
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"obfuscation": "53SUIiOqbOEDs5E",
+			"output_index": 0,
+			"sequence_number": 70
+		},
+		{
+			"type": "response.output_text.done",
+			"content_index": 0,
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"logprobs": [],
+			"output_index": 0,
+			"sequence_number": 71,
+			"text": "<insert_content>\n<path>app/store.py</path>\n<line>66</line>\n<content>    if kind == \"sqlite\":\n        if sqlite_path is None:\n            raise ValueError(\"sqlite_path must be provided for sqlite store\")\n        return SqliteKV(sqlite_path)\n</content>\n</insert_content>"
+		},
+		{
+			"type": "response.content_part.done",
+			"content_index": 0,
+			"item_id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+			"output_index": 0,
+			"part": {
+				"type": "output_text",
+				"annotations": [],
+				"logprobs": [],
+				"text": "<insert_content>\n<path>app/store.py</path>\n<line>66</line>\n<content>    if kind == \"sqlite\":\n        if sqlite_path is None:\n            raise ValueError(\"sqlite_path must be provided for sqlite store\")\n        return SqliteKV(sqlite_path)\n</content>\n</insert_content>"
+			},
+			"sequence_number": 72
+		},
+		{
+			"type": "response.output_item.done",
+			"item": {
+				"id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+				"type": "message",
+				"status": "completed",
+				"content": [
+					{
+						"type": "output_text",
+						"annotations": [],
+						"logprobs": [],
+						"text": "<insert_content>\n<path>app/store.py</path>\n<line>66</line>\n<content>    if kind == \"sqlite\":\n        if sqlite_path is None:\n            raise ValueError(\"sqlite_path must be provided for sqlite store\")\n        return SqliteKV(sqlite_path)\n</content>\n</insert_content>"
+					}
+				],
+				"role": "assistant"
+			},
+			"output_index": 0,
+			"sequence_number": 73
+		},
+		{
+			"type": "response.completed",
+			"response": {
+				"id": "resp_077eda37137f41f900697f88ced260819f97cafb4be1d3392d",
+				"object": "response",
+				"created_at": 1769965774,
+				"status": "completed",
+				"background": false,
+				"completed_at": 1769965776,
+				"error": null,
+				"frequency_penalty": 0,
+				"incomplete_details": null,
+				"instructions": "You are a coding agent focused on implementation. Your primary responsibilities:\n- Write clean, efficient, and maintainable code\n- Follow best practices and coding standards\n- Implement features according to specifications\n- Ensure code is well-structured and documented\n- Focus on functionality and correctness\n\nWhen implementing code:\n- Break down complex problems into smaller, manageable pieces\n- Write code that is easy to understand and maintain\n- Add appropriate comments and documentation\n- Consider edge cases and error handling\n- Optimize for readability over premature optimization\n\nCRITICAL: Always use tools (read_file, search_files, etc.) to gather context. Never ask the user for file contents or code.\n\n---\n\n[object Promise]",
+				"max_output_tokens": 32768,
+				"max_tool_calls": null,
+				"model": "gpt-4.1-mini-2025-04-14",
+				"output": [
+					{
+						"id": "msg_077eda37137f41f900697f88cf4990819f836cab06c899d8b6",
+						"type": "message",
+						"status": "completed",
+						"content": [
+							{
+								"type": "output_text",
+								"annotations": [],
+								"logprobs": [],
+								"text": "<insert_content>\n<path>app/store.py</path>\n<line>66</line>\n<content>    if kind == \"sqlite\":\n        if sqlite_path is None:\n            raise ValueError(\"sqlite_path must be provided for sqlite store\")\n        return SqliteKV(sqlite_path)\n</content>\n</insert_content>"
+							}
+						],
+						"role": "assistant"
+					}
+				],
+				"parallel_tool_calls": true,
+				"presence_penalty": 0,
+				"previous_response_id": "resp_077eda37137f41f900697f88ca0074819fbba20248fcd33e09",
+				"prompt_cache_key": null,
+				"prompt_cache_retention": null,
+				"reasoning": {
+					"effort": null,
+					"summary": null
+				},
+				"safety_identifier": null,
+				"service_tier": "default",
+				"store": true,
+				"temperature": 0,
+				"text": {
+					"format": {
+						"type": "text"
+					},
+					"verbosity": "medium"
+				},
+				"tool_choice": "auto",
+				"tools": [],
+				"top_logprobs": 0,
+				"top_p": 1,
+				"truncation": "disabled",
+				"usage": {
+					"input_tokens": 16675,
+					"input_tokens_details": {
+						"cached_tokens": 15744
+					},
+					"output_tokens": 68,
+					"output_tokens_details": {
+						"reasoning_tokens": 0
+					},
+					"total_tokens": 16743
+				},
+				"user": null,
+				"metadata": {}
+			},
+			"sequence_number": 74
+		}
+	]
+}

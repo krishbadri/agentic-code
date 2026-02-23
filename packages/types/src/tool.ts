@@ -16,6 +16,8 @@ export type ToolGroup = z.infer<typeof toolGroupsSchema>
 
 export const toolNames = [
 	"execute_command",
+	"save_checkpoint",
+	"rollback_to_checkpoint",
 	"read_file",
 	"write_to_file",
 	"apply_diff",

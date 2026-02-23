@@ -17,7 +17,9 @@ Tool uses are formatted using XML-style tags. The tool name itself becomes the X
 ...
 </actual_tool_name>
 
-✅ CORRECT FORMAT:
+Always use the actual tool name as the XML tag name for proper parsing and execution.
+
+✅ CORRECT FORMAT — always follow this exact structure:
 <read_file>
 <args>
   <file>
@@ -26,10 +28,5 @@ Tool uses are formatted using XML-style tags. The tool name itself becomes the X
 </args>
 </read_file>
 
-❌ WRONG FORMAT (will fail):
-read_file(["src/file.py"])
-read_file("src/file.py")
-read_file({path: "src/file.py"})
-
-Always use the actual tool name as the XML tag name for proper parsing and execution.`
+Each parameter value must be wrapped in its own opening and closing tags. Do not use attributes, self-closing tags, or function-call syntax.`
 }

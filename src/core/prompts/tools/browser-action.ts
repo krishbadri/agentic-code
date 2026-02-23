@@ -5,11 +5,10 @@ export function getBrowserActionDescription(args: ToolArgs): string | undefined 
 		return undefined
 	}
 	return `## browser_action
-Description: Request to interact with a Puppeteer-controlled browser. Every action, except \`close\`, will be responded to with a screenshot of the browser's current state, along with any new console logs. You may only perform one browser action per message, and wait for the user's response including a screenshot and logs to determine the next action.
-- The sequence of actions **must always start with** launching the browser at a URL, and **must always end with** closing the browser. If you need to visit a new URL that is not possible to navigate to from the current webpage, you must first close the browser, then launch again at the new URL.
-- While the browser is active, only the \`browser_action\` tool can be used. No other tools should be called during this time. You may proceed to use other tools only after closing the browser. For example if you run into an error and need to fix a file, you must close the browser, then use other tools to make the necessary changes, then re-launch the browser to verify the result.
-- The browser window has a resolution of **${args.browserViewportSize}** pixels. When performing any click actions, ensure the coordinates are within this resolution range.
-- Before clicking on any elements such as icons, links, or buttons, you must consult the provided screenshot of the page to determine the coordinates of the element. The click should be targeted at the **center of the element**, not on its edges.
+Description: Interact with a Puppeteer-controlled browser. Each action (except \`close\`) returns a screenshot and console logs. One action per message.
+- Must always start with \`launch\` and end with \`close\`. To visit a new unreachable URL, close first then re-launch.
+- While browser is active, only browser_action can be used. Close browser before using other tools.
+- Browser resolution: **${args.browserViewportSize}** pixels. Click at the **center** of elements based on the screenshot.
 Parameters:
 - action: (required) The action to perform. The available actions are:
     * launch: Launch a new Puppeteer-controlled browser instance at the specified URL. This **must always be the first action**.
@@ -31,7 +30,7 @@ Parameters:
         - Example: \`<action>close</action>\`
 - url: (optional) Use this for providing the URL for the \`launch\` action.
     * Example: <url>https://example.com</url>
-- coordinate: (optional) The X and Y coordinates for the \`click\` and \`hover\` actions. Coordinates should be within the **${args.browserViewportSize}** resolution.
+- coordinate: (optional) The X and Y coordinates for \`click\` and \`hover\` actions.
     * Example: <coordinate>450,300</coordinate>
 - size: (optional) The width and height for the \`resize\` action.
     * Example: <size>1280,720</size>
@@ -45,15 +44,9 @@ Usage:
 <text>Text to type (optional)</text>
 </browser_action>
 
-Example: Requesting to launch a browser at https://example.com
+Example:
 <browser_action>
 <action>launch</action>
 <url>https://example.com</url>
-</browser_action>
-
-Example: Requesting to click on the element at coordinates 450,300
-<browser_action>
-<action>click</action>
-<coordinate>450,300</coordinate>
 </browser_action>`
 }

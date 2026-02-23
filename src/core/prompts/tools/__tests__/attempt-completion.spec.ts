@@ -56,12 +56,10 @@ describe("getAttemptCompletionDescription", () => {
 		const description = getAttemptCompletionDescription()
 
 		// Should contain core functionality
-		const coreText = "After each tool use, the user will respond with the result of that tool use"
-		expect(description).toContain(coreText)
+		expect(description).toContain("Present the result of your work")
 
 		// Should contain the important note
-		const importantNote = "IMPORTANT NOTE: This tool CANNOT be used until you've confirmed"
-		expect(description).toContain(importantNote)
+		expect(description).toContain("IMPORTANT: Do NOT use this tool until")
 
 		// Should contain result parameter
 		expect(description).toContain("- result: (required)")

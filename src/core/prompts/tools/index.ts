@@ -6,6 +6,8 @@ import { Mode, getModeConfig, isToolAllowedForMode, getGroupName } from "../../.
 
 import { ToolArgs } from "./types"
 import { getExecuteCommandDescription } from "./execute-command"
+import { getSaveCheckpointDescription } from "./save-checkpoint"
+import { getRollbackToCheckpointDescription } from "./rollback-to-checkpoint"
 import { getReadFileDescription } from "./read-file"
 import { getSimpleReadFileDescription } from "./simple-read-file"
 import { getFetchInstructionsDescription } from "./fetch-instructions"
@@ -32,6 +34,8 @@ import { CodeIndexManager } from "../../../services/code-index/manager"
 // Map of tool names to their description functions
 const toolDescriptionMap: Record<string, (args: ToolArgs) => string | undefined> = {
 	execute_command: (args) => getExecuteCommandDescription(args),
+	save_checkpoint: (args) => getSaveCheckpointDescription(args),
+	rollback_to_checkpoint: (args) => getRollbackToCheckpointDescription(args),
 	read_file: (args) => {
 		// Check if the current model should use the simplified read_file tool
 		const modelId = args.settings?.modelId
@@ -76,6 +80,7 @@ export function getToolDescriptionsForMode(
 	settings?: Record<string, any>,
 	enableMcpServerCreation?: boolean,
 	modelId?: string,
+	isChildTask?: boolean,
 ): string {
 	const config = getModeConfig(mode, customModes)
 	const args: ToolArgs = {
@@ -117,8 +122,13 @@ export function getToolDescriptionsForMode(
 		}
 	})
 
-	// Add always available tools
-	ALWAYS_AVAILABLE_TOOLS.forEach((tool) => tools.add(tool))
+	// Add always available tools (except new_task/switch_mode for child tasks — they are leaf workers)
+	ALWAYS_AVAILABLE_TOOLS.forEach((tool) => {
+		if (isChildTask && (tool === "new_task" || tool === "switch_mode")) {
+			return
+		}
+		tools.add(tool)
+	})
 
 	// Conditionally exclude codebase_search if feature is disabled or not configured
 	if (
@@ -143,6 +153,13 @@ export function getToolDescriptionsForMode(
 		tools.delete("run_slash_command")
 	}
 
+	// Conditionally include checkpoint tools if enabled (regardless of mode/groups)
+	// This allows orchestrator mode and subtasks to use checkpoints for transactional workflows
+	if (settings?.enableCheckpoints) {
+		tools.add("save_checkpoint")
+		tools.add("rollback_to_checkpoint")
+	}
+
 	// Map tool descriptions for allowed tools
 	const descriptions = Array.from(tools).map((toolName) => {
 		const descriptionFn = toolDescriptionMap[toolName]
@@ -156,7 +173,11 @@ export function getToolDescriptionsForMode(
 		})
 	})
 
-	return `# Tools\n\n${descriptions.filter(Boolean).join("\n\n")}`
+	// Add a clear summary of available tools at the top
+	const toolNames = Array.from(tools).join(", ")
+	const toolSummary = `# Tools\n\nYou have access to the following tools: ${toolNames}\n\n`
+
+	return `${toolSummary}${descriptions.filter(Boolean).join("\n\n")}`
 }
 
 // Export individual description functions for backward compatibility

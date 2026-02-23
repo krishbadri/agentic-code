@@ -198,6 +198,16 @@ const getLfsPatterns = async (workspacePath: string) => {
 	return []
 }
 
+/**
+ * Windows reserved device names that cannot be used as file names.
+ * Git for Windows rejects these in `git add` with "error: invalid path".
+ * Excluding them prevents `stageAll` from failing on Windows workspaces.
+ */
+const getWindowsReservedNamePatterns = () =>
+	process.platform === "win32"
+		? ["nul", "NUL", "con", "CON", "prn", "PRN", "aux", "AUX", "com[0-9]", "COM[0-9]", "lpt[0-9]", "LPT[0-9]"]
+		: []
+
 export const getExcludePatterns = async (workspacePath: string) => [
 	".git/",
 	...getBuildArtifactPatterns(),
@@ -209,4 +219,5 @@ export const getExcludePatterns = async (workspacePath: string) => [
 	...getGeospatialPatterns(),
 	...getLogFilePatterns(),
 	...(await getLfsPatterns(workspacePath)),
+	...getWindowsReservedNamePatterns(),
 ]

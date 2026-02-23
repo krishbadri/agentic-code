@@ -198,13 +198,17 @@ export class DiffViewProvider {
 		userEdits: string | undefined
 		finalContent: string | undefined
 	}> {
-		// If transactional mode is enabled, route to Control-Plane REST
+		// If transactional mode is enabled, route to Control-Plane REST.
+		// Sub-tx children use their own composite tx_id so writes go to the correct worktree.
+		const ownerTask = this.taskRef.deref()
 		const cfg = vscode.workspace.getConfiguration()
 		const transactional =
 			cfg.get<boolean>("roo.experimental.transactionalMode") ||
 			cfg.get<boolean>("roo-cline.experimental.transactionalMode")
 		if (transactional && this.relPath && this.newContent !== undefined) {
-			const txId = await vscode.commands.executeCommand<string>("roo.internal.getCurrentTxId")
+			const txId =
+				ownerTask?.transactionalTxId ||
+				(await vscode.commands.executeCommand<string>("roo.internal.getCurrentTxId"))
 			const port =
 				vscode.workspace.getConfiguration().get<number>("roo.cpPortOverride") ||
 				(await vscode.commands.executeCommand<number>("roo.internal.getCpPort"))
@@ -718,13 +722,25 @@ export class DiffViewProvider {
 		userEdits: string | undefined
 		finalContent: string | undefined
 	}> {
-		// If transactional mode is enabled, route to Control-Plane REST
+		// Ensure provider state is set even if we early-return via Control-Plane.
+		// Some callers rely on this for tool responses (e.g. pushToolWriteResult) and for marking file edits.
+		this.relPath = relPath
+		this.newContent = content
+
+		// If transactional mode is enabled, route to Control-Plane REST.
+		// Sub-tx children use their composite tx_id for correct worktree routing.
+		// EXCEPTION: If cwd is already a subtask worktree (.cp/worktrees/), write directly to FS.
+		const ownerTaskDirect = this.taskRef.deref()
+		const isSubtaskWorktree = this.cwd.includes(".cp/worktrees/") || this.cwd.includes(".cp\\worktrees\\")
+
 		const cfg = vscode.workspace.getConfiguration()
 		const transactional =
 			cfg.get<boolean>("roo.experimental.transactionalMode") ||
 			cfg.get<boolean>("roo-cline.experimental.transactionalMode")
-		if (transactional) {
-			const txId = await vscode.commands.executeCommand<string>("roo.internal.getCurrentTxId")
+		if (transactional && !isSubtaskWorktree) {
+			const txId =
+				ownerTaskDirect?.transactionalTxId ||
+				(await vscode.commands.executeCommand<string>("roo.internal.getCurrentTxId"))
 			const port =
 				vscode.workspace.getConfiguration().get<number>("roo.cpPortOverride") ||
 				(await vscode.commands.executeCommand<number>("roo.internal.getCpPort"))
@@ -743,7 +759,11 @@ export class DiffViewProvider {
 					filePath: relPath,
 				})
 				await vscode.commands.executeCommand("roo.internal.maybeAutoCheckpoint")
-				return { newProblemsMessage: undefined, userEdits: this.userEdits, finalContent: content }
+
+				// Keep response shape consistent with non-transactional path.
+				this.newProblemsMessage = undefined
+				this.userEdits = undefined
+				return { newProblemsMessage: undefined, userEdits: undefined, finalContent: content }
 			}
 		}
 

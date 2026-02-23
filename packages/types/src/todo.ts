@@ -14,6 +14,7 @@ export const todoItemSchema = z.object({
 	id: z.string(),
 	content: z.string(),
 	status: todoStatusSchema,
+	project: z.string().optional().default("default"), // Named project for isolation (defaults to "default")
 })
 
 export type TodoItem = z.infer<typeof todoItemSchema>

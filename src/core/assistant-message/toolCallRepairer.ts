@@ -3,7 +3,7 @@ import { type ToolName, toolNames } from "@roo-code/types"
 /**
  * Tool Call Repairer - Automatically fixes common tool call mistakes
  * to ensure deterministic, error-free tool execution.
- * 
+ *
  * This is a critical component for research-grade systems that require
  * zero errors. Instead of rejecting mistakes, we repair them automatically.
  */
@@ -19,47 +19,61 @@ interface RepairResult {
  */
 function normalizeToolName(input: string): ToolName | null {
 	const lower = input.toLowerCase().trim()
-	
+
 	// Direct match (case-insensitive)
 	for (const toolName of toolNames) {
 		if (toolName.toLowerCase() === lower) {
 			return toolName
 		}
 	}
-	
-	// Handle common variants
+
+	// Handle common variants (including GPT-5 pre-trained tool names)
 	const variants: Record<string, ToolName> = {
-		"readfile": "read_file",
+		readfile: "read_file",
 		"read-file": "read_file",
-		"readFile": "read_file",
-		"searchfiles": "search_files",
+		readFile: "read_file",
+		searchfiles: "search_files",
 		"search-files": "search_files",
-		"searchFiles": "search_files",
-		"writefile": "write_to_file",
+		searchFiles: "search_files",
+		writefile: "write_to_file",
 		"write-file": "write_to_file",
-		"writeFile": "write_to_file",
-		"writetofile": "write_to_file",
+		writeFile: "write_to_file",
+		writetofile: "write_to_file",
 		"write-to-file": "write_to_file",
-		"executecommand": "execute_command",
+		// GPT-5 pre-trained tool names
+		edit_file: "write_to_file",
+		editfile: "write_to_file",
+		"edit-file": "write_to_file",
+		editFile: "write_to_file",
+		edit_files: "write_to_file",
+		create_file: "write_to_file",
+		createfile: "write_to_file",
+		executecommand: "execute_command",
 		"execute-command": "execute_command",
-		"executeCommand": "execute_command",
-		"bash": "execute_command",
-		"command": "execute_command",
-		"askquestion": "ask_followup_question",
+		executeCommand: "execute_command",
+		bash: "execute_command",
+		command: "execute_command",
+		run_command: "execute_command",
+		runcommand: "execute_command",
+		run_pytest: "execute_command",
+		run_tests: "execute_command",
+		shell: "execute_command",
+		terminal: "execute_command",
+		askquestion: "ask_followup_question",
 		"ask-question": "ask_followup_question",
-		"askQuestion": "ask_followup_question",
-		"listfiles": "list_files",
+		askQuestion: "ask_followup_question",
+		listfiles: "list_files",
 		"list-files": "list_files",
-		"listFiles": "list_files",
-		"codebasesearch": "codebase_search",
+		listFiles: "list_files",
+		codebasesearch: "codebase_search",
 		"codebase-search": "codebase_search",
-		"codebaseSearch": "codebase_search",
+		codebaseSearch: "codebase_search",
 	}
-	
+
 	if (variants[lower]) {
 		return variants[lower]
 	}
-	
+
 	return null
 }
 
@@ -71,22 +85,22 @@ function repairFunctionCallSyntax(text: string): RepairResult {
 	const repairs: string[] = []
 	let repaired = false
 	let result = text
-	
+
 	// Pattern: tool_name([...]) or tool_name("...") or tool_name({...})
 	const functionCallPattern = /(\w+)\s*\((\[[^\]]*\]|"[^"]*"|\{[^}]*\}|[^)]*)\)/g
-	
+
 	result = result.replace(functionCallPattern, (match, toolName, args) => {
 		const normalized = normalizeToolName(toolName)
 		if (!normalized) {
 			return match // Not a tool, leave as-is
 		}
-		
+
 		repaired = true
 		repairs.push(`Converted function-call syntax: ${toolName}(...) → <${normalized}>`)
-		
+
 		// Parse arguments based on format
 		let xmlArgs = ""
-		
+
 		// Array format: ["path"] or ["path1", "path2"]
 		if (args.trim().startsWith("[")) {
 			try {
@@ -94,9 +108,9 @@ function repairFunctionCallSyntax(text: string): RepairResult {
 				if (Array.isArray(parsed)) {
 					if (normalized === "read_file") {
 						// read_file(["path"]) → <read_file><args><file><path>path</path></file></args></read_file>
-						const fileElements = parsed.map((path: string) => 
-							`  <file>\n    <path>${path}</path>\n  </file>`
-						).join("\n")
+						const fileElements = parsed
+							.map((path: string) => `  <file>\n    <path>${path}</path>\n  </file>`)
+							.join("\n")
 						xmlArgs = `<args>\n${fileElements}\n</args>`
 					} else if (normalized === "search_files") {
 						// search_files([".", ".*"]) → <search_files><path>.</path><regex>.*</regex></search_files>
@@ -111,9 +125,9 @@ function repairFunctionCallSyntax(text: string): RepairResult {
 						}
 					} else {
 						// Generic array → wrap in args
-						const paramElements = parsed.map((val: string, idx: number) => 
-							`  <param${idx}>${val}</param${idx}>`
-						).join("\n")
+						const paramElements = parsed
+							.map((val: string, idx: number) => `  <param${idx}>${val}</param${idx}>`)
+							.join("\n")
 						xmlArgs = `<args>\n${paramElements}\n</args>`
 					}
 				}
@@ -122,9 +136,9 @@ function repairFunctionCallSyntax(text: string): RepairResult {
 				const stringMatches = args.match(/"([^"]+)"/g)
 				if (stringMatches && normalized === "read_file") {
 					const paths = stringMatches.map((m: string) => m.slice(1, -1))
-					const fileElements = paths.map((path: string) => 
-						`  <file>\n    <path>${path}</path>\n  </file>`
-					).join("\n")
+					const fileElements = paths
+						.map((path: string) => `  <file>\n    <path>${path}</path>\n  </file>`)
+						.join("\n")
 					xmlArgs = `<args>\n${fileElements}\n</args>`
 				}
 			}
@@ -154,9 +168,9 @@ function repairFunctionCallSyntax(text: string): RepairResult {
 					xmlArgs = `<args>\n  <file>\n    <path>${parsed.path}</path>\n  </file>\n</args>`
 				} else {
 					// Generic object → convert to XML params
-					const paramElements = Object.entries(parsed).map(([key, val]) => 
-						`  <${key}>${val}</${key}>`
-					).join("\n")
+					const paramElements = Object.entries(parsed)
+						.map(([key, val]) => `  <${key}>${val}</${key}>`)
+						.join("\n")
 					xmlArgs = `<args>\n${paramElements}\n</args>`
 				}
 			} catch {
@@ -168,15 +182,15 @@ function repairFunctionCallSyntax(text: string): RepairResult {
 				}
 			}
 		}
-		
+
 		// Default: wrap in args if no specific format detected
 		if (!xmlArgs && args.trim()) {
 			xmlArgs = `<args>${args.trim()}</args>`
 		}
-		
+
 		return `<${normalized}>\n${xmlArgs}\n</${normalized}>`
 	})
-	
+
 	return { repaired, text: result, repairs }
 }
 
@@ -191,25 +205,43 @@ function repairXmlToolCalls(text: string): RepairResult {
 	const repairs: string[] = []
 	let repaired = false
 	let result = text
-	
-	// Pattern to find XML tool tags (case-insensitive)
+
+	// Pattern to find XML opening tool tags (case-insensitive)
 	const xmlTagPattern = /<(\w+)(?:\s[^>]*)?>/gi
-	
+
 	result = result.replace(xmlTagPattern, (match, tagName) => {
 		const normalized = normalizeToolName(tagName)
 		if (!normalized) {
 			return match // Not a tool tag
 		}
-		
+
 		if (tagName !== normalized) {
 			repaired = true
-			repairs.push(`Fixed case: <${tagName}> → <${normalized}>`)
+			repairs.push(`Fixed tool tag: <${tagName}> → <${normalized}>`)
 			return `<${normalized}>`
 		}
-		
+
 		return match
 	})
-	
+
+	// Pattern to find XML closing tool tags (case-insensitive)
+	const xmlClosingTagPattern = /<\/(\w+)\s*>/gi
+
+	result = result.replace(xmlClosingTagPattern, (match, tagName) => {
+		const normalized = normalizeToolName(tagName)
+		if (!normalized) {
+			return match // Not a tool tag
+		}
+
+		if (tagName !== normalized) {
+			repaired = true
+			repairs.push(`Fixed closing tag: </${tagName}> → </${normalized}>`)
+			return `</${normalized}>`
+		}
+
+		return match
+	})
+
 	// Fix missing </read_file> closing tags
 	// Pattern: <read_file>...<path>...</path> (no closing tag)
 	const readFilePattern = /<read_file>([\s\S]*?)(?=<\/read_file>|$)/gi
@@ -225,7 +257,7 @@ function repairXmlToolCalls(text: string): RepairResult {
 					return `<read_file><args>\n  <file>\n    <path>${pathMatch[1]}</path>\n  </file>\n</args></read_file>`
 				}
 			}
-			
+
 			// Add closing tag if missing
 			if (!match.endsWith("</read_file>")) {
 				repaired = true
@@ -235,7 +267,7 @@ function repairXmlToolCalls(text: string): RepairResult {
 		}
 		return match
 	})
-	
+
 	// Fix missing </search_files> closing tags
 	const searchFilesPattern = /<search_files>([\s\S]*?)(?=<\/search_files>|$)/gi
 	result = result.replace(searchFilesPattern, (match, content) => {
@@ -247,7 +279,7 @@ function repairXmlToolCalls(text: string): RepairResult {
 				repairs.push("Added missing <path> parameter to search_files (defaulting to '.')")
 				const regexMatch = content.match(/<regex>([^<]+)<\/regex>/)
 				const filePatternMatch = content.match(/<file_pattern>([^<]+)<\/file_pattern>/)
-				
+
 				let fixed = "<search_files>\n<path>.</path>\n"
 				if (regexMatch) {
 					fixed += `<regex>${regexMatch[1]}</regex>\n`
@@ -260,7 +292,7 @@ function repairXmlToolCalls(text: string): RepairResult {
 				fixed += "</search_files>"
 				return fixed
 			}
-			
+
 			// Add closing tag if missing
 			if (!match.endsWith("</search_files>")) {
 				repaired = true
@@ -270,7 +302,7 @@ function repairXmlToolCalls(text: string): RepairResult {
 		}
 		return match
 	})
-	
+
 	// Fix read_file missing args structure: <read_file><path>...</path></read_file>
 	// Should be: <read_file><args><file><path>...</path></file></args></read_file>
 	const readFileMissingArgsPattern = /<read_file>\s*<path>([^<]+)<\/path>\s*<\/read_file>/gi
@@ -279,7 +311,92 @@ function repairXmlToolCalls(text: string): RepairResult {
 		repairs.push("Fixed read_file structure: added <args> and <file> wrappers")
 		return `<read_file>\n<args>\n  <file>\n    <path>${path.trim()}</path>\n  </file>\n</args>\n</read_file>`
 	})
-	
+
+	// Fix common parameter tag variants that some models emit (e.g. <file_path> instead of <path>).
+	// NOTE: We only normalize parameter tags that are *unambiguous* across tools.
+	const paramTagVariants: Array<{ from: RegExp; to: string; note: string }> = [
+		{ from: /<\s*file_path\s*>/gi, to: "<path>", note: "Mapped <file_path> → <path>" },
+		{ from: /<\s*\/\s*file_path\s*>/gi, to: "</path>", note: "Mapped </file_path> → </path>" },
+		{ from: /<\s*filepath\s*>/gi, to: "<path>", note: "Mapped <filepath> → <path>" },
+		{ from: /<\s*\/\s*filepath\s*>/gi, to: "</path>", note: "Mapped </filepath> → </path>" },
+		{ from: /<\s*position\s*>/gi, to: "<line>", note: "Mapped <position> → <line>" },
+		{ from: /<\s*\/\s*position\s*>/gi, to: "</line>", note: "Mapped </position> → </line>" },
+		{ from: /<\s*line_number\s*>/gi, to: "<line>", note: "Mapped <line_number> → <line>" },
+		{ from: /<\s*\/\s*line_number\s*>/gi, to: "</line>", note: "Mapped </line_number> → </line>" },
+		{ from: /<\s*linecount\s*>/gi, to: "<line_count>", note: "Mapped <linecount> → <line_count>" },
+		{ from: /<\s*\/\s*linecount\s*>/gi, to: "</line_count>", note: "Mapped </linecount> → </line_count>" },
+		{ from: /<\s*lines\s*>/gi, to: "<line_count>", note: "Mapped <lines> → <line_count>" },
+		{ from: /<\s*\/\s*lines\s*>/gi, to: "</line_count>", note: "Mapped </lines> → </line_count>" },
+		{ from: /<\s*patch\s*>/gi, to: "<diff>", note: "Mapped <patch> → <diff>" },
+		{ from: /<\s*\/\s*patch\s*>/gi, to: "</diff>", note: "Mapped </patch> → </diff>" },
+	]
+
+	for (const v of paramTagVariants) {
+		if (v.from.test(result)) {
+			repaired = true
+			repairs.push(v.note)
+			result = result.replace(v.from, v.to)
+		}
+	}
+
+	return { repaired, text: result, repairs }
+}
+
+/**
+ * Repairs attribute-style XML that some models (GPT-5, etc.) produce.
+ * Converts: <file path="app/core.py"/> → <file><path>app/core.py</path></file>
+ * Converts: <file path="app/core.py"></file> → <file><path>app/core.py</path></file>
+ * Also handles self-closing tags within tool calls and unwraps unnecessary nesting.
+ */
+function repairAttributeSyntax(text: string): RepairResult {
+	const repairs: string[] = []
+	let repaired = false
+	let result = text
+
+	// Pattern 1: Self-closing tags with attributes inside tool calls
+	// <file path="app/core.py"/> → <file>\n    <path>app/core.py</path>\n  </file>
+	const selfClosingAttrPattern = /<(\w+)\s+([\w-]+)="([^"]*)"(?:\s+[\w-]+="[^"]*")*\s*\/>/g
+	result = result.replace(selfClosingAttrPattern, (match, tagName, firstAttr, firstValue) => {
+		// Extract all attributes
+		const attrPattern = /([\w-]+)="([^"]*)"/g
+		const attrs: Array<[string, string]> = []
+		let attrMatch
+		while ((attrMatch = attrPattern.exec(match)) !== null) {
+			attrs.push([attrMatch[1], attrMatch[2]])
+		}
+
+		if (attrs.length === 0) return match
+
+		repaired = true
+		repairs.push(`Converted attribute syntax: <${tagName} ${firstAttr}="..."/> → nested elements`)
+
+		const innerXml = attrs.map(([name, value]) => `<${name}>${value}</${name}>`).join("\n    ")
+		return `<${tagName}>\n    ${innerXml}\n  </${tagName}>`
+	})
+
+	// Pattern 2: Opening tags with attributes (not self-closing)
+	// <file path="app/core.py"></file> → <file><path>app/core.py</path></file>
+	const openTagAttrPattern = /<(\w+)\s+([\w-]+="[^"]*"(?:\s+[\w-]+="[^"]*")*)\s*>([\s\S]*?)<\/\1>/g
+	result = result.replace(openTagAttrPattern, (match, tagName, attrsStr, innerContent) => {
+		// Only repair if the inner content is empty or whitespace (attributes contain the real data)
+		if (innerContent.trim() && !innerContent.trim().startsWith("<")) return match
+
+		const attrPattern = /([\w-]+)="([^"]*)"/g
+		const attrs: Array<[string, string]> = []
+		let attrMatch
+		while ((attrMatch = attrPattern.exec(attrsStr)) !== null) {
+			attrs.push([attrMatch[1], attrMatch[2]])
+		}
+
+		if (attrs.length === 0) return match
+
+		repaired = true
+		repairs.push(`Converted attribute syntax: <${tagName} ${attrs[0][0]}="..."> → nested elements`)
+
+		const innerXml = attrs.map(([name, value]) => `<${name}>${value}</${name}>`).join("\n    ")
+		return `<${tagName}>\n    ${innerXml}\n  </${tagName}>`
+	})
+
 	return { repaired, text: result, repairs }
 }
 
@@ -291,11 +408,11 @@ function repairEmbeddedToolCalls(text: string): RepairResult {
 	const repairs: string[] = []
 	let repaired = false
 	let result = text
-	
+
 	// This function is kept for future enhancements but currently doesn't need to do anything
 	// because the main repair functions (function-call syntax and XML repair) handle the actual repairs.
 	// If we need to detect "I will use read_file" patterns and convert them, we can add that here.
-	
+
 	return { repaired, text: result, repairs }
 }
 
@@ -306,7 +423,7 @@ export function repairToolCalls(text: string): RepairResult {
 	let current = text
 	const allRepairs: string[] = []
 	let anyRepaired = false
-	
+
 	// Strategy 1: Repair function-call syntax
 	const funcResult = repairFunctionCallSyntax(current)
 	if (funcResult.repaired) {
@@ -314,23 +431,31 @@ export function repairToolCalls(text: string): RepairResult {
 		allRepairs.push(...funcResult.repairs)
 		anyRepaired = true
 	}
-	
-	// Strategy 2: Repair XML tool calls
+
+	// Strategy 2: Repair attribute-style XML (must run before XML repair)
+	const attrResult = repairAttributeSyntax(current)
+	if (attrResult.repaired) {
+		current = attrResult.text
+		allRepairs.push(...attrResult.repairs)
+		anyRepaired = true
+	}
+
+	// Strategy 3: Repair XML tool calls
 	const xmlResult = repairXmlToolCalls(current)
 	if (xmlResult.repaired) {
 		current = xmlResult.text
 		allRepairs.push(...xmlResult.repairs)
 		anyRepaired = true
 	}
-	
-	// Strategy 3: Repair embedded tool calls
+
+	// Strategy 4: Repair embedded tool calls
 	const embeddedResult = repairEmbeddedToolCalls(current)
 	if (embeddedResult.repaired) {
 		current = embeddedResult.text
 		allRepairs.push(...embeddedResult.repairs)
 		anyRepaired = true
 	}
-	
+
 	return {
 		repaired: anyRepaired,
 		text: current,
