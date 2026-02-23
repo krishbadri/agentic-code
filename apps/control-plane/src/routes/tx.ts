@@ -282,14 +282,27 @@ export function registerTxRoutes(app: FastifyInstance) {
 			.object({ file_path: z.string(), content_base64: z.string(), mode: z.string().optional() })
 			.parse((req as any).body || {})
 
-		// R31, R32: Reject test file modifications unless explicitly allowed
-		// R31, R32: Reject test file modifications unless explicitly allowed via SERVER config
+		// R31/R32: Tests are authoritative — block MODIFICATION of existing test files.
+		// Creating NEW test files is allowed (agents need to write tests).
+		// Only modification/weakening of "given" tests is blocked.
 		if (isTestFile(body.file_path) && !isTestModifyAllowed(body.file_path, app.testModifyAllowlist)) {
-			return reply.code(403).send({
-				code: "TEST_FILE_PROTECTED",
-				message: `R31/R32 violation: Tests are "given". Writing test file "${body.file_path}" is not allowed. Server must be configured with testModifyAllowlist to permit this.`,
-				file_path: body.file_path,
-			})
+			try {
+				const git = new Git({ repoRoot: app.repoRoot })
+				const wt = git.worktreePath((req.params as any).tx_id)
+				const { existsSync } = await import("node:fs")
+				const { join } = await import("node:path")
+				const fileExists = existsSync(join(wt, body.file_path))
+				if (fileExists) {
+					return reply.code(403).send({
+						code: "TEST_FILE_PROTECTED",
+						message: `R31/R32 violation: Tests are "given". Modifying existing test file "${body.file_path}" is not allowed.`,
+						file_path: body.file_path,
+					})
+				}
+				// File doesn't exist yet → creating a NEW test → allowed
+			} catch {
+				// If we can't determine, fall through and allow the write
+			}
 		}
 
 		try {
@@ -316,11 +329,13 @@ export function registerTxRoutes(app: FastifyInstance) {
 
 	app.post("/tx/:tx_id/checkpoint", async (req, reply) => {
 		HeadersSchema.parse(req.headers as any)
-		z.object({
-			reason: z.enum(["human", "auto", "manual"]),
-			policy_snapshot: z.record(z.any()).optional(),
-			trailers: z.record(z.string()).optional(),
-		}).parse((req as any).body || {})
+		const body = z
+			.object({
+				reason: z.enum(["human", "auto", "manual"]),
+				policy_snapshot: z.record(z.any()).optional(),
+				trailers: z.record(z.string()).optional(),
+			})
+			.parse((req as any).body || {})
 
 		const txId = (req.params as any).tx_id
 
@@ -389,7 +404,9 @@ export function registerTxRoutes(app: FastifyInstance) {
 				}
 
 				// Record this checkpoint's progress
-				const msg = `[cp] tx:${txId}`
+				// Include checkpoint name from trailers so git log search can find it by name
+				const progressTrailerMsg = body.trailers?.Message
+				const msg = progressTrailerMsg ? `[cp] ${progressTrailerMsg} (tx:${txId})` : `[cp] tx:${txId}`
 				const { sha, tag } = await git.checkpoint(txId, msg)
 
 				// Update storage
@@ -435,7 +452,9 @@ export function registerTxRoutes(app: FastifyInstance) {
 			}
 
 			// No progress gate configured - proceed normally
-			const msg = `[cp] tx:${txId}`
+			// Include checkpoint name from trailers so git log search can find it by name
+			const trailerMsg = body.trailers?.Message
+			const msg = trailerMsg ? `[cp] ${trailerMsg} (tx:${txId})` : `[cp] tx:${txId}`
 			const { sha, tag } = await git.checkpoint(txId, msg)
 			if (app.db) {
 				const tx = await getTransaction(app.db, txId)
@@ -602,7 +621,8 @@ export function registerTxRoutes(app: FastifyInstance) {
 				/* ignore */
 			}
 
-			// Reset the worktree to the specified commit
+			// Clean untracked files then reset the worktree to the specified commit
+			await (git as any).git(["clean", "-fd"], wt)
 			await (git as any).git(["reset", "--hard", body.hash], wt)
 
 			const durationMs = Date.now() - startTime
@@ -714,6 +734,25 @@ export function registerTxRoutes(app: FastifyInstance) {
 			const relativeSubTxId = (req.params as any).sub_tx_id
 			// Use globally unique sub_tx_id for database operations
 			const globalSubTxId = `${parentTxId}:${relativeSubTxId}`
+
+			// Enforce dependency ordering: all declared depends_on must be COMMITTED before this sub-tx merges
+			if (app.db) {
+				const thisSubTx = await getSubTransaction(app.db, globalSubTxId)
+				if (thisSubTx?.depends_on && thisSubTx.depends_on.length > 0) {
+					for (const depId of thisSubTx.depends_on) {
+						const globalDepId = `${parentTxId}:${depId}`
+						const dep = await getSubTransaction(app.db, globalDepId)
+						if (!dep || dep.status !== "COMMITTED") {
+							return reply.code(409).send({
+								code: "DEPENDENCY_NOT_MET",
+								message: `Cannot merge: dependency "${depId}" has not been committed yet (status: ${dep?.status ?? "NOT_FOUND"})`,
+								dependency: depId,
+								dependencyStatus: dep?.status ?? "NOT_FOUND",
+							})
+						}
+					}
+				}
+			}
 
 			// P0 CRITICAL: Check database for safety checks if not provided in request
 			let hasSafetyChecks = body.hasSafetyChecks
