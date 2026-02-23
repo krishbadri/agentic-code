@@ -38,14 +38,14 @@ You must output valid JSON with this structure:
       "prompt": "Clear description of what this sub-transaction should do",
       "steps": [
         {
-          "type": "edit_file",
+          "type": "write_to_file",
           "target": "src/file.py",
           "action": "Implement function X"
         }
       ],
       "parallel": true,
       "dependencies": [],
-      "safetyChecks": ["pytest tests/test_file.py"]
+      "safetyChecks": ["pnpm test", "pnpm tsc --noEmit"]
     }
   ]
 }
@@ -58,7 +58,13 @@ Guidelines:
 - Only create sub-transactions for tasks that truly need multi-agent coordination
 - If tasks are independent (e.g., editing different files), set parallel: true
 - If one task depends on another (e.g., tests need code first), set dependencies: ["st1"]
-- Use safetyChecks to validate each sub-transaction (tests, linting, etc.)
+- CRITICAL: safetyChecks must be literal executable shell commands (e.g. "pnpm test", "pnpm tsc --noEmit", "pytest -q"). They are run verbatim in the sub-transaction's worktree. Do NOT write descriptions or prose.
+- Use safetyChecks to validate each sub-transaction (tests, type-checking, linting, etc.)
+- CRITICAL: Do NOT add pytest or test safety checks to subtasks where tests are EXPECTED to fail:
+  * Rollback drill steps (create sentinel, make bad change, rollback)
+  * "Add tests first" / Boundary 1 steps where tests fail before implementation
+  * Any step that ends in a state where tests intentionally fail before a subsequent action
+  For these, use "safetyChecks": [] or "skipSafetyChecks": true
 - Be specific in prompts - each sub-transaction should be clear and actionable
 - CRITICAL: Always include specific file paths in prompts. For example:
   * "Review src/file.py and tests/test_file.py for correctness"
