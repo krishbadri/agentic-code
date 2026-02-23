@@ -237,7 +237,20 @@ async function startControlPlane(workspaceRoot: string, disableDb: boolean = fal
 	log(`spawning Control-Plane process (first run may take 20-30s for TypeScript compilation)`)
 	// Use shell=true so that Windows resolves pnpm.cmd; this is cross-platform safe.
 	// Explicitly pass process.env to ensure the child inherits the current PATH (including Git).
-	const child = spawn("pnpm", args, { cwd: cpRoot, shell: true, env: process.env })
+	// Also resolve git binary path and pass it as GIT_BINARY_PATH for the CP to use.
+	const cpEnv = { ...process.env }
+	try {
+		const findGitCmd = process.platform === "win32" ? "where git" : "which git"
+		const { execSync } = require("child_process")
+		const gitPath = execSync(findGitCmd, { encoding: "utf-8", windowsHide: true }).trim().split(/\r?\n/)[0]?.trim()
+		if (gitPath) {
+			cpEnv.GIT_BINARY_PATH = gitPath
+			log(`Resolved git binary for Control-Plane: ${gitPath}`)
+		}
+	} catch {
+		log("Could not resolve git binary path; CP will use its own PATH")
+	}
+	const child = spawn("pnpm", args, { cwd: cpRoot, shell: true, env: cpEnv })
 	cpProcess = child
 
 	// Capture stderr for diagnostics
@@ -268,31 +281,31 @@ async function startControlPlane(workspaceRoot: string, disableDb: boolean = fal
 			}
 			resolve(undefined)
 		}, 60000) // Increased to 60s for first-run compilation
-			rl.on("line", async (line) => {
-				try {
-					const j = JSON.parse(line.trim())
-					if (typeof j.port === "number") {
-						jsonReceived = true
-						clearTimeout(timer)
-						const healthy = await waitForHealthy(j.port)
-						if (!healthy) {
-							log(`Control-Plane reported port ${j.port} but health check failed`)
-							await extensionContext.globalState.update("roo.cpPort", undefined)
-							resolve(undefined)
-							rl.close()
-							stderrRl.close()
-							return
-						}
-						await extensionContext.globalState.update("roo.cpPort", j.port)
-						log(`Control-Plane started on port ${j.port}`)
-						resolve(j.port)
+		rl.on("line", async (line) => {
+			try {
+				const j = JSON.parse(line.trim())
+				if (typeof j.port === "number") {
+					jsonReceived = true
+					clearTimeout(timer)
+					const healthy = await waitForHealthy(j.port)
+					if (!healthy) {
+						log(`Control-Plane reported port ${j.port} but health check failed`)
+						await extensionContext.globalState.update("roo.cpPort", undefined)
+						resolve(undefined)
 						rl.close()
 						stderrRl.close()
+						return
 					}
-				} catch {
-					// Not JSON, ignore
+					await extensionContext.globalState.update("roo.cpPort", j.port)
+					log(`Control-Plane started on port ${j.port}`)
+					resolve(j.port)
+					rl.close()
+					stderrRl.close()
 				}
-			})
+			} catch {
+				// Not JSON, ignore
+			}
+		})
 		child.on("exit", (code, signal) => {
 			clearTimeout(timer)
 			if (code !== 0 || signal) {
@@ -325,7 +338,7 @@ let userInfoHandler: ((data: { userInfo: CloudUserInfo }) => Promise<void>) | un
 export async function activate(context: vscode.ExtensionContext) {
 	await nukeOldWebviewCache()
 	extensionContext = context
-	
+
 	vscode.window.showInformationMessage("Roo DEV activate ping")
 
 	vscode.window.showInformationMessage("Roo DEV activate ping v2 (from Cursor)")

@@ -103,17 +103,19 @@ export async function newTaskTool(
 					// Log warning for debugging
 					const logProvider = task.providerRef.deref()
 					logProvider?.log(
-						`[newTaskTool] Warning: Subtask message references non-existent files: ${nonExistent.join(", ")}`
+						`[newTaskTool] Warning: Subtask message references non-existent files: ${nonExistent.join(", ")}`,
 					)
-					
+
 					// Return error to the LLM so it can correct itself
 					task.consecutiveMistakeCount++
 					task.recordToolError("new_task")
-					pushToolResult(formatResponse.toolError(
-						`Cannot create subtask: The following files do not exist in the workspace:\n` +
-						nonExistent.map((f) => `  - ${f}`).join("\n") +
-						`\n\nPlease verify these files exist before creating the subtask, or use search_files to find the correct paths.`
-					))
+					pushToolResult(
+						formatResponse.toolError(
+							`Cannot create subtask: The following files do not exist in the workspace:\n` +
+								nonExistent.map((f) => `  - ${f}`).join("\n") +
+								`\n\nPlease verify these files exist before creating the subtask, or use search_files to find the correct paths.`,
+						),
+					)
 					return
 				}
 			}

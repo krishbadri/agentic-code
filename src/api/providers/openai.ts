@@ -25,7 +25,7 @@ import { BaseProvider } from "./base-provider"
 import type { SingleCompletionHandler, ApiHandlerCreateMessageMetadata } from "../index"
 import { getApiRequestTimeout } from "./utils/timeout-config"
 import { handleOpenAIError } from "./utils/openai-error-handler"
-import { maybeVcrWrapStream, type VcrRequestDescriptor } from "../vcr/recordReplay"
+import { maybeVcrWrapStreamLazy, type VcrRequestDescriptor } from "../vcr/recordReplay"
 import { isVcrEnabled } from "../vcr/vcrConfig"
 
 // TODO: Rename this to OpenAICompatibleHandler. Also, I think the
@@ -171,32 +171,42 @@ export class OpenAiHandler extends BaseProvider implements SingleCompletionHandl
 			// Add max_tokens if needed
 			this.addMaxTokensIfNeeded(requestOptions, modelInfo)
 
-			let stream
-			try {
-				stream = await this.client.chat.completions.create(
-					requestOptions,
-					isAzureAiInference ? { path: OPENAI_AZURE_AI_INFERENCE_PATH } : {},
-				)
-			} catch (error) {
-				throw handleOpenAIError(error, this.providerName)
+			const vcrDescriptor: VcrRequestDescriptor = {
+				providerName: this.providerName,
+				model: modelId,
+				endpoint: "openai-chat",
+				params: {
+					messages: convertedMessages,
+					temperature: requestOptions.temperature ?? undefined,
+					max_tokens: requestOptions.max_tokens ?? undefined,
+					stream: requestOptions.stream,
+					stream_options: requestOptions.stream_options,
+					reasoning: requestOptions.reasoning ?? undefined,
+				},
 			}
 
-			// Wrap stream with VCR if enabled
-			if (isVcrEnabled()) {
-				const descriptor: VcrRequestDescriptor = {
-					providerName: this.providerName,
-					model: modelId,
-					endpoint: "openai-chat",
-					params: {
-						messages: convertedMessages,
-						temperature: requestOptions.temperature ?? undefined,
-						max_tokens: requestOptions.max_tokens ?? undefined,
-						stream: requestOptions.stream,
-						stream_options: requestOptions.stream_options,
-					},
-				}
-				stream = (await maybeVcrWrapStream(descriptor, stream)) as typeof stream
-			}
+			// IMPORTANT: In replay mode, do NOT create the real stream (would make a live network call).
+			const stream = isVcrEnabled()
+				? await maybeVcrWrapStreamLazy(vcrDescriptor, async () => {
+						try {
+							return await this.client.chat.completions.create(
+								requestOptions,
+								isAzureAiInference ? { path: OPENAI_AZURE_AI_INFERENCE_PATH } : {},
+							)
+						} catch (error) {
+							throw handleOpenAIError(error, this.providerName)
+						}
+					})
+				: await (async () => {
+						try {
+							return await this.client.chat.completions.create(
+								requestOptions,
+								isAzureAiInference ? { path: OPENAI_AZURE_AI_INFERENCE_PATH } : {},
+							)
+						} catch (error) {
+							throw handleOpenAIError(error, this.providerName)
+						}
+					})()
 
 			const matcher = new XmlMatcher(
 				"think",

@@ -42,13 +42,15 @@ export async function run() {
 
 	let testFiles: string[]
 
-	if (process.env.TEST_FILE) {
-		const specificFile = process.env.TEST_FILE.endsWith(".js")
-			? process.env.TEST_FILE
-			: `${process.env.TEST_FILE}.js`
+	// When running torture test, only run task.test.ts (skip other unrelated tests)
+	const isTortureTest = process.env.TEST_TORTURE_REPO === "1"
+	const testFileOverride = isTortureTest ? "task.test.js" : process.env.TEST_FILE
+
+	if (testFileOverride) {
+		const specificFile = testFileOverride.endsWith(".js") ? testFileOverride : `${testFileOverride}.js`
 
 		testFiles = await glob(`**/${specificFile}`, { cwd })
-		console.log(`Running specific test file: ${specificFile}`)
+		console.log(`Running specific test file: ${specificFile}${isTortureTest ? " (torture test mode)" : ""}`)
 	} else {
 		testFiles = await glob("**/**.test.js", { cwd })
 	}

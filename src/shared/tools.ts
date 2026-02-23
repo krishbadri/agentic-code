@@ -29,6 +29,10 @@ export interface TextContent {
 
 export const toolParamNames = [
 	"command",
+	"name",
+	"commit_hash",
+	"checkpoint_name",
+	"hash",
 	"path",
 	"content",
 	"line_count",
@@ -65,6 +69,7 @@ export const toolParamNames = [
 	"query",
 	"args",
 	"todos",
+	"project", // Named project for todo isolation
 	"prompt",
 	"image",
 ] as const
@@ -204,6 +209,8 @@ export const TOOL_DISPLAY_NAMES: Record<ToolName, string> = {
 	update_todo_list: "update todo list",
 	run_slash_command: "run slash command",
 	generate_image: "generate images",
+	save_checkpoint: "save checkpoints",
+	rollback_to_checkpoint: "rollback to checkpoint",
 } as const
 
 // Define available tool groups.
@@ -225,7 +232,7 @@ export const TOOL_GROUPS: Record<ToolGroup, ToolGroupConfig> = {
 		tools: ["browser_action"],
 	},
 	command: {
-		tools: ["execute_command"],
+		tools: ["execute_command", "save_checkpoint", "rollback_to_checkpoint"],
 	},
 	mcp: {
 		tools: ["use_mcp_tool", "access_mcp_resource"],

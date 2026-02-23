@@ -452,7 +452,7 @@ Original error: ${errorMessage}`
 					if (currentCount >= MAX_CONSECUTIVE_DIFF_FAILURES) {
 						// Reset the counter to allow future attempts after corrective action
 						cline.consecutiveMistakeCountForApplyDiff.delete(relPath)
-						
+
 						const forcedActionError = `CRITICAL: apply_diff has failed ${currentCount} consecutive times on "${relPath}".
 
 You MUST take a different approach. Do NOT attempt apply_diff on this file again until you have:
@@ -654,6 +654,7 @@ ${errorDetails ? `\nTechnical details:\n${errorDetails}\n` : ""}
 
 				// Used to determine if we should wait for busy terminal to update before sending api request
 				cline.didEditFile = true
+				cline.fileMutationOccurred = true // Track that this task modified a file (for subtask completion validation)
 				let partFailHint = ""
 
 				if (successCount < diffItems.length) {

@@ -9,7 +9,9 @@ import {
 	isRateLimitError,
 } from "../rate-limit/RateLimitCoordinator"
 
-const MAX_RETRIES = 2 // Reduced from 3 to fail faster
+// Torture/e2e runs are deterministic and time-bounded; failing fast on rate limits is counterproductive.
+// Allow more retries in TEST_TORTURE_REPO to ride out temporary TPM windows.
+const MAX_RETRIES = process.env.TEST_TORTURE_REPO === "1" ? 10 : 2 // Reduced from 3 to fail faster in normal runs
 const INITIAL_RETRY_DELAY_MS = 2000
 const MAX_RETRY_DELAY_MS = 60000
 
@@ -28,10 +30,14 @@ let rateLimitHistory: RateLimitEvent[] = []
  * Check if circuit breaker should prevent retries
  */
 export function shouldOpenCircuitBreaker(): boolean {
+	// In torture runs, we prefer waiting out rate limits over failing fast.
+	if (process.env.TEST_TORTURE_REPO === "1") {
+		return false
+	}
 	const now = Date.now()
 	// Remove events outside the window
 	rateLimitHistory = rateLimitHistory.filter((event) => now - event.timestamp < RATE_LIMIT_WINDOW_MS)
-	
+
 	// If we've hit too many rate limits recently, open the circuit
 	return rateLimitHistory.length >= MAX_RATE_LIMITS_PER_WINDOW
 }
@@ -82,7 +88,7 @@ export class PlannerAgent {
 	/**
 	 * Maps the repository structure by dynamically scanning the workspace.
 	 * This ensures plans reference real file paths, not guessed ones.
-	 * 
+	 *
 	 * IMPORTANT: This replaces the old hardcoded approach that only looked for
 	 * specific files like "src/txn_demo/cli.py". Now it scans the actual workspace.
 	 */
@@ -93,22 +99,26 @@ export class PlannerAgent {
 		try {
 			// Get a comprehensive summary of the repository structure
 			const summary = await getRepositoryStructureSummary(workspaceRoot, 3)
-			
+
 			// Also list all source files for more detailed grounding
 			const allFiles = await listFilesRecursively(workspaceRoot, 4)
-			
+
 			if (allFiles.length === 0) {
 				return summary + "\n\n⚠️ No source files found in workspace."
 			}
-			
+
 			// Build a detailed file list (limited to prevent token bloat)
 			const fileListHeader = `\n\nALL SOURCE FILES IN WORKSPACE (${allFiles.length} total):`
 			const maxFilesToShow = 50
-			const fileList = allFiles.slice(0, maxFilesToShow).map((f) => `  ✓ ${f}`).join("\n")
-			const truncationNote = allFiles.length > maxFilesToShow 
-				? `\n  ... and ${allFiles.length - maxFilesToShow} more files (use search_files to find specific files)`
-				: ""
-			
+			const fileList = allFiles
+				.slice(0, maxFilesToShow)
+				.map((f) => `  ✓ ${f}`)
+				.join("\n")
+			const truncationNote =
+				allFiles.length > maxFilesToShow
+					? `\n  ... and ${allFiles.length - maxFilesToShow} more files (use search_files to find specific files)`
+					: ""
+
 			return summary + fileListHeader + "\n" + fileList + truncationNote
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error)
@@ -116,7 +126,7 @@ export class PlannerAgent {
 			return "⚠️ Could not scan repository structure. Use search_files to find files."
 		}
 	}
-	
+
 	/**
 	 * Validates file paths mentioned in a plan's sub-transactions.
 	 * Returns warnings for any non-existent files referenced.
@@ -125,38 +135,38 @@ export class PlannerAgent {
 		const { extractFilePathsFromText, validateFilePaths } = await import("../../utils/fs")
 		const workspaceRoot = this.task.cwd
 		const warnings: string[] = []
-		
+
 		for (const subTx of plan.subTransactions) {
 			// Extract file paths from the prompt
 			const promptPaths = extractFilePathsFromText(subTx.prompt || "")
-			
+
 			// Extract file paths from steps - ensure target is actually a string
 			// (LLM might return arrays or other types instead)
 			const stepPaths: string[] = (subTx.steps || [])
 				.filter((step: any) => step.target && typeof step.target === "string")
 				.map((step: any) => step.target as string)
-			
+
 			const allPaths = [...new Set([...promptPaths, ...stepPaths])]
-			
+
 			if (allPaths.length > 0) {
 				const { nonExistent } = await validateFilePaths(allPaths, workspaceRoot)
 				if (nonExistent.length > 0) {
 					warnings.push(
-						`Sub-transaction "${subTx.id}" references non-existent files: ${nonExistent.join(", ")}`
+						`Sub-transaction "${subTx.id}" references non-existent files: ${nonExistent.join(", ")}`,
 					)
 				}
 			}
 		}
-		
+
 		return warnings
 	}
 
 	async generatePlan(userPrompt: string, retryAttempt: number = 0, forceComplex: boolean = false): Promise<Plan> {
 		// Map repository structure before generating plan
 		const repoStructure = await this.mapRepositoryStructure()
-		
+
 		let plannerPrompt: string
-		
+
 		if (forceComplex) {
 			// STRONGER PROMPT: Used when heuristics indicate complexity but LLM returned empty plan
 			plannerPrompt = `CRITICAL: This task has been flagged as COMPLEX by heuristic analysis. You MUST create a plan with sub-transactions.
@@ -248,7 +258,7 @@ Output only valid JSON matching the required structure.`
 			const provider: string = this.task.apiConfiguration.apiProvider || "unknown"
 			const modelId: string = this.task.api.getModel().id || "unknown"
 			await waitForRateLimit(provider, modelId)
-			
+
 			// Use the task's API handler to call the LLM
 			const stream = this.task.api.createMessage(PLANNER_SYSTEM_PROMPT, messages, {
 				taskId: this.task.taskId,
@@ -284,6 +294,16 @@ Output only valid JSON matching the required structure.`
 			// Validate plan structure
 			if (!plan.subTransactions || !Array.isArray(plan.subTransactions)) {
 				throw new Error("Invalid plan: missing subTransactions array")
+			}
+
+			// Map LLM output field "dependencies" to the canonical "dependsOn" field.
+			// The planner prompt uses "dependencies" but SubTransaction uses "dependsOn".
+			for (const subTx of plan.subTransactions) {
+				const raw = subTx as any
+				if (raw.dependencies && !subTx.dependsOn) {
+					subTx.dependsOn = raw.dependencies
+					delete raw.dependencies
+				}
 			}
 
 			// Validate each sub-transaction
@@ -337,9 +357,9 @@ Output only valid JSON matching the required structure.`
 				const fileWarnings = await this.validatePlanFilePaths(plan)
 				if (fileWarnings.length > 0) {
 					// Log warnings but don't fail - the LLM might still be able to work with search_files
-					this.task.providerRef.deref()?.log(
-						`[PlannerAgent] Warning: Plan references non-existent files:\n${fileWarnings.join("\n")}`
-					)
+					this.task.providerRef
+						.deref()
+						?.log(`[PlannerAgent] Warning: Plan references non-existent files:\n${fileWarnings.join("\n")}`)
 					// Attach warnings to plan for downstream handling
 					;(plan as any).fileValidationWarnings = fileWarnings
 				}
@@ -349,60 +369,65 @@ Output only valid JSON matching the required structure.`
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error)
 			const isRateLimit = isRateLimitError(error)
-			
+
 			// Record rate limit errors for circuit breaker
 			if (isRateLimit) {
 				recordRateLimitError()
 			}
-			
+
 			// Check circuit breaker before retrying
 			if (isRateLimit && shouldOpenCircuitBreaker()) {
-				this.task.providerRef.deref()?.log(
-					`[PlannerAgent] Circuit breaker opened: too many rate limit errors in the last ${RATE_LIMIT_WINDOW_MS / 1000}s. Failing fast.`
+				this.task.providerRef
+					.deref()
+					?.log(
+						`[PlannerAgent] Circuit breaker opened: too many rate limit errors in the last ${RATE_LIMIT_WINDOW_MS / 1000}s. Failing fast.`,
+					)
+				throw new Error(
+					`Failed to generate plan: Rate limit circuit breaker opened. Too many rate limit errors. Please wait before trying again.`,
 				)
-				throw new Error(`Failed to generate plan: Rate limit circuit breaker opened. Too many rate limit errors. Please wait before trying again.`)
 			}
-			
+
 			// Check if it's a rate limit error and we can retry
 			if (isRateLimit && retryAttempt < MAX_RETRIES) {
 				// Record the rate limit error in the global coordinator (extracts reset time from error)
 				const provider: string = this.task.apiConfiguration.apiProvider || "unknown"
 				const modelId: string = this.task.api.getModel().id || "unknown"
 				await recordRateLimitErrorCoordinator(provider, modelId, error)
-				
+
 				// Get the delay from coordinator - it extracts the exact reset time from the error
 				const coordinatorDelayMs = await getRateLimitDelay(provider, modelId)
-				
+
 				// If coordinator found a reset time, use it exactly (no buffer needed - API told us when to retry)
 				if (coordinatorDelayMs > 0) {
 					const delaySeconds = Math.ceil(coordinatorDelayMs / 1000)
-					this.task.providerRef.deref()?.log(
-						`[PlannerAgent] Rate limit error caught (attempt ${retryAttempt + 1}/${MAX_RETRIES}). API says retry after ${delaySeconds}s. Waiting...`
-					)
+					this.task.providerRef
+						.deref()
+						?.log(
+							`[PlannerAgent] Rate limit error caught (attempt ${retryAttempt + 1}/${MAX_RETRIES}). API says retry after ${delaySeconds}s. Waiting...`,
+						)
 					// Wait for the exact time the API specified
 					await waitForRateLimit(provider, modelId)
 					return this.generatePlan(userPrompt, retryAttempt + 1, forceComplex)
 				}
-				
+
 				// Fallback: if coordinator couldn't extract reset time, use exponential backoff
 				// This should rarely happen if error messages are properly formatted
 				const retryDelay = this.extractRetryDelay(errorMessage)
-				let delayMs = retryDelay 
+				let delayMs = retryDelay
 					? Math.ceil(retryDelay * 1000) // Convert seconds to ms
-					: Math.min(
-						INITIAL_RETRY_DELAY_MS * Math.pow(2, retryAttempt),
-						MAX_RETRY_DELAY_MS
-					)
+					: Math.min(INITIAL_RETRY_DELAY_MS * Math.pow(2, retryAttempt), MAX_RETRY_DELAY_MS)
 				delayMs = Math.max(delayMs, 1000)
-				
-				this.task.providerRef.deref()?.log(
-					`[PlannerAgent] Rate limit error caught (attempt ${retryAttempt + 1}/${MAX_RETRIES}). No reset time found in error, using fallback delay of ${Math.ceil(delayMs / 1000)}s...`
-				)
-				
+
+				this.task.providerRef
+					.deref()
+					?.log(
+						`[PlannerAgent] Rate limit error caught (attempt ${retryAttempt + 1}/${MAX_RETRIES}). No reset time found in error, using fallback delay of ${Math.ceil(delayMs / 1000)}s...`,
+					)
+
 				await delay(delayMs)
 				return this.generatePlan(userPrompt, retryAttempt + 1, forceComplex)
 			}
-			
+
 			// Not a rate limit error or max retries reached
 			this.task.providerRef.deref()?.log(`[PlannerAgent] Failed to generate plan: ${errorMessage}`)
 			throw new Error(`Failed to generate plan: ${errorMessage}`)

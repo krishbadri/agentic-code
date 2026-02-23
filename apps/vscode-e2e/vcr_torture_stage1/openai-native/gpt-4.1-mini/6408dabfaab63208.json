@@ -1,0 +1,1642 @@
+{
+	"meta": {
+		"provider": "openai-native",
+		"model": "gpt-4.1-mini",
+		"protocol": "openai",
+		"createdAt": "2026-02-01T17:13:19.526Z",
+		"version": "1.0.0"
+	},
+	"request": {
+		"providerName": "openai-native",
+		"model": "gpt-4.1-mini",
+		"endpoint": "openai-responses",
+		"params": {
+			"model": "gpt-4.1-mini",
+			"input": [
+				{
+					"role": "user",
+					"content": [
+						{
+							"type": "input_text",
+							"text": "[ERROR] You did not use a tool in your previous response! Please retry with a tool use.\n\n# Reminder: Instructions for Tool Use\n\nTool uses are formatted using XML-style tags. The tool name itself becomes the XML tag name. Each parameter is enclosed within its own set of tags. Here's the structure:\n\n<actual_tool_name>\n<parameter1_name>value1</parameter1_name>\n<parameter2_name>value2</parameter2_name>\n...\n</actual_tool_name>\n\nFor example, to use the attempt_completion tool:\n\n<attempt_completion>\n<result>\nI have completed the task...\n</result>\n</attempt_completion>\n\nAlways use the actual tool name as the XML tag name for proper parsing and execution.\n\n# Next Steps\n\nIf you have completed the user's task, use the attempt_completion tool. \nIf you require additional information from the user, use the ask_followup_question tool. \nOtherwise, if you have not completed the task and do not need additional information, then proceed with the next step of the task. \n(This is an automated message, so do not respond to it conversationally.)"
+						},
+						{
+							"type": "input_text",
+							"text": "<environment_details>\n# Deterministic Environment Details (torture VCR)\nworkspace: C:/Users/kpb20/Downloads/txn-agent-torture-repo2/txn-agent-torture-repo\nplatform: win32\nnode: v22.15.1\n(time/terminals/tabs/visible files/todos omitted for stable VCR keying)\n</environment_details>"
+						}
+					]
+				}
+			],
+			"instructions": "You are a coding agent focused on implementation. Your primary responsibilities:\n- Write clean, efficient, and maintainable code\n- Follow best practices and coding standards\n- Implement features according to specifications\n- Ensure code is well-structured and documented\n- Focus on functionality and correctness\n\nWhen implementing code:\n- Break down complex problems into smaller, manageable pieces\n- Write code that is easy to understand and maintain\n- Add appropriate comments and documentation\n- Consider edge cases and error handling\n- Optimize for readability over premature optimization\n\nCRITICAL: Always use tools (read_file, search_files, etc.) to gather context. Never ask the user for file contents or code.\n\n---\n\n[object Promise]",
+			"temperature": 0,
+			"max_output_tokens": "[REDACTED]",
+			"previous_response_id": "resp_03f616d91dbee8b100697f89a47cc881a0acfa84353017359a",
+			"store": true,
+			"stream": true
+		}
+	},
+	"stream": [
+		{
+			"type": "response.created",
+			"response": {
+				"id": "resp_03f616d91dbee8b100697f89ad244081a0b00091d397188e03",
+				"object": "response",
+				"created_at": 1769965997,
+				"status": "in_progress",
+				"background": false,
+				"completed_at": null,
+				"error": null,
+				"frequency_penalty": 0,
+				"incomplete_details": null,
+				"instructions": "You are a coding agent focused on implementation. Your primary responsibilities:\n- Write clean, efficient, and maintainable code\n- Follow best practices and coding standards\n- Implement features according to specifications\n- Ensure code is well-structured and documented\n- Focus on functionality and correctness\n\nWhen implementing code:\n- Break down complex problems into smaller, manageable pieces\n- Write code that is easy to understand and maintain\n- Add appropriate comments and documentation\n- Consider edge cases and error handling\n- Optimize for readability over premature optimization\n\nCRITICAL: Always use tools (read_file, search_files, etc.) to gather context. Never ask the user for file contents or code.\n\n---\n\n[object Promise]",
+				"max_output_tokens": 32768,
+				"max_tool_calls": null,
+				"model": "gpt-4.1-mini-2025-04-14",
+				"output": [],
+				"parallel_tool_calls": true,
+				"presence_penalty": 0,
+				"previous_response_id": "resp_03f616d91dbee8b100697f89a47cc881a0acfa84353017359a",
+				"prompt_cache_key": null,
+				"prompt_cache_retention": null,
+				"reasoning": {
+					"effort": null,
+					"summary": null
+				},
+				"safety_identifier": null,
+				"service_tier": "auto",
+				"store": true,
+				"temperature": 0,
+				"text": {
+					"format": {
+						"type": "text"
+					},
+					"verbosity": "medium"
+				},
+				"tool_choice": "auto",
+				"tools": [],
+				"top_logprobs": 0,
+				"top_p": 1,
+				"truncation": "disabled",
+				"usage": null,
+				"user": null,
+				"metadata": {}
+			},
+			"sequence_number": 0
+		},
+		{
+			"type": "response.in_progress",
+			"response": {
+				"id": "resp_03f616d91dbee8b100697f89ad244081a0b00091d397188e03",
+				"object": "response",
+				"created_at": 1769965997,
+				"status": "in_progress",
+				"background": false,
+				"completed_at": null,
+				"error": null,
+				"frequency_penalty": 0,
+				"incomplete_details": null,
+				"instructions": "You are a coding agent focused on implementation. Your primary responsibilities:\n- Write clean, efficient, and maintainable code\n- Follow best practices and coding standards\n- Implement features according to specifications\n- Ensure code is well-structured and documented\n- Focus on functionality and correctness\n\nWhen implementing code:\n- Break down complex problems into smaller, manageable pieces\n- Write code that is easy to understand and maintain\n- Add appropriate comments and documentation\n- Consider edge cases and error handling\n- Optimize for readability over premature optimization\n\nCRITICAL: Always use tools (read_file, search_files, etc.) to gather context. Never ask the user for file contents or code.\n\n---\n\n[object Promise]",
+				"max_output_tokens": 32768,
+				"max_tool_calls": null,
+				"model": "gpt-4.1-mini-2025-04-14",
+				"output": [],
+				"parallel_tool_calls": true,
+				"presence_penalty": 0,
+				"previous_response_id": "resp_03f616d91dbee8b100697f89a47cc881a0acfa84353017359a",
+				"prompt_cache_key": null,
+				"prompt_cache_retention": null,
+				"reasoning": {
+					"effort": null,
+					"summary": null
+				},
+				"safety_identifier": null,
+				"service_tier": "auto",
+				"store": true,
+				"temperature": 0,
+				"text": {
+					"format": {
+						"type": "text"
+					},
+					"verbosity": "medium"
+				},
+				"tool_choice": "auto",
+				"tools": [],
+				"top_logprobs": 0,
+				"top_p": 1,
+				"truncation": "disabled",
+				"usage": null,
+				"user": null,
+				"metadata": {}
+			},
+			"sequence_number": 1
+		},
+		{
+			"type": "response.output_item.added",
+			"item": {
+				"id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+				"type": "message",
+				"status": "in_progress",
+				"content": [],
+				"role": "assistant"
+			},
+			"output_index": 0,
+			"sequence_number": 2
+		},
+		{
+			"type": "response.content_part.added",
+			"content_index": 0,
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"output_index": 0,
+			"part": {
+				"type": "output_text",
+				"annotations": [],
+				"logprobs": [],
+				"text": ""
+			},
+			"sequence_number": 3
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "<",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "IiMLRn9zXqDub3C",
+			"output_index": 0,
+			"sequence_number": 4
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "attempt",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "hvPlxWKlR",
+			"output_index": 0,
+			"sequence_number": 5
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "_completion",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "yK8Rb",
+			"output_index": 0,
+			"sequence_number": 6
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ">\n",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "GWeF1LDWrreUJZ",
+			"output_index": 0,
+			"sequence_number": 7
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "<",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "qx03WfF5qWXxYDH",
+			"output_index": 0,
+			"sequence_number": 8
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "result",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "r16UhADCE3",
+			"output_index": 0,
+			"sequence_number": 9
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ">\n",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "YiMvmDfqGWwjcf",
+			"output_index": 0,
+			"sequence_number": 10
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "The",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "SKmoGYgsGSyKU",
+			"output_index": 0,
+			"sequence_number": 11
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " requested",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "jcwOxZ",
+			"output_index": 0,
+			"sequence_number": 12
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " feature",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "XR7KqiaR",
+			"output_index": 0,
+			"sequence_number": 13
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " to",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "cSbb5f9vufuiy",
+			"output_index": 0,
+			"sequence_number": 14
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " support",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "KWcxZuVf",
+			"output_index": 0,
+			"sequence_number": 15
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " the",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "5YN4GdC0kqxK",
+			"output_index": 0,
+			"sequence_number": 16
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " `",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "dQrZAAtzSpb2mA",
+			"output_index": 0,
+			"sequence_number": 17
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "--",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "GLfDQQi5R7fdab",
+			"output_index": 0,
+			"sequence_number": 18
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "store",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "QRNWH3r8k8f",
+			"output_index": 0,
+			"sequence_number": 19
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " sqlite",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "bzms7iJDR",
+			"output_index": 0,
+			"sequence_number": 20
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "`",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "k9mLUPoXAgpr18V",
+			"output_index": 0,
+			"sequence_number": 21
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " CLI",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "nyabA6yvwWIh",
+			"output_index": 0,
+			"sequence_number": 22
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " option",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "OUXYAJf8F",
+			"output_index": 0,
+			"sequence_number": 23
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " and",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "FXJgBb2bfNT8",
+			"output_index": 0,
+			"sequence_number": 24
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " to",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "JvAbCBLz9uvtf",
+			"output_index": 0,
+			"sequence_number": 25
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " read",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "iLqJpEAaUEG",
+			"output_index": 0,
+			"sequence_number": 26
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " the",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "FrWONEp8xoMZ",
+			"output_index": 0,
+			"sequence_number": 27
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " `",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "7vfcTVc036i2OK",
+			"output_index": 0,
+			"sequence_number": 28
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "TX",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "aCKMMSZVxADD6e",
+			"output_index": 0,
+			"sequence_number": 29
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "N",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "ycTODUlCFs3tKMK",
+			"output_index": 0,
+			"sequence_number": 30
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "_T",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "2ZvH8sml7TiAkF",
+			"output_index": 0,
+			"sequence_number": 31
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "ODO",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "Cpj3LMbzLtsOE",
+			"output_index": 0,
+			"sequence_number": 32
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "_DB",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "XDaJB7TUEEoup",
+			"output_index": 0,
+			"sequence_number": 33
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "`",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "LtjhFqdFv8pRa6H",
+			"output_index": 0,
+			"sequence_number": 34
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " environment",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "RbBk",
+			"output_index": 0,
+			"sequence_number": 35
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " variable",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "BnFyblj",
+			"output_index": 0,
+			"sequence_number": 36
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " for",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "0aI7hN6bDSMF",
+			"output_index": 0,
+			"sequence_number": 37
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " the",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "xrfhTcJrVpns",
+			"output_index": 0,
+			"sequence_number": 38
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " SQLite",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "eWmTNp6kG",
+			"output_index": 0,
+			"sequence_number": 39
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " database",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "qpWShw7",
+			"output_index": 0,
+			"sequence_number": 40
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " path",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "H2qhMvnU9VN",
+			"output_index": 0,
+			"sequence_number": 41
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " is",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "6JGHJsrxKuXpz",
+			"output_index": 0,
+			"sequence_number": 42
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " already",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "d8vFuQrQ",
+			"output_index": 0,
+			"sequence_number": 43
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " implemented",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "v7SK",
+			"output_index": 0,
+			"sequence_number": 44
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " in",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "P4ThKCD0wGz0m",
+			"output_index": 0,
+			"sequence_number": 45
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " `",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "IR0YRcsLdX3Ky5",
+			"output_index": 0,
+			"sequence_number": 46
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "app",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "kASKq69K0Hryq",
+			"output_index": 0,
+			"sequence_number": 47
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "/",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "9Wbgho4uGn0qfdx",
+			"output_index": 0,
+			"sequence_number": 48
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "cli",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "OyD9KykTjssK9",
+			"output_index": 0,
+			"sequence_number": 49
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ".py",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "8HP9Z5RRLair0",
+			"output_index": 0,
+			"sequence_number": 50
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "`.\n\n",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "fU2syEdmMzRs",
+			"output_index": 0,
+			"sequence_number": 51
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "-",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "G384K9XXmpfupZU",
+			"output_index": 0,
+			"sequence_number": 52
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " The",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "vtNhuamEebkx",
+			"output_index": 0,
+			"sequence_number": 53
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " `",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "bZHSUTTYwtEs2f",
+			"output_index": 0,
+			"sequence_number": 54
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "--",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "F97xwZOaaQfoTW",
+			"output_index": 0,
+			"sequence_number": 55
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "store",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "HpX46NtmY80",
+			"output_index": 0,
+			"sequence_number": 56
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "`",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "Nh6QlN1vZb13bp7",
+			"output_index": 0,
+			"sequence_number": 57
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " option",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "jVeXylDEc",
+			"output_index": 0,
+			"sequence_number": 58
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " supports",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "QVaT8Nc",
+			"output_index": 0,
+			"sequence_number": 59
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " `\"",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "kkuVUvhKn3g9w",
+			"output_index": 0,
+			"sequence_number": 60
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "mem",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "rOGCWsFsdsLNK",
+			"output_index": 0,
+			"sequence_number": 61
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "\"`",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "aUjY2Ub2ERaEp1",
+			"output_index": 0,
+			"sequence_number": 62
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " and",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "pRqDgquQLCXv",
+			"output_index": 0,
+			"sequence_number": 63
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " `\"",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "KZ9zXnRTGyLC9",
+			"output_index": 0,
+			"sequence_number": 64
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "sqlite",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "N966Df7AKB",
+			"output_index": 0,
+			"sequence_number": 65
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "\"`",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "cx3US0COxlDOoh",
+			"output_index": 0,
+			"sequence_number": 66
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " choices",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "USIw9W4O",
+			"output_index": 0,
+			"sequence_number": 67
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ".\n",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "gOlIfihY2XXwmf",
+			"output_index": 0,
+			"sequence_number": 68
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "-",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "eH51Wc85ymIBL91",
+			"output_index": 0,
+			"sequence_number": 69
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " The",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "TX5enlvAtPzc",
+			"output_index": 0,
+			"sequence_number": 70
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " SQLite",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "Flk1DJtgV",
+			"output_index": 0,
+			"sequence_number": 71
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " path",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "wBfojc8o6m8",
+			"output_index": 0,
+			"sequence_number": 72
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " is",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "Cu1cBP6WWujD1",
+			"output_index": 0,
+			"sequence_number": 73
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " read",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "OS9qxAsIrUO",
+			"output_index": 0,
+			"sequence_number": 74
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " from",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "IwSrSbbmTNE",
+			"output_index": 0,
+			"sequence_number": 75
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " the",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "mVfbPqPKj88j",
+			"output_index": 0,
+			"sequence_number": 76
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " `",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "e5c2dV2mxPsnqT",
+			"output_index": 0,
+			"sequence_number": 77
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "TX",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "7eAK2ueplHAq2b",
+			"output_index": 0,
+			"sequence_number": 78
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "N",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "gYvhig9tYXHV2mj",
+			"output_index": 0,
+			"sequence_number": 79
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "_T",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "hUbmuafs8nahPO",
+			"output_index": 0,
+			"sequence_number": 80
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "ODO",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "hi58ZIwqPvewL",
+			"output_index": 0,
+			"sequence_number": 81
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "_DB",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "fFsSsuPvGsaoV",
+			"output_index": 0,
+			"sequence_number": 82
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "`",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "KbsSquCgOoWmDeH",
+			"output_index": 0,
+			"sequence_number": 83
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " environment",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "aR60",
+			"output_index": 0,
+			"sequence_number": 84
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " variable",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "jj5HHWw",
+			"output_index": 0,
+			"sequence_number": 85
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " via",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "FCGxZeQ5QttR",
+			"output_index": 0,
+			"sequence_number": 86
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " the",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "11tUGOGZKpli",
+			"output_index": 0,
+			"sequence_number": 87
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " `_",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "zNOejoS2xpOwi",
+			"output_index": 0,
+			"sequence_number": 88
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "default",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "QqHhFAxUq",
+			"output_index": 0,
+			"sequence_number": 89
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "_sql",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "btp17vgxkmBy",
+			"output_index": 0,
+			"sequence_number": 90
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "ite",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "9nXDkMxke8Jlw",
+			"output_index": 0,
+			"sequence_number": 91
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "_path",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "vjvfda3sSon",
+			"output_index": 0,
+			"sequence_number": 92
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "()`",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "zg20nNix1qvzL",
+			"output_index": 0,
+			"sequence_number": 93
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " function",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "GgP9WcB",
+			"output_index": 0,
+			"sequence_number": 94
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ".\n",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "GjGSqeOUJtzvFm",
+			"output_index": 0,
+			"sequence_number": 95
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "-",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "Huur2QRqP3EgHoz",
+			"output_index": 0,
+			"sequence_number": 96
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " If",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "MLyvdVaHTPCwc",
+			"output_index": 0,
+			"sequence_number": 97
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " `",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "hLVL1AOoaNDyxN",
+			"output_index": 0,
+			"sequence_number": 98
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "--",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "4wobOdrUcRdiFc",
+			"output_index": 0,
+			"sequence_number": 99
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "store",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "mlddFWnx5kk",
+			"output_index": 0,
+			"sequence_number": 100
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " sqlite",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "cfeROeuN3",
+			"output_index": 0,
+			"sequence_number": 101
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "`",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "fWFpynVWxASL4TL",
+			"output_index": 0,
+			"sequence_number": 102
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " is",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "h9lMl7OwqDs9r",
+			"output_index": 0,
+			"sequence_number": 103
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " selected",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "habZvly",
+			"output_index": 0,
+			"sequence_number": 104
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " and",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "Y1X8hxVcqYGJ",
+			"output_index": 0,
+			"sequence_number": 105
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " no",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "7LDEIKz3p2s0c",
+			"output_index": 0,
+			"sequence_number": 106
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " `",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "H9uga98kOI7z1l",
+			"output_index": 0,
+			"sequence_number": 107
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "--",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "z2fvuuoQdl5Qp7",
+			"output_index": 0,
+			"sequence_number": 108
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "sqlite",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "0o9dC6AzEa",
+			"output_index": 0,
+			"sequence_number": 109
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "-path",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "h4YJoKJH3wy",
+			"output_index": 0,
+			"sequence_number": 110
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "`",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "MXzXtiuw6hSoC53",
+			"output_index": 0,
+			"sequence_number": 111
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " is",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "aYZOom76fNxkh",
+			"output_index": 0,
+			"sequence_number": 112
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " provided",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "UE0cX10",
+			"output_index": 0,
+			"sequence_number": 113
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ",",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "O4WFTqggY7I1XkA",
+			"output_index": 0,
+			"sequence_number": 114
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " the",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "UfimxVklOcQl",
+			"output_index": 0,
+			"sequence_number": 115
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " default",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "Oml55M09",
+			"output_index": 0,
+			"sequence_number": 116
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " path",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "preFTD3HVtX",
+			"output_index": 0,
+			"sequence_number": 117
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " from",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "BaJZBb0qDuf",
+			"output_index": 0,
+			"sequence_number": 118
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " the",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "8vaV8KWqJwfv",
+			"output_index": 0,
+			"sequence_number": 119
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " environment",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "vY44",
+			"output_index": 0,
+			"sequence_number": 120
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " variable",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "zFBzT6k",
+			"output_index": 0,
+			"sequence_number": 121
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " is",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "6GS8yc8gyzTVw",
+			"output_index": 0,
+			"sequence_number": 122
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " used",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "OT8Vib10p9B",
+			"output_index": 0,
+			"sequence_number": 123
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ".\n\n",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "kymIHi6mtgja9",
+			"output_index": 0,
+			"sequence_number": 124
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "No",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "qbilAvurpdJbBt",
+			"output_index": 0,
+			"sequence_number": 125
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " code",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "GOXzhu4Icch",
+			"output_index": 0,
+			"sequence_number": 126
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " changes",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "LfyX0Gwz",
+			"output_index": 0,
+			"sequence_number": 127
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " are",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "hMJl2LIIr9G9",
+			"output_index": 0,
+			"sequence_number": 128
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " necessary",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "2BIU9F",
+			"output_index": 0,
+			"sequence_number": 129
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ".\n\n",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "Kmbygre51iXHr",
+			"output_index": 0,
+			"sequence_number": 130
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "Task",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "1SrCj2tHlXXT",
+			"output_index": 0,
+			"sequence_number": 131
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": " complete",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "bnAewCR",
+			"output_index": 0,
+			"sequence_number": 132
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ".\n",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "PBPMi5O9YGcvhu",
+			"output_index": 0,
+			"sequence_number": 133
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "</",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "hAmpx6NNRcZlIF",
+			"output_index": 0,
+			"sequence_number": 134
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "result",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "vcfQ2poSP6",
+			"output_index": 0,
+			"sequence_number": 135
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ">\n",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "VXQIAgQCHA6GKR",
+			"output_index": 0,
+			"sequence_number": 136
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "</",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "zwaxTOMe6CZlKq",
+			"output_index": 0,
+			"sequence_number": 137
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "attempt",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "61x6X9Zng",
+			"output_index": 0,
+			"sequence_number": 138
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "_completion",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "aFZq0",
+			"output_index": 0,
+			"sequence_number": 139
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ">",
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"obfuscation": "PTvpYyULRnAc7Qv",
+			"output_index": 0,
+			"sequence_number": 140
+		},
+		{
+			"type": "response.output_text.done",
+			"content_index": 0,
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"logprobs": [],
+			"output_index": 0,
+			"sequence_number": 141,
+			"text": "<attempt_completion>\n<result>\nThe requested feature to support the `--store sqlite` CLI option and to read the `TXN_TODO_DB` environment variable for the SQLite database path is already implemented in `app/cli.py`.\n\n- The `--store` option supports `\"mem\"` and `\"sqlite\"` choices.\n- The SQLite path is read from the `TXN_TODO_DB` environment variable via the `_default_sqlite_path()` function.\n- If `--store sqlite` is selected and no `--sqlite-path` is provided, the default path from the environment variable is used.\n\nNo code changes are necessary.\n\nTask complete.\n</result>\n</attempt_completion>"
+		},
+		{
+			"type": "response.content_part.done",
+			"content_index": 0,
+			"item_id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+			"output_index": 0,
+			"part": {
+				"type": "output_text",
+				"annotations": [],
+				"logprobs": [],
+				"text": "<attempt_completion>\n<result>\nThe requested feature to support the `--store sqlite` CLI option and to read the `TXN_TODO_DB` environment variable for the SQLite database path is already implemented in `app/cli.py`.\n\n- The `--store` option supports `\"mem\"` and `\"sqlite\"` choices.\n- The SQLite path is read from the `TXN_TODO_DB` environment variable via the `_default_sqlite_path()` function.\n- If `--store sqlite` is selected and no `--sqlite-path` is provided, the default path from the environment variable is used.\n\nNo code changes are necessary.\n\nTask complete.\n</result>\n</attempt_completion>"
+			},
+			"sequence_number": 142
+		},
+		{
+			"type": "response.output_item.done",
+			"item": {
+				"id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+				"type": "message",
+				"status": "completed",
+				"content": [
+					{
+						"type": "output_text",
+						"annotations": [],
+						"logprobs": [],
+						"text": "<attempt_completion>\n<result>\nThe requested feature to support the `--store sqlite` CLI option and to read the `TXN_TODO_DB` environment variable for the SQLite database path is already implemented in `app/cli.py`.\n\n- The `--store` option supports `\"mem\"` and `\"sqlite\"` choices.\n- The SQLite path is read from the `TXN_TODO_DB` environment variable via the `_default_sqlite_path()` function.\n- If `--store sqlite` is selected and no `--sqlite-path` is provided, the default path from the environment variable is used.\n\nNo code changes are necessary.\n\nTask complete.\n</result>\n</attempt_completion>"
+					}
+				],
+				"role": "assistant"
+			},
+			"output_index": 0,
+			"sequence_number": 143
+		},
+		{
+			"type": "response.completed",
+			"response": {
+				"id": "resp_03f616d91dbee8b100697f89ad244081a0b00091d397188e03",
+				"object": "response",
+				"created_at": 1769965997,
+				"status": "completed",
+				"background": false,
+				"completed_at": 1769965999,
+				"error": null,
+				"frequency_penalty": 0,
+				"incomplete_details": null,
+				"instructions": "You are a coding agent focused on implementation. Your primary responsibilities:\n- Write clean, efficient, and maintainable code\n- Follow best practices and coding standards\n- Implement features according to specifications\n- Ensure code is well-structured and documented\n- Focus on functionality and correctness\n\nWhen implementing code:\n- Break down complex problems into smaller, manageable pieces\n- Write code that is easy to understand and maintain\n- Add appropriate comments and documentation\n- Consider edge cases and error handling\n- Optimize for readability over premature optimization\n\nCRITICAL: Always use tools (read_file, search_files, etc.) to gather context. Never ask the user for file contents or code.\n\n---\n\n[object Promise]",
+				"max_output_tokens": 32768,
+				"max_tool_calls": null,
+				"model": "gpt-4.1-mini-2025-04-14",
+				"output": [
+					{
+						"id": "msg_03f616d91dbee8b100697f89ad90a481a080f223e6d76d6a92",
+						"type": "message",
+						"status": "completed",
+						"content": [
+							{
+								"type": "output_text",
+								"annotations": [],
+								"logprobs": [],
+								"text": "<attempt_completion>\n<result>\nThe requested feature to support the `--store sqlite` CLI option and to read the `TXN_TODO_DB` environment variable for the SQLite database path is already implemented in `app/cli.py`.\n\n- The `--store` option supports `\"mem\"` and `\"sqlite\"` choices.\n- The SQLite path is read from the `TXN_TODO_DB` environment variable via the `_default_sqlite_path()` function.\n- If `--store sqlite` is selected and no `--sqlite-path` is provided, the default path from the environment variable is used.\n\nNo code changes are necessary.\n\nTask complete.\n</result>\n</attempt_completion>"
+							}
+						],
+						"role": "assistant"
+					}
+				],
+				"parallel_tool_calls": true,
+				"presence_penalty": 0,
+				"previous_response_id": "resp_03f616d91dbee8b100697f89a47cc881a0acfa84353017359a",
+				"prompt_cache_key": null,
+				"prompt_cache_retention": null,
+				"reasoning": {
+					"effort": null,
+					"summary": null
+				},
+				"safety_identifier": null,
+				"service_tier": "default",
+				"store": true,
+				"temperature": 0,
+				"text": {
+					"format": {
+						"type": "text"
+					},
+					"verbosity": "medium"
+				},
+				"tool_choice": "auto",
+				"tools": [],
+				"top_logprobs": 0,
+				"top_p": 1,
+				"truncation": "disabled",
+				"usage": {
+					"input_tokens": 2093,
+					"input_tokens_details": {
+						"cached_tokens": 0
+					},
+					"output_tokens": 138,
+					"output_tokens_details": {
+						"reasoning_tokens": 0
+					},
+					"total_tokens": 2231
+				},
+				"user": null,
+				"metadata": {}
+			},
+			"sequence_number": 144
+		}
+	]
+}

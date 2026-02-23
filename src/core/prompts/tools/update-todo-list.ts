@@ -7,7 +7,7 @@ export function getUpdateTodoListDescription(args?: ToolArgs): string {
 	return `## update_todo_list
 
 **Description:**
-Replace the entire TODO list with an updated checklist reflecting the current state. Always provide the full list; the system will overwrite the previous one. This tool is designed for step-by-step task tracking, allowing you to confirm completion of each step before updating, update multiple task statuses at once (e.g., mark one as completed and start the next), and dynamically add new todos discovered during long or complex tasks.
+Replace the entire TODO list with an updated checklist reflecting the current state. Always provide the full list; the system will overwrite the previous one. This tool is designed for step-by-step task tracking, allowing you to confirm completion of each step before updating, update multiple task statuses at once (e.g., mark one as completed and start the next), and dynamically add new todos discovered during long or multi-step tasks.
 
 **Checklist Format:**
 - Use a single-level markdown checklist (no nesting or subtasks).
@@ -25,7 +25,7 @@ Replace the entire TODO list with an updated checklist reflecting the current st
 **Core Principles:**
 - Before updating, always confirm which todos have been completed since the last update.
 - You may update multiple statuses in a single update (e.g., mark the previous as completed and the next as in progress).
-- When a new actionable item is discovered during a long or complex task, add it to the todo list immediately.
+- When a new actionable item is discovered during a long or multi-step task, add it to the todo list immediately.
 - Do not remove any unfinished todos unless explicitly instructed.
 - Always retain all unfinished tasks, updating their status as needed.
 - Only mark a task as completed when it is fully accomplished (no partials, no unresolved dependencies).
@@ -56,11 +56,11 @@ Replace the entire TODO list with an updated checklist reflecting the current st
 </update_todo_list>
 
 **When to Use:**
-- The task is complicated or involves multiple steps or requires ongoing tracking.
+- The task is multi-step or requires ongoing tracking.
 - You need to update the status of several todos at once.
 - New actionable items are discovered during task execution.
 - The user requests a todo list or provides multiple tasks.
-- The task is complex and benefits from clear, stepwise progress tracking.
+- The task benefits from clear, stepwise progress tracking.
 
 **When NOT to Use:**
 - There is only a single, trivial task.

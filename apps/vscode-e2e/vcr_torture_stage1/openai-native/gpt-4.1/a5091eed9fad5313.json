@@ -1,0 +1,587 @@
+{
+	"meta": {
+		"provider": "openai-native",
+		"model": "gpt-4.1",
+		"protocol": "openai",
+		"createdAt": "2026-02-01T19:58:48.114Z",
+		"version": "1.0.0"
+	},
+	"request": {
+		"providerName": "openai-native",
+		"model": "gpt-4.1",
+		"endpoint": "openai-responses",
+		"params": {
+			"model": "gpt-4.1",
+			"input": [
+				{
+					"role": "user",
+					"content": [
+						{
+							"type": "input_text",
+							"text": "<task>\nWrite at least 3 unit tests for the new SQLite-backed persistence in tests/test_sqlite_store.py, ensuring coverage of basic CRUD operations and error handling for the SqliteKV class in app/store.py.\n\n⚠️⚠️⚠️ CRITICAL INSTRUCTIONS FOR THIS SUBTASK ⚠️⚠️⚠️\n\nYOU MUST USE TOOLS - DO NOT ASK THE USER FOR INFORMATION:\n\n1. **ALWAYS use tools to gather information** - You have access to read_file, search_files, list_files, codebase_search, and execute_command tools.\n\n2. **NEVER ask the user to:**\n   - Provide file contents or paste files\n   - Use \"Show file\" commands\n   - Manually share code or information\n   - Read files for you\n\n3. **If you need file contents:**\n   - Use read_file tool immediately if you know the file path\n   - If you don't know the file path, use search_files or list_files first\n   - **CRITICAL for search_files:** ALWAYS provide the <path> parameter - use \".\" for workspace root if unsure\n   - Example: <search_files><path>.</path><regex>.*</regex><file_pattern>*test*.py</file_pattern></search_files>\n   - Then use read_file with the discovered paths\n\n4. **Tool format requirement:**\n   - MUST use XML format: <read_file><args><file><path>file.py</path></file></args></read_file>\n   - MUST use XML format: <search_files><path>.</path><regex>pattern</regex></search_files>\n   - NEVER use function-call syntax: read_file([\"file.py\"]) ❌ or search_files({path: \"src\"}) ❌\n\n5. **Your first action should be:** Use the appropriate tool (read_file, search_files, etc.) to gather the information you need, then proceed with the task.\n\nREMEMBER: You are an autonomous agent. Use your tools. Do not ask the user for information you can obtain yourself.\n</task>"
+						},
+						{
+							"type": "input_text",
+							"text": "<environment_details>\n# Deterministic Environment Details (torture VCR)\nworkspace: C:/Users/kpb20/Downloads/txn-agent-torture-repo2/txn-agent-torture-repo\nplatform: win32\nnode: v22.15.1\n(time/terminals/tabs/visible files/todos omitted for stable VCR keying)\n</environment_details>"
+						}
+					]
+				},
+				{
+					"role": "assistant",
+					"content": [
+						{
+							"type": "output_text",
+							"text": "<search_files><path>app/store.py</path><regex>class SqliteKV|def </regex></search_files>"
+						}
+					]
+				},
+				{
+					"role": "user",
+					"content": [
+						{
+							"type": "input_text",
+							"text": "[search_files for 'class SqliteKV|def'] Result:"
+						},
+						{
+							"type": "input_text",
+							"text": "Found 7 results.\n\n# app/store.py\n  9 |     @abstractmethod\n 10 |     def new_id(self) -> str: ...\n 11 |     @abstractmethod\n 12 |     def get(self, key: str) -> Optional[JsonDict]: ...\n 13 |     @abstractmethod\n 14 |     def put(self, key: str, value: JsonDict) -> None: ...\n 15 |     @abstractmethod\n 16 |     def delete(self, key: str) -> None: ...\n 17 |     @abstractmethod\n 18 |     def scan_prefix(self, prefix: str) -> Iterable[Tuple[str, JsonDict]]: ...\n 19 | \n 20 | class MemoryKV(KVStore):\n 21 |     def __init__(self):\n 22 |         self._lock = threading.Lock()\n----\n 25 | \n 26 |     def new_id(self) -> str:\n 27 |         with self._lock:\n----\n 30 | \n 31 |     def get(self, key: str) -> Optional[JsonDict]:\n 32 |         with self._lock:\n----\n 35 | \n 36 |     def put(self, key: str, value: JsonDict) -> None:\n 37 |         with self._lock:\n----\n 39 | \n 40 |     def delete(self, key: str) -> None:\n 41 |         with self._lock:\n----\n 43 | \n 44 |     def scan_prefix(self, prefix: str) -> Iterable[Tuple[str, JsonDict]]:\n 45 |         with self._lock:\n----\n 48 | \n 49 | def make_store(kind: str, sqlite_path: str | None = None) -> KVStore:\n 50 |     \"\"\"Factory function to create a KVStore instance.\n----"
+						},
+						{
+							"type": "input_text",
+							"text": "<environment_details>\n# Deterministic Environment Details (torture VCR)\nworkspace: C:/Users/kpb20/Downloads/txn-agent-torture-repo2/txn-agent-torture-repo\nplatform: win32\nnode: v22.15.1\n(time/terminals/tabs/visible files/todos omitted for stable VCR keying)\n</environment_details>"
+						}
+					]
+				},
+				{
+					"role": "assistant",
+					"content": [
+						{
+							"type": "output_text",
+							"text": "<search_files><path>app/store.py</path><regex>class SqliteKV</regex></search_files><search_files><\n\n[Response interrupted by a tool use result. Only one tool may be used at a time and should be placed at the end of the message.]"
+						}
+					]
+				},
+				{
+					"role": "user",
+					"content": [
+						{
+							"type": "input_text",
+							"text": "[search_files for 'class SqliteKV'] Result:"
+						},
+						{
+							"type": "input_text",
+							"text": "Found 0 results."
+						},
+						{
+							"type": "input_text",
+							"text": "Tool [search_files] was not executed because a tool has already been used in this message. Only one tool may be used per message. You must assess the first tool's result before proceeding to use the next tool."
+						},
+						{
+							"type": "input_text",
+							"text": "<environment_details>\n# Deterministic Environment Details (torture VCR)\nworkspace: C:/Users/kpb20/Downloads/txn-agent-torture-repo2/txn-agent-torture-repo\nplatform: win32\nnode: v22.15.1\n(time/terminals/tabs/visible files/todos omitted for stable VCR keying)\n</environment_details>"
+						}
+					]
+				},
+				{
+					"role": "assistant",
+					"content": [
+						{
+							"type": "output_text",
+							"text": "<search_files><path>app/</path><regex>SqliteKV</regex></search_files><search_files><path>.</path><regex>SqliteKV</regex></search_files>\n\n[Response interrupted by a tool use result. Only one tool may be used at a time and should be placed at the end of the message.]"
+						}
+					]
+				},
+				{
+					"role": "user",
+					"content": [
+						{
+							"type": "input_text",
+							"text": "[search_files for 'SqliteKV'] Result:"
+						},
+						{
+							"type": "input_text",
+							"text": "Found 1 result.\n\n# app/store.py\n 67 |         # TODO: Implement SQLite-backed KVStore\n 68 |         # Should create a SqliteKV class that:\n 69 |         # - Uses sqlite3 module\n----"
+						},
+						{
+							"type": "input_text",
+							"text": "Tool [search_files] was not executed because a tool has already been used in this message. Only one tool may be used per message. You must assess the first tool's result before proceeding to use the next tool."
+						},
+						{
+							"type": "input_text",
+							"text": "<environment_details>\n# Deterministic Environment Details (torture VCR)\nworkspace: C:/Users/kpb20/Downloads/txn-agent-torture-repo2/txn-agent-torture-repo\nplatform: win32\nnode: v22.15.1\n(time/terminals/tabs/visible files/todos omitted for stable VCR keying)\n</environment_details>"
+						}
+					]
+				}
+			],
+			"instructions": "You are a testing agent focused on quality assurance. Your primary responsibilities:\n- Write comprehensive test suites\n- Ensure high test coverage\n- Test edge cases and error conditions\n- Validate that code meets requirements\n- Focus on finding bugs and issues\n\nWhen writing tests:\n- Cover happy paths and edge cases\n- Test error conditions and failure modes\n- Ensure tests are maintainable and readable\n- Use appropriate testing frameworks and patterns\n- Verify that tests actually test the right things\n\nCRITICAL: Always use tools (read_file, search_files, etc.) to examine code before writing tests. Never ask the user for file contents.\n\n---\n\n[object Promise]",
+			"temperature": 0,
+			"max_output_tokens": "[REDACTED]",
+			"store": true,
+			"stream": true
+		}
+	},
+	"stream": [
+		{
+			"type": "response.created",
+			"response": {
+				"id": "resp_03ee080d5030a5f500697fb076ded4819faf0f9f0e5bbd072c",
+				"object": "response",
+				"created_at": 1769975926,
+				"status": "in_progress",
+				"background": false,
+				"completed_at": null,
+				"error": null,
+				"frequency_penalty": 0,
+				"incomplete_details": null,
+				"instructions": "You are a testing agent focused on quality assurance. Your primary responsibilities:\n- Write comprehensive test suites\n- Ensure high test coverage\n- Test edge cases and error conditions\n- Validate that code meets requirements\n- Focus on finding bugs and issues\n\nWhen writing tests:\n- Cover happy paths and edge cases\n- Test error conditions and failure modes\n- Ensure tests are maintainable and readable\n- Use appropriate testing frameworks and patterns\n- Verify that tests actually test the right things\n\nCRITICAL: Always use tools (read_file, search_files, etc.) to examine code before writing tests. Never ask the user for file contents.\n\n---\n\n[object Promise]",
+				"max_output_tokens": 32768,
+				"max_tool_calls": null,
+				"model": "gpt-4.1-2025-04-14",
+				"output": [],
+				"parallel_tool_calls": true,
+				"presence_penalty": 0,
+				"previous_response_id": null,
+				"prompt_cache_key": null,
+				"prompt_cache_retention": null,
+				"reasoning": {
+					"effort": null,
+					"summary": null
+				},
+				"safety_identifier": null,
+				"service_tier": "auto",
+				"store": true,
+				"temperature": 0,
+				"text": {
+					"format": {
+						"type": "text"
+					},
+					"verbosity": "medium"
+				},
+				"tool_choice": "auto",
+				"tools": [],
+				"top_logprobs": 0,
+				"top_p": 1,
+				"truncation": "disabled",
+				"usage": null,
+				"user": null,
+				"metadata": {}
+			},
+			"sequence_number": 0
+		},
+		{
+			"type": "response.in_progress",
+			"response": {
+				"id": "resp_03ee080d5030a5f500697fb076ded4819faf0f9f0e5bbd072c",
+				"object": "response",
+				"created_at": 1769975926,
+				"status": "in_progress",
+				"background": false,
+				"completed_at": null,
+				"error": null,
+				"frequency_penalty": 0,
+				"incomplete_details": null,
+				"instructions": "You are a testing agent focused on quality assurance. Your primary responsibilities:\n- Write comprehensive test suites\n- Ensure high test coverage\n- Test edge cases and error conditions\n- Validate that code meets requirements\n- Focus on finding bugs and issues\n\nWhen writing tests:\n- Cover happy paths and edge cases\n- Test error conditions and failure modes\n- Ensure tests are maintainable and readable\n- Use appropriate testing frameworks and patterns\n- Verify that tests actually test the right things\n\nCRITICAL: Always use tools (read_file, search_files, etc.) to examine code before writing tests. Never ask the user for file contents.\n\n---\n\n[object Promise]",
+				"max_output_tokens": 32768,
+				"max_tool_calls": null,
+				"model": "gpt-4.1-2025-04-14",
+				"output": [],
+				"parallel_tool_calls": true,
+				"presence_penalty": 0,
+				"previous_response_id": null,
+				"prompt_cache_key": null,
+				"prompt_cache_retention": null,
+				"reasoning": {
+					"effort": null,
+					"summary": null
+				},
+				"safety_identifier": null,
+				"service_tier": "auto",
+				"store": true,
+				"temperature": 0,
+				"text": {
+					"format": {
+						"type": "text"
+					},
+					"verbosity": "medium"
+				},
+				"tool_choice": "auto",
+				"tools": [],
+				"top_logprobs": 0,
+				"top_p": 1,
+				"truncation": "disabled",
+				"usage": null,
+				"user": null,
+				"metadata": {}
+			},
+			"sequence_number": 1
+		},
+		{
+			"type": "response.output_item.added",
+			"item": {
+				"id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+				"type": "message",
+				"status": "in_progress",
+				"content": [],
+				"role": "assistant"
+			},
+			"output_index": 0,
+			"sequence_number": 2
+		},
+		{
+			"type": "response.content_part.added",
+			"content_index": 0,
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"output_index": 0,
+			"part": {
+				"type": "output_text",
+				"annotations": [],
+				"logprobs": [],
+				"text": ""
+			},
+			"sequence_number": 3
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "<",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "rYPiCJK4DWqUNI1",
+			"output_index": 0,
+			"sequence_number": 4
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "read",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "Ifykv0aJm98S",
+			"output_index": 0,
+			"sequence_number": 5
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "_file",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "EfH6LAzK50b",
+			"output_index": 0,
+			"sequence_number": 6
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "><",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "BurWZMyHF2M2YQ",
+			"output_index": 0,
+			"sequence_number": 7
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "args",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "clq92Ajpi1hS",
+			"output_index": 0,
+			"sequence_number": 8
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "><",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "buhQ2Bao86ejF1",
+			"output_index": 0,
+			"sequence_number": 9
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "file",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "vbGyqU4JazmP",
+			"output_index": 0,
+			"sequence_number": 10
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "><",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "xbYY5UACqXwQFG",
+			"output_index": 0,
+			"sequence_number": 11
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "path",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "2Gu82BU35w0O",
+			"output_index": 0,
+			"sequence_number": 12
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ">",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "Dso57vyLwhlKTj9",
+			"output_index": 0,
+			"sequence_number": 13
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "app",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "XBwWTf0XzydDR",
+			"output_index": 0,
+			"sequence_number": 14
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "/store",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "EoTmQI6L7p",
+			"output_index": 0,
+			"sequence_number": 15
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ".py",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "bLGejzp4tb97y",
+			"output_index": 0,
+			"sequence_number": 16
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "</",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "zvDaY0YQYTlpOz",
+			"output_index": 0,
+			"sequence_number": 17
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "path",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "CYrlT1C3g6U1",
+			"output_index": 0,
+			"sequence_number": 18
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "></",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "jeUmBgyxbQEaa",
+			"output_index": 0,
+			"sequence_number": 19
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "file",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "VBkhKz4PVlBb",
+			"output_index": 0,
+			"sequence_number": 20
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "></",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "1vyodOwWTj2XN",
+			"output_index": 0,
+			"sequence_number": 21
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "args",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "xPfmL3mKxKoe",
+			"output_index": 0,
+			"sequence_number": 22
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "></",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "6yuxSgRoFQI9v",
+			"output_index": 0,
+			"sequence_number": 23
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "read",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "HNGdL76F2oSv",
+			"output_index": 0,
+			"sequence_number": 24
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": "_file",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "PDl77FiocTh",
+			"output_index": 0,
+			"sequence_number": 25
+		},
+		{
+			"type": "response.output_text.delta",
+			"content_index": 0,
+			"delta": ">",
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"obfuscation": "1Jh5gYIL3PGAj0T",
+			"output_index": 0,
+			"sequence_number": 26
+		},
+		{
+			"type": "response.output_text.done",
+			"content_index": 0,
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"logprobs": [],
+			"output_index": 0,
+			"sequence_number": 27,
+			"text": "<read_file><args><file><path>app/store.py</path></file></args></read_file>"
+		},
+		{
+			"type": "response.content_part.done",
+			"content_index": 0,
+			"item_id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+			"output_index": 0,
+			"part": {
+				"type": "output_text",
+				"annotations": [],
+				"logprobs": [],
+				"text": "<read_file><args><file><path>app/store.py</path></file></args></read_file>"
+			},
+			"sequence_number": 28
+		},
+		{
+			"type": "response.output_item.done",
+			"item": {
+				"id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+				"type": "message",
+				"status": "completed",
+				"content": [
+					{
+						"type": "output_text",
+						"annotations": [],
+						"logprobs": [],
+						"text": "<read_file><args><file><path>app/store.py</path></file></args></read_file>"
+					}
+				],
+				"role": "assistant"
+			},
+			"output_index": 0,
+			"sequence_number": 29
+		},
+		{
+			"type": "response.completed",
+			"response": {
+				"id": "resp_03ee080d5030a5f500697fb076ded4819faf0f9f0e5bbd072c",
+				"object": "response",
+				"created_at": 1769975926,
+				"status": "completed",
+				"background": false,
+				"completed_at": 1769975927,
+				"error": null,
+				"frequency_penalty": 0,
+				"incomplete_details": null,
+				"instructions": "You are a testing agent focused on quality assurance. Your primary responsibilities:\n- Write comprehensive test suites\n- Ensure high test coverage\n- Test edge cases and error conditions\n- Validate that code meets requirements\n- Focus on finding bugs and issues\n\nWhen writing tests:\n- Cover happy paths and edge cases\n- Test error conditions and failure modes\n- Ensure tests are maintainable and readable\n- Use appropriate testing frameworks and patterns\n- Verify that tests actually test the right things\n\nCRITICAL: Always use tools (read_file, search_files, etc.) to examine code before writing tests. Never ask the user for file contents.\n\n---\n\n[object Promise]",
+				"max_output_tokens": 32768,
+				"max_tool_calls": null,
+				"model": "gpt-4.1-2025-04-14",
+				"output": [
+					{
+						"id": "msg_03ee080d5030a5f500697fb0774370819fac03b243dca676bb",
+						"type": "message",
+						"status": "completed",
+						"content": [
+							{
+								"type": "output_text",
+								"annotations": [],
+								"logprobs": [],
+								"text": "<read_file><args><file><path>app/store.py</path></file></args></read_file>"
+							}
+						],
+						"role": "assistant"
+					}
+				],
+				"parallel_tool_calls": true,
+				"presence_penalty": 0,
+				"previous_response_id": null,
+				"prompt_cache_key": null,
+				"prompt_cache_retention": null,
+				"reasoning": {
+					"effort": null,
+					"summary": null
+				},
+				"safety_identifier": null,
+				"service_tier": "default",
+				"store": true,
+				"temperature": 0,
+				"text": {
+					"format": {
+						"type": "text"
+					},
+					"verbosity": "medium"
+				},
+				"tool_choice": "auto",
+				"tools": [],
+				"top_logprobs": 0,
+				"top_p": 1,
+				"truncation": "disabled",
+				"usage": {
+					"input_tokens": 1625,
+					"input_tokens_details": {
+						"cached_tokens": 0
+					},
+					"output_tokens": 24,
+					"output_tokens_details": {
+						"reasoning_tokens": 0
+					},
+					"total_tokens": 1649
+				},
+				"user": null,
+				"metadata": {}
+			},
+			"sequence_number": 30
+		}
+	]
+}

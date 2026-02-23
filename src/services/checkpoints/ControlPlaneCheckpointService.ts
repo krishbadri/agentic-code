@@ -20,6 +20,7 @@ export class ControlPlaneCheckpointService extends EventEmitter {
 				method: "POST",
 				headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
 				body: JSON.stringify({ reason: "human", trailers: { Message: message } }),
+				signal: AbortSignal.timeout(15_000),
 			})
 			if (!res.ok) throw new Error(await res.text())
 			const data = await res.json()
@@ -47,13 +48,16 @@ export class ControlPlaneCheckpointService extends EventEmitter {
 			const res = await fetch(`${this.baseUrl}/tx/${this.txId}/rollback`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
-				body: JSON.stringify({ to: `commit:${commitHash}` }),
+				body: JSON.stringify({ hash: commitHash }),
+				signal: AbortSignal.timeout(15_000),
 			})
 			if (!res.ok) throw new Error(await res.text())
 			const data = await res.json()
-			await vscode.commands.executeCommand("setContext", "roo.current_tx_id", data.new_tx_id)
-			await vscode.commands.executeCommand("workbench.action.reloadWindow")
-			this.emit("restore", { type: "restore", commitHash, duration: 0 })
+			this.log(
+				`[ControlPlaneCheckpointService#restoreCheckpoint] Rolled back to ${data.rolled_back_to || commitHash}, ` +
+					`files affected: ${data.files_affected ?? "unknown"}, duration: ${data.duration_ms ?? "unknown"}ms`,
+			)
+			this.emit("restore", { type: "restore", commitHash, duration: data.duration_ms ?? 0 })
 		} catch (e) {
 			this.emit("error", { type: "error", error: e as Error })
 			throw e

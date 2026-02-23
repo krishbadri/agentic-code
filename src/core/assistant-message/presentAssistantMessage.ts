@@ -21,6 +21,8 @@ import { listCodeDefinitionNamesTool } from "../tools/listCodeDefinitionNamesToo
 import { searchFilesTool } from "../tools/searchFilesTool"
 import { browserActionTool } from "../tools/browserActionTool"
 import { executeCommandTool } from "../tools/executeCommandTool"
+import { saveCheckpointTool } from "../tools/saveCheckpointTool"
+import { rollbackToCheckpointTool } from "../tools/rollbackToCheckpointTool"
 import { useMcpToolTool } from "../tools/useMcpToolTool"
 import { accessMcpResourceTool } from "../tools/accessMcpResourceTool"
 import { askFollowupQuestionTool } from "../tools/askFollowupQuestionTool"
@@ -155,14 +157,18 @@ export async function presentAssistantMessage(cline: Task) {
 			break
 		}
 		case "tool_use": {
+			const vcrModeForLogging = (process.env.ROO_VCR_MODE || "off").toLowerCase()
+			const isTortureVcrForLogging =
+				process.env.TEST_TORTURE_REPO === "1" &&
+				(vcrModeForLogging === "record" || vcrModeForLogging === "replay")
+
 			// Logging: Track tool execution dispatch
 			const modelId = cline.api.getModel().id
-			const apiProtocol = getApiProtocol(
-				(cline.apiConfiguration as any)?.apiProvider,
-				modelId,
-			)
+			const apiProtocol = getApiProtocol((cline.apiConfiguration as any)?.apiProvider, modelId)
 			const provider = await cline.providerRef.deref()
-			if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
+			// In torture VCR runs, tool_use blocks often stream for hundreds of chunks; logging each partial
+			// detection makes the run dramatically slower/noisier. Only log detection for complete tool calls.
+			if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION && (!block.partial || !isTortureVcrForLogging)) {
 				provider.log(
 					`[presentAssistantMessage] Tool call detected - Name: ${block.name}, Protocol: ${apiProtocol}, Provider: ${(cline.apiConfiguration as any)?.apiProvider}, Model: ${modelId}, Params: ${JSON.stringify(block.params).substring(0, 200)}`,
 				)
@@ -172,6 +178,10 @@ export async function presentAssistantMessage(cline: Task) {
 				switch (block.name) {
 					case "execute_command":
 						return `[${block.name} for '${block.params.command}']`
+					case "save_checkpoint":
+						return `[${block.name} named '${block.params.name ?? "checkpoint"}']`
+					case "rollback_to_checkpoint":
+						return `[${block.name} to '${block.params.checkpoint_name ?? block.params.commit_hash ?? "checkpoint"}']`
 					case "read_file":
 						// Check if this model should use the simplified description
 						const modelId = cline.api.getModel().id
@@ -297,13 +307,7 @@ export async function presentAssistantMessage(cline: Task) {
 				let text: string | undefined
 				let images: string[] | undefined
 				try {
-					const askResult = await cline.ask(
-						type,
-						partialMessage,
-						false,
-						progressStatus,
-						isProtected || false,
-					)
+					const askResult = await cline.ask(type, partialMessage, false, progressStatus, isProtected || false)
 					response = askResult.response
 					text = askResult.text
 					images = askResult.images
@@ -393,13 +397,68 @@ export async function presentAssistantMessage(cline: Task) {
 				await cline.browserSession.closeBrowser()
 			}
 
+			// IMPORTANT:
+			// We emit partial ToolUse blocks while streaming assistant output. Only a small subset of tools
+			// support safe incremental (partial) execution (e.g. streaming large file writes).
+			// Executing other tools while their XML args are still streaming can cause invalid tool calls like
+			// read_file({}) to be executed, which can cascade into e2e-mode blocked asks and infinite retries.
+			// Tools that are safe to run incrementally while their XML is still streaming.
+			// read_file (and most discovery tools) are NOT safe and can trigger invalid calls like read_file({}).
+			const vcrMode = (process.env.ROO_VCR_MODE || "off").toLowerCase()
+			const isTortureVcr = process.env.TEST_TORTURE_REPO === "1" && (vcrMode === "record" || vcrMode === "replay")
+
+			const hasRequiredParamsForPartialExecution = (name: ToolName, params: unknown): boolean => {
+				const p = params as Record<string, unknown> | undefined
+				if (!p) return false
+				switch (name) {
+					case "write_to_file":
+						// Only execute partial writes once we have at least path + content.
+						return typeof p.path === "string" && p.path.length > 0 && typeof p.content === "string"
+					case "apply_diff":
+						return (
+							typeof p.path === "string" &&
+							p.path.length > 0 &&
+							typeof p.diff === "string" &&
+							p.diff.length > 0
+						)
+					case "insert_content":
+						return (
+							typeof p.path === "string" &&
+							p.path.length > 0 &&
+							typeof p.content === "string" &&
+							p.content.length > 0
+						)
+					default:
+						return false
+				}
+			}
+
+			// In torture VCR runs we want maximum determinism, but we also need to support streaming tool calls.
+			// Allow partial execution ONLY for safe tools *and only once required params are present*.
+			// In practice, partial execution of write_to_file can be extremely noisy and slow in e2e torture runs
+			// (it may trigger hundreds of partial tool executions). Prefer waiting for the complete tool call.
+			const partialExecutionAllowlist = isTortureVcr
+				? new Set<ToolName>([])
+				: new Set<ToolName>(["write_to_file", "apply_diff", "insert_content"])
+			if (
+				block.partial &&
+				(!partialExecutionAllowlist.has(block.name as ToolName) ||
+					!hasRequiredParamsForPartialExecution(block.name as ToolName, block.params as unknown))
+			) {
+				// Avoid logging every partial skip in torture VCR runs (very noisy).
+				if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION && !isTortureVcr) {
+					provider.log(`[presentAssistantMessage] Skipping partial execution for tool: ${block.name}`)
+				}
+				break
+			}
+
 			if (!block.partial) {
 				cline.recordToolUsage(block.name)
 				TelemetryService.instance.captureToolUsage(cline.taskId, block.name)
 
 				// P3 Replay: Log full tool call with input for reproducibility
 				cline.logToolCall(block.name, block.params as Record<string, unknown>)
-				
+
 				// Fix #4: Audit logging - Executed tool calls
 				const provider = cline.providerRef.deref()
 				if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
@@ -410,9 +469,17 @@ export async function presentAssistantMessage(cline: Task) {
 			}
 
 			// Validate tool use before execution.
-			const { mode, customModes } = (await cline.providerRef.deref()?.getState()) ?? {}
+			// Use the task's own mode (set per-task for planner children) rather than
+			// the global provider mode.  The global mode may be "orchestrator" (no tools)
+			// while the child task was explicitly assigned "code" mode by the planner.
+			const { customModes } = (await cline.providerRef.deref()?.getState()) ?? {}
+			const mode = await cline.getTaskMode()
 
 			try {
+				// Block delegation tools for child tasks (they are leaf workers)
+				if (cline.parentTask && (block.name === "new_task" || block.name === "switch_mode")) {
+					throw new Error(`Tool "${block.name}" is not available for subtasks. Complete the work directly.`)
+				}
 				validateToolUse(
 					block.name as ToolName,
 					mode ?? defaultModeSlug,
@@ -494,9 +561,7 @@ export async function presentAssistantMessage(cline: Task) {
 
 			// Logging: Track tool execution
 			if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
-				provider.log(
-					`[presentAssistantMessage] Executing tool: ${block.name}, Partial: ${block.partial}`,
-				)
+				provider.log(`[presentAssistantMessage] Executing tool: ${block.name}, Partial: ${block.partial}`)
 			}
 
 			switch (block.name) {
@@ -634,6 +699,30 @@ export async function presentAssistantMessage(cline: Task) {
 					break
 				case "generate_image":
 					await generateImageTool(cline, block, askApproval, handleError, pushToolResult, removeClosingTag)
+					break
+				case "save_checkpoint":
+					await saveCheckpointTool(cline, block, askApproval, handleError, pushToolResult, removeClosingTag)
+					break
+				case "rollback_to_checkpoint":
+					await rollbackToCheckpointTool(
+						cline,
+						block,
+						askApproval,
+						handleError,
+						pushToolResult,
+						removeClosingTag,
+					)
+					break
+				default:
+					// Unhandled tool - fail loudly instead of silently ignoring
+					pushToolResult(
+						formatResponse.toolError(
+							`Tool '${block.name}' is not implemented or not available in this context. ` +
+								`Available tools are defined in the system prompt. If you believe this tool should exist, ` +
+								`there may be a wiring issue in the tool execution handler.`,
+						),
+					)
+					cline.consecutiveMistakeCount++
 					break
 			}
 

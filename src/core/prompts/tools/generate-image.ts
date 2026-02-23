@@ -25,12 +25,5 @@ Example: Editing an existing image
 <prompt>Transform this image into a watercolor painting style</prompt>
 <path>images/watercolor-output.png</path>
 <image>images/original-photo.jpg</image>
-</generate_image>
-
-Example: Upscaling and enhancing an image
-<generate_image>
-<prompt>Upscale this image to higher resolution, enhance details, improve clarity and sharpness while maintaining the original content and composition</prompt>
-<path>images/enhanced-photo.png</path>
-<image>images/low-res-photo.jpg</image>
 </generate_image>`
 }

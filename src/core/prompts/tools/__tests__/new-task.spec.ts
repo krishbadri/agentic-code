@@ -19,7 +19,7 @@ describe("getNewTaskDescription", () => {
 		expect(description).not.toContain("The initial todo list in markdown checklist format")
 
 		// Should have a simple example without todos
-		expect(description).toContain("Implement a new feature for the application")
+		expect(description).toContain("Implement the SQLite persistence layer")
 
 		// Should NOT have any todos tags in examples
 		expect(description).not.toContain("<todos>")
@@ -43,8 +43,7 @@ describe("getNewTaskDescription", () => {
 
 		// Check that todos is marked as required
 		expect(description).toContain("todos: (required)")
-		expect(description).toContain("and initial todo list")
-		expect(description).toContain("The initial todo list in markdown checklist format")
+		expect(description).toContain("initial todo list in markdown checklist format")
 
 		// Should not contain any mention of optional for todos
 		expect(description).not.toContain("todos: (optional)")

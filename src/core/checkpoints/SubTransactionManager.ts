@@ -164,6 +164,7 @@ export class SubTransactionManager {
 					"X-Actor-Id": "human",
 				},
 				body: JSON.stringify({ checks: subTxn.safetyChecks }),
+				signal: AbortSignal.timeout(15_000),
 			})
 
 			if (!res.ok) {

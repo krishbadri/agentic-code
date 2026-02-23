@@ -1,0 +1,9 @@
+apply_diff||Unable to apply diff to file: C:\Users\kpb20\Downloads\txn-agent-torture-repo2\txn-agent-torture-repo\app\store.py
+
+<error_details>
+Invalid diff format - missing required sections
+
+Debug Info:
+- Expected Format: <<<<<<< SEARCH\n:start_line: start line\n-------\n[search content]\n=======\n[replace content]\n>>>>>>> REPLACE
+- Tip: Make sure to include start_line/SEARCH/=======/REPLACE sections with correct markers on new lines
+</error_details>

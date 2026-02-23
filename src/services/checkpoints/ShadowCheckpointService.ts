@@ -150,13 +150,15 @@ export abstract class ShadowCheckpointService extends EventEmitter {
 		await fs.writeFile(path.join(this.dotGitDir, "info", "exclude"), patterns.join("\n"))
 	}
 
-	private async stageAll(git: SimpleGit) {
+	private async stageAll(git: SimpleGit): Promise<boolean> {
 		try {
 			await git.add(".")
+			return true
 		} catch (error) {
 			this.log(
 				`[${this.constructor.name}#stageAll] failed to add files to git: ${error instanceof Error ? error.message : String(error)}`,
 			)
+			return false
 		}
 	}
 
@@ -239,8 +241,10 @@ export abstract class ShadowCheckpointService extends EventEmitter {
 			}
 
 			const startTime = Date.now()
-			await this.stageAll(this.git)
-			const commitArgs = options?.allowEmpty ? { "--allow-empty": null } : undefined
+			const stagingSucceeded = await this.stageAll(this.git)
+			// Only use --allow-empty if staging succeeded. If staging failed,
+			// an empty commit would create a false checkpoint that doesn't capture file changes.
+			const commitArgs = options?.allowEmpty && stagingSucceeded ? { "--allow-empty": null } : undefined
 			const result = await this.git.commit(message, commitArgs)
 			const fromHash = this._checkpoints[this._checkpoints.length - 1] ?? this.baseHash!
 			const toHash = result.commit || fromHash

@@ -54,7 +54,7 @@ import { t } from "../../i18n"
 import { ClineApiReqCancelReason, ClineApiReqInfo } from "../../shared/ExtensionMessage"
 import { getApiMetrics, hasTokenUsageChanged } from "../../shared/getApiMetrics"
 import { ClineAskResponse } from "../../shared/WebviewMessage"
-import { defaultModeSlug } from "../../shared/modes"
+import { defaultModeSlug, getModeBySlug } from "../../shared/modes"
 import { DiffStrategy } from "../../shared/tools"
 import { EXPERIMENT_IDS, experiments } from "../../shared/experiments"
 import { getModelMaxOutputTokens } from "../../shared/api"
@@ -71,6 +71,7 @@ import {
 	clearRateLimit,
 	getRateLimitDelay,
 	isRateLimitError,
+	extractRetryAfterSeconds,
 	isAuthenticationError,
 	isBillingError,
 } from "../rate-limit/RateLimitCoordinator"
@@ -98,7 +99,7 @@ import { RooIgnoreController } from "../ignore/RooIgnoreController"
 import { RooProtectedController } from "../protect/RooProtectedController"
 import { type AssistantMessageContent, presentAssistantMessage } from "../assistant-message"
 import { AssistantMessageParser } from "../assistant-message/AssistantMessageParser"
-import { truncateConversationIfNeeded } from "../sliding-window"
+import { truncateConversation, truncateConversationIfNeeded } from "../sliding-window"
 import { ClineProvider } from "../webview/ClineProvider"
 import { MultiSearchReplaceDiffStrategy } from "../diff/strategies/multi-search-replace"
 import { MultiFileSearchReplaceDiffStrategy } from "../diff/strategies/multi-file-search-replace"
@@ -111,7 +112,11 @@ import {
 	taskMetadata,
 } from "../task-persistence"
 import { getEnvironmentDetails } from "../environment/getEnvironmentDetails"
-import { checkContextWindowExceededError } from "../context/context-management/context-error-handling"
+import {
+	checkContextWindowExceededError,
+	checkIsTPMRateLimitError,
+	parseRequestTooLargeNumbers,
+} from "../context/context-management/context-error-handling"
 import {
 	type CheckpointDiffOptions,
 	type CheckpointRestoreOptions,
@@ -121,7 +126,7 @@ import {
 	checkpointDiff,
 } from "../checkpoints"
 import { processUserContentMentions } from "../mentions/processUserContentMentions"
-import { getMessagesSinceLastSummary, summarizeConversation } from "../condense"
+import { getMessagesSinceLastSummary, summarizeConversation, resetCondenseGuard, clearCondenseGuard } from "../condense"
 import { Gpt5Metadata, ClineMessageWithMetadata } from "./types"
 import { MessageQueueService } from "../message-queue/MessageQueueService"
 
@@ -130,7 +135,12 @@ import { AutoApprovalHandler } from "./AutoApprovalHandler"
 const MAX_EXPONENTIAL_BACKOFF_SECONDS = 600 // 10 minutes
 const DEFAULT_USAGE_COLLECTION_TIMEOUT_MS = 5000 // 5 seconds
 const FORCED_CONTEXT_REDUCTION_PERCENT = 75 // Keep 75% of context (remove 25%) on context window errors
+const FORCED_CONTEXT_REDUCTION_PERCENT_STAGE2 = 50 // Stage 2: more aggressive (condense at 50%) to avoid "request too large"
+// When "request too large" / TPM limit hit, cap effective context so we actually truncate (model window can be 200k+ but limit may be 30k)
+// Set to 25k to leave 5k+ margin for common 30k TPM limits (prevents retry loops)
+const REQUEST_TOO_LARGE_CAP = 25_000
 const MAX_CONTEXT_WINDOW_RETRIES = 3 // Maximum retries for context window errors
+const MAX_AUTO_RETRIES = 10 // Maximum auto-retries for general API errors before requiring manual approval
 
 export interface TaskOptions extends CreateTaskOptions {
 	provider: ClineProvider
@@ -168,7 +178,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	readonly rootTask: Task | undefined = undefined
 	readonly parentTask: Task | undefined = undefined
 	readonly taskNumber: number
-	readonly workspacePath: string
+	workspacePath: string
 
 	/**
 	 * The mode associated with this task. Persisted across sessions
@@ -217,6 +227,21 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	providerRef: WeakRef<ClineProvider>
 	private readonly globalStoragePath: string
 	abort: boolean = false
+	/** Flag indicating this task (subtask) completed successfully via finishSubTask */
+	finishedSuccessfully: boolean = false
+	/**
+	 * Track whether any file-mutating tool was executed in this task.
+	 * Used to enforce that subtasks must actually modify files before completing.
+	 * File-mutating tools: write_to_file, apply_diff, insert_content, multi_apply_diff
+	 */
+	fileMutationOccurred: boolean = false
+
+	/**
+	 * Track repeated `execute_command` invocations to prevent pathological loops
+	 * (common in e2e torture runs where the model repeatedly re-runs the same grep/check).
+	 */
+	lastExecuteCommandNormalized?: string
+	consecutiveExecuteCommandSameCount: number = 0
 
 	// TaskStatus
 	idleAsk?: ClineMessage
@@ -311,6 +336,14 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	worktreePath?: string
 	agentType?: "coder" | "tester" | "reviewer" | "general"
 	subTransactionId?: string // Maps child task to sub-transaction ID
+	/** When true, DiffViewProvider skips CP transactional routing and writes
+	 *  directly to the filesystem.  Set on planner-spawned children so their
+	 *  file writes land in the workspace (not the CP worktree). */
+	skipTransactionalWrites = false
+	/** Composite CP tx_id for sub-transaction children (e.g. "parentTxId_sub_st1").
+	 *  When set, DiffViewProvider routes writes to this sub-tx's CP worktree
+	 *  instead of the parent transaction's worktree. */
+	transactionalTxId?: string
 
 	// Task Bridge
 	enableBridge: boolean
@@ -338,6 +371,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	// Fix #2: Track if we need to inject hard constraint on next LLM call
 	forceConstraintNextTurn: boolean = false
 	pendingValidationError: { tool: string; code: string; message: string } | null = null
+	// Fix #3: Track consecutive read_file validation errors
+	consecutiveReadFileValidationErrors: number = 0
 
 	// Token Usage Cache
 	private tokenUsageSnapshot?: TokenUsage
@@ -364,6 +399,13 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	}: TaskOptions) {
 		super()
 
+		// Torture runs prioritize determinism and robustness over surgical diffs.
+		// In practice, models frequently misformat apply_diff (leading to loops/timeouts).
+		// Disable diff strategy in TEST_TORTURE_REPO so the model naturally uses write_to_file/insert_content instead.
+		if (process.env.TEST_TORTURE_REPO === "1") {
+			enableDiff = false
+		}
+
 		if (startTask && !task && !images && !historyItem) {
 			throw new Error("Either historyItem or task/images must be provided")
 		}
@@ -380,9 +422,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 
 		// Normal use-case is usually retry similar history task with new workspace.
-		this.workspacePath = parentTask
-			? parentTask.workspacePath
-			: (workspacePath ?? getWorkspacePath(path.join(os.homedir(), "Desktop")))
+		// Explicit workspacePath (e.g. a worktree path for planner subtasks) takes
+		// precedence over the parent's workspacePath so that the child operates in
+		// the correct directory from the very first tool call.
+		this.workspacePath =
+			workspacePath ||
+			(parentTask ? parentTask.workspacePath : getWorkspacePath(path.join(os.homedir(), "Desktop")))
 
 		this.instanceId = crypto.randomUUID().slice(0, 8)
 		this.taskNumber = -1
@@ -412,6 +457,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.enableBridge = enableBridge
 
 		this.parentTask = parentTask
+		this.rootTask = rootTask
 		this.taskNumber = taskNumber
 
 		// Store the task's mode when it's created.
@@ -501,6 +547,16 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	 */
 	private async initializeTaskMode(provider: ClineProvider): Promise<void> {
 		try {
+			// Planner-spawned children (those with a parentTask) must run in "code"
+			// mode so they have full tool access (read, edit, command, etc.).
+			// The global mode may be "orchestrator" (groups: []) which has no tools.
+			// Setting it here — inside initializeTaskMode — avoids the race condition
+			// where the task starts building its system prompt before spawnChildTasks
+			// can override _taskMode after createTask() returns.
+			if (this.parentTask) {
+				this._taskMode = "code"
+				return
+			}
 			const state = await provider.getState()
 			this._taskMode = state?.mode || defaultModeSlug
 		} catch (error) {
@@ -628,6 +684,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		const messageWithTs = { ...message, ts: Date.now() }
 		this.apiConversationHistory.push(messageWithTs)
 		await this.saveApiConversationHistory()
+		// Reset condense guard since new messages were added
+		resetCondenseGuard(this.taskId)
 	}
 
 	async overwriteApiConversationHistory(newHistory: ApiMessage[]) {
@@ -919,120 +977,107 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			const alwaysAllowReadOnly = state?.alwaysAllowReadOnly ?? false
 			const alwaysAllowReadOnlyOutsideWorkspace = state?.alwaysAllowReadOnlyOutsideWorkspace ?? false
 			const alwaysAllowExecute = state?.alwaysAllowExecute ?? false
-			
+
 			// Parse tool message to check if it's outside workspace
 			let isOutsideWorkspace = false
-			if (type === "tool" && typeof message === "string") {
+			let isFinishTask = false
+			if (type === "tool" && typeof text === "string") {
 				try {
-					const toolMessage = JSON.parse(message) as { isOutsideWorkspace?: boolean; batchFiles?: Array<{ isOutsideWorkspace?: boolean }> }
-					isOutsideWorkspace = toolMessage.isOutsideWorkspace ?? toolMessage.batchFiles?.some(f => f.isOutsideWorkspace) ?? false
+					const toolMessage = JSON.parse(text) as {
+						isOutsideWorkspace?: boolean
+						batchFiles?: Array<{ isOutsideWorkspace?: boolean }>
+						tool?: string
+					}
+					isOutsideWorkspace =
+						toolMessage.isOutsideWorkspace ??
+						toolMessage.batchFiles?.some((f) => f.isOutsideWorkspace) ??
+						false
+					isFinishTask = toolMessage.tool === "finishTask"
 				} catch {
 					// Not JSON, ignore
 				}
 			}
-			
-			if (type === "followup") {
+
+			// CRITICAL: finishTask must be handled FIRST, regardless of autoApprovalEnabled
+			// This is needed for subtask completion to proceed automatically in E2E mode
+			// Without this, subtasks hang waiting for user to click "Complete Subtask and Return"
+			if (type === "tool" && isFinishTask) {
+				provider?.log(
+					`[Task#ask] E2E mode: Auto-approving finishTask tool call (subtask completion) - Task: ${this.taskId}`,
+				)
+				this.handleWebviewAskResponse("yesButtonClicked")
+			} else if (type === "followup") {
 				// Auto-respond to followup questions with deterministic default
 				provider?.log(
-					`[Task#ask] E2E mode: Auto-responding to followup question with default - Task: ${this.taskId}`
+					`[Task#ask] E2E mode: Auto-responding to followup question with default - Task: ${this.taskId}`,
 				)
 				this.setMessageResponse("Proceed with reasonable defaults")
 			} else if (type === "tool" && autoApprovalEnabled) {
-				// Parse tool message to check if it's a special case (like finishTask)
-				let isFinishTask = false
-				if (typeof message === "string") {
-					try {
-						const toolMessage = JSON.parse(message) as { tool?: string }
-						isFinishTask = toolMessage.tool === "finishTask"
-					} catch {
-						// Not JSON, ignore
-					}
-				}
-				
-				// Special case: Always auto-approve finishTask requests in E2E mode
-				// This is needed for subtask completion to proceed automatically
-				if (isFinishTask) {
+				// Regular tool approvals - require autoApprovalEnabled
+				const shouldApprove =
+					alwaysAllowWrite ||
+					alwaysAllowReadOnly ||
+					(isOutsideWorkspace && alwaysAllowReadOnlyOutsideWorkspace)
+
+				if (shouldApprove) {
+					// Auto-approve tool calls when auto-approval is enabled with appropriate permissions
 					provider?.log(
-						`[Task#ask] E2E mode: Auto-approving finishTask tool call (subtask completion) - Task: ${this.taskId}`
+						`[Task#ask] E2E mode: Auto-approving tool call (autoApprovalEnabled=${autoApprovalEnabled}, alwaysAllowWrite=${alwaysAllowWrite}, alwaysAllowReadOnly=${alwaysAllowReadOnly}, isOutsideWorkspace=${isOutsideWorkspace}, alwaysAllowReadOnlyOutsideWorkspace=${alwaysAllowReadOnlyOutsideWorkspace}) - Task: ${this.taskId}`,
 					)
 					this.handleWebviewAskResponse("yesButtonClicked")
 				} else {
-					// Check if we should auto-approve based on permissions for regular tool calls
-					const shouldApprove = 
-						alwaysAllowWrite || 
-						alwaysAllowReadOnly || 
-						(isOutsideWorkspace && alwaysAllowReadOnlyOutsideWorkspace)
-					
-					if (shouldApprove) {
-						// Auto-approve tool calls when auto-approval is enabled with appropriate permissions
-						provider?.log(
-							`[Task#ask] E2E mode: Auto-approving tool call (autoApprovalEnabled=${autoApprovalEnabled}, alwaysAllowWrite=${alwaysAllowWrite}, alwaysAllowReadOnly=${alwaysAllowReadOnly}, isOutsideWorkspace=${isOutsideWorkspace}, alwaysAllowReadOnlyOutsideWorkspace=${alwaysAllowReadOnlyOutsideWorkspace}) - Task: ${this.taskId}`
-						)
-						this.handleWebviewAskResponse("yesButtonClicked")
-					} else {
-						// Tool call requires approval but we don't have permission - abort
-						const errorMessage = `Blocked Task#ask in e2e mode: ${type} (outsideWorkspace=${isOutsideWorkspace}, no permission)`
-						provider?.log(`[Task#ask] E2E mode: ${errorMessage} - Task: ${this.taskId}`)
-						this.e2eBlockedAskAbort = { type }
-						await this.abortTask()
-						throw new Error(errorMessage)
-					}
+					// Tool call requires approval but we don't have permission - abort
+					const errorMessage = `Blocked Task#ask in e2e mode: ${type} (outsideWorkspace=${isOutsideWorkspace}, no permission)`
+					provider?.log(`[Task#ask] E2E mode: ${errorMessage} - Task: ${this.taskId}`)
+					this.e2eBlockedAskAbort = { type }
+					await this.abortTask()
+					throw new Error(errorMessage)
 				}
 			} else if (type === "command" && autoApprovalEnabled && alwaysAllowExecute) {
 				// Auto-approve command execution when auto-approval is enabled with execute permission
 				provider?.log(
-					`[Task#ask] E2E mode: Auto-approving command execution (autoApprovalEnabled=${autoApprovalEnabled}, alwaysAllowExecute=${alwaysAllowExecute}) - Task: ${this.taskId}`
+					`[Task#ask] E2E mode: Auto-approving command execution (autoApprovalEnabled=${autoApprovalEnabled}, alwaysAllowExecute=${alwaysAllowExecute}) - Task: ${this.taskId}`,
 				)
 				this.handleWebviewAskResponse("yesButtonClicked")
 			} else if (type === "command_output" && autoApprovalEnabled && alwaysAllowExecute) {
 				// Auto-approve command output display when auto-approval is enabled with execute permission
 				provider?.log(
-					`[Task#ask] E2E mode: Auto-approving command_output display (autoApprovalEnabled=${autoApprovalEnabled}, alwaysAllowExecute=${alwaysAllowExecute}) - Task: ${this.taskId}`
+					`[Task#ask] E2E mode: Auto-approving command_output display (autoApprovalEnabled=${autoApprovalEnabled}, alwaysAllowExecute=${alwaysAllowExecute}) - Task: ${this.taskId}`,
 				)
 				this.handleWebviewAskResponse("yesButtonClicked")
 			} else if (type === "mistake_limit_reached") {
 				// Auto-reset mistake count in e2e mode to allow continuation
 				provider?.log(
-					`[Task#ask] E2E mode: Auto-resetting mistake limit (consecutiveMistakeCount=${this.consecutiveMistakeCount}) - Task: ${this.taskId}`
+					`[Task#ask] E2E mode: Auto-resetting mistake limit (consecutiveMistakeCount=${this.consecutiveMistakeCount}) - Task: ${this.taskId}`,
 				)
 				this.consecutiveMistakeCount = 0
 				this.setMessageResponse("Continue")
 			} else if (type === "completion_result") {
 				// Auto-approve completion_result in e2e mode to allow task completion
-				provider?.log(
-					`[Task#ask] E2E mode: Auto-approving completion_result - Task: ${this.taskId}`
-				)
+				provider?.log(`[Task#ask] E2E mode: Auto-approving completion_result - Task: ${this.taskId}`)
 				this.handleWebviewAskResponse("yesButtonClicked")
 			} else if (type === "api_req_failed" && autoApprovalEnabled) {
 				// Auto-approve api_req_failed in e2e mode to allow automatic retry
 				// The test handler will still catch this and can fail fast if needed
 				provider?.log(
-					`[Task#ask] E2E mode: Auto-approving api_req_failed (will retry automatically) - Task: ${this.taskId}`
+					`[Task#ask] E2E mode: Auto-approving api_req_failed (will retry automatically) - Task: ${this.taskId}`,
 				)
 				this.handleWebviewAskResponse("yesButtonClicked")
 			} else if (type === "resume_task" || type === "resume_completed_task") {
 				// Auto-approve resume asks in e2e mode - these shouldn't happen in tests but handle gracefully
-				provider?.log(
-					`[Task#ask] E2E mode: Auto-approving ${type} - Task: ${this.taskId}`
-				)
+				provider?.log(`[Task#ask] E2E mode: Auto-approving ${type} - Task: ${this.taskId}`)
 				this.handleWebviewAskResponse("yesButtonClicked")
 			} else if (type === "browser_action_launch" && autoApprovalEnabled) {
 				// Auto-approve browser actions in e2e mode if auto-approval is enabled
-				provider?.log(
-					`[Task#ask] E2E mode: Auto-approving browser_action_launch - Task: ${this.taskId}`
-				)
+				provider?.log(`[Task#ask] E2E mode: Auto-approving browser_action_launch - Task: ${this.taskId}`)
 				this.handleWebviewAskResponse("yesButtonClicked")
 			} else if (type === "use_mcp_server" && autoApprovalEnabled) {
 				// Auto-approve MCP server usage in e2e mode if auto-approval is enabled
-				provider?.log(
-					`[Task#ask] E2E mode: Auto-approving use_mcp_server - Task: ${this.taskId}`
-				)
+				provider?.log(`[Task#ask] E2E mode: Auto-approving use_mcp_server - Task: ${this.taskId}`)
 				this.handleWebviewAskResponse("yesButtonClicked")
 			} else if (type === "auto_approval_max_req_reached") {
 				// In E2E mode, ignore auto-approval limits and continue
-				provider?.log(
-					`[Task#ask] E2E mode: Ignoring auto_approval_max_req_reached - Task: ${this.taskId}`
-				)
+				provider?.log(`[Task#ask] E2E mode: Ignoring auto_approval_max_req_reached - Task: ${this.taskId}`)
 				this.setMessageResponse("Continue")
 			} else {
 				// For ALL other blocking ask types in e2e mode: abort immediately
@@ -1046,8 +1091,16 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			}
 		}
 
-		// Wait for askResponse to be set.
-		await pWaitFor(() => this.askResponse !== undefined || this.lastMessageTs !== askTs, { interval: 100 })
+		// Wait for askResponse to be set (with 10-minute timeout to prevent deadlocks).
+		await pWaitFor(() => this.askResponse !== undefined || this.lastMessageTs !== askTs, {
+			interval: 100,
+			timeout: 600_000,
+		}).catch(() => {
+			const provider = this.providerRef.deref()
+			provider?.log(`[Task#${this.taskId}] ask() response timed out after 10 minutes, aborting`)
+			this.abortTask()
+			throw new Error("Ask response timed out")
+		})
 
 		if (this.lastMessageTs !== askTs) {
 			// Could happen if we send multiple asks in a row i.e. with
@@ -1089,7 +1142,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// Use allowEmpty=true to ensure a checkpoint is recorded even if there are no file changes.
 		// Suppress the checkpoint_saved chat row for this particular checkpoint to keep the timeline clean.
 		if (askResponse === "messageResponse") {
-			void this.checkpointSave(false, true)
+			this.checkpointSave(false, true).catch((err) => {
+				const provider = this.providerRef.deref()
+				provider?.log(`[Task#${this.taskId}] Background checkpoint save failed: ${err?.message || err}`)
+			})
 		}
 
 		// Mark the last follow-up question as answered
@@ -1378,7 +1434,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	 */
 	private isSimpleRequest(task: string): boolean {
 		const normalizedTask = task.toLowerCase().trim()
-		
+
 		// Patterns that indicate simple informational requests
 		const simplePatterns = [
 			/^explain\s+/i,
@@ -1392,24 +1448,35 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			/^what\s+does\s+this\s+(code|file|function|class)\s+do/i,
 			/^how\s+does\s+this\s+(code|file|function|class)\s+work/i,
 		]
-		
+
 		// Check if task matches any simple pattern
 		for (const pattern of simplePatterns) {
 			if (pattern.test(normalizedTask)) {
 				return true
 			}
 		}
-		
+
 		// Also check if it's a very short request (likely a simple question)
 		// But only if it doesn't contain action verbs that suggest complex tasks
-		const actionVerbs = ['implement', 'create', 'add', 'fix', 'refactor', 'update', 'modify', 'build', 'write', 'generate']
-		const hasActionVerb = actionVerbs.some(verb => normalizedTask.includes(verb))
-		
+		const actionVerbs = [
+			"implement",
+			"create",
+			"add",
+			"fix",
+			"refactor",
+			"update",
+			"modify",
+			"build",
+			"write",
+			"generate",
+		]
+		const hasActionVerb = actionVerbs.some((verb) => normalizedTask.includes(verb))
+
 		if (normalizedTask.length < 50 && !hasActionVerb) {
 			// Very short requests without action verbs are likely simple
 			return true
 		}
-		
+
 		return false
 	}
 
@@ -1418,7 +1485,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	 * Uses multiple signals to determine if a task likely requires multi-agent planning.
 	 * Returns an object with complexity score and reasoning.
 	 */
-	private detectTaskComplexity(task: string): { isComplex: boolean; confidence: "high" | "medium" | "low"; reasons: string[] } {
+	private detectTaskComplexity(task: string): {
+		isComplex: boolean
+		confidence: "high" | "medium" | "low"
+		reasons: string[]
+	} {
 		if (!task) {
 			return { isComplex: false, confidence: "high", reasons: [] }
 		}
@@ -1429,14 +1500,19 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		// HEURISTIC 1: Multiple explicit file mentions
 		// Pattern: file paths, extensions, or "file" keyword with numbers
-		const filePathPattern = /(?:^|\s)(?:\.\/)?[\w\/\-\.]+\.(?:py|ts|js|tsx|jsx|java|go|rs|cpp|c|h|md|txt|json|yaml|yml|xml|html|css|rb|php|swift|kt|scala|r|m|mm|pl|sh|bat|ps1)(?:\s|$)/gi
+		const filePathPattern =
+			/(?:^|\s)(?:\.\/)?[\w\/\-\.]+\.(?:py|ts|js|tsx|jsx|java|go|rs|cpp|c|h|md|txt|json|yaml|yml|xml|html|css|rb|php|swift|kt|scala|r|m|mm|pl|sh|bat|ps1)(?:\s|$)/gi
 		const fileMatches = normalizedTask.match(filePathPattern) || []
 		const fileCount = fileMatches.length
-		
+
 		// Also count explicit mentions of "file" with numbers or lists
-		const fileMentions = (normalizedTask.match(/\d+\s+files?|files?.*\d+|file.*file|multiple\s+files?|several\s+files?|many\s+files?/gi) || []).length
+		const fileMentions = (
+			normalizedTask.match(
+				/\d+\s+files?|files?.*\d+|file.*file|multiple\s+files?|several\s+files?|many\s+files?/gi,
+			) || []
+		).length
 		const totalFileSignals = fileCount + fileMentions
-		
+
 		if (totalFileSignals >= 3) {
 			complexityScore += 3
 			reasons.push(`Mentions ${totalFileSignals} file(s) explicitly`)
@@ -1450,23 +1526,43 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// HEURISTIC 2: Multi-step operations and coordination keywords
 		const multiStepKeywords = [
 			// Coordination verbs
-			'and then', 'then', 'after that', 'followed by', 'subsequently',
-			'first.*then', 'step 1', 'step 2', 'step one', 'step two',
+			"and then",
+			"then",
+			"after that",
+			"followed by",
+			"subsequently",
+			"first.*then",
+			"step 1",
+			"step 2",
+			"step one",
+			"step two",
 			// Multi-action coordination
-			'implement and test', 'code and document', 'write and review',
-			'create and test', 'add and verify', 'build and deploy',
-			'refactor and test', 'migrate and verify', 'update and test',
+			"implement and test",
+			"code and document",
+			"write and review",
+			"create and test",
+			"add and verify",
+			"build and deploy",
+			"refactor and test",
+			"migrate and verify",
+			"update and test",
 			// Parallel work indicators
-			'in parallel', 'simultaneously', 'at the same time', 'concurrently',
+			"in parallel",
+			"simultaneously",
+			"at the same time",
+			"concurrently",
 			// Sequential work
-			'sequentially', 'one by one', 'in order', 'step by step',
+			"sequentially",
+			"one by one",
+			"in order",
+			"step by step",
 		]
-		
-		const multiStepMatches = multiStepKeywords.filter(keyword => {
-			const regex = new RegExp(keyword.replace(/\*/g, '.*'), 'gi')
+
+		const multiStepMatches = multiStepKeywords.filter((keyword) => {
+			const regex = new RegExp(keyword.replace(/\*/g, ".*"), "gi")
 			return regex.test(normalizedTask)
 		}).length
-		
+
 		if (multiStepMatches > 0) {
 			complexityScore += 2 * multiStepMatches
 			reasons.push(`Contains ${multiStepMatches} multi-step coordination signal(s)`)
@@ -1474,17 +1570,39 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		// HEURISTIC 3: Large-scale operation keywords
 		const largeScaleKeywords = [
-			'refactor', 'refactoring', 'restructure', 'restructuring',
-			'migrate', 'migration', 'convert', 'conversion',
-			'reorganize', 'reorganization', 'restructure',
-			'replace all', 'update all', 'modify all', 'change all',
-			'across the', 'throughout the', 'entire codebase', 'whole project',
-			'all files', 'every file', 'all modules', 'all components',
-			'codebase-wide', 'project-wide', 'system-wide',
-			'major', 'comprehensive', 'extensive', 'large-scale',
+			"refactor",
+			"refactoring",
+			"restructure",
+			"restructuring",
+			"migrate",
+			"migration",
+			"convert",
+			"conversion",
+			"reorganize",
+			"reorganization",
+			"restructure",
+			"replace all",
+			"update all",
+			"modify all",
+			"change all",
+			"across the",
+			"throughout the",
+			"entire codebase",
+			"whole project",
+			"all files",
+			"every file",
+			"all modules",
+			"all components",
+			"codebase-wide",
+			"project-wide",
+			"system-wide",
+			"major",
+			"comprehensive",
+			"extensive",
+			"large-scale",
 		]
-		
-		const largeScaleMatches = largeScaleKeywords.filter(keyword => normalizedTask.includes(keyword)).length
+
+		const largeScaleMatches = largeScaleKeywords.filter((keyword) => normalizedTask.includes(keyword)).length
 		if (largeScaleMatches > 0) {
 			complexityScore += 3 * largeScaleMatches
 			reasons.push(`Contains ${largeScaleMatches} large-scale operation keyword(s)`)
@@ -1499,8 +1617,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			/all\s+(?:modules?|components?|features?|parts?)/gi,
 			/every\s+(?:module|component|feature|part)/gi,
 		]
-		
-		const componentMatches = componentPatterns.filter(pattern => pattern.test(normalizedTask)).length
+
+		const componentMatches = componentPatterns.filter((pattern) => pattern.test(normalizedTask)).length
 		if (componentMatches > 0) {
 			complexityScore += 2 * componentMatches
 			reasons.push(`Mentions multiple components/modules`)
@@ -1509,21 +1627,35 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// HEURISTIC 5: Multiple agent types implicitly required
 		const agentTypeKeywords = [
 			// Coder + Tester
-			'code and test', 'implement and test', 'write and test',
-			'create and test', 'add and test', 'build and test',
+			"code and test",
+			"implement and test",
+			"write and test",
+			"create and test",
+			"add and test",
+			"build and test",
 			// Coder + Reviewer
-			'code and review', 'implement and review', 'write and review',
-			'create and review', 'add and review',
+			"code and review",
+			"implement and review",
+			"write and review",
+			"create and review",
+			"add and review",
 			// Coder + Documentation
-			'code and document', 'implement and document', 'write and document',
-			'create and document', 'add documentation',
+			"code and document",
+			"implement and document",
+			"write and document",
+			"create and document",
+			"add documentation",
 			// All three
-			'code, test, and', 'implement, test, and', 'write, test, and review',
+			"code, test, and",
+			"implement, test, and",
+			"write, test, and review",
 			// Reviewer + Tester
-			'review and test', 'review all test', 'test and review',
+			"review and test",
+			"review all test",
+			"test and review",
 		]
-		
-		const agentTypeMatches = agentTypeKeywords.filter(keyword => normalizedTask.includes(keyword)).length
+
+		const agentTypeMatches = agentTypeKeywords.filter((keyword) => normalizedTask.includes(keyword)).length
 		if (agentTypeMatches > 0) {
 			complexityScore += 2 * agentTypeMatches
 			reasons.push(`Requires ${agentTypeMatches} different agent type(s)`)
@@ -1531,17 +1663,29 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		// HEURISTIC 6: Explicit dependency language
 		const dependencyKeywords = [
-			'depends on', 'dependent on', 'requires.*first', 'must.*before',
-			'after.*then', 'once.*then', 'when.*then', 'if.*then',
-			'prerequisite', 'precondition', 'before.*can', 'must.*before',
-			'order matters', 'sequence', 'chain', 'pipeline',
+			"depends on",
+			"dependent on",
+			"requires.*first",
+			"must.*before",
+			"after.*then",
+			"once.*then",
+			"when.*then",
+			"if.*then",
+			"prerequisite",
+			"precondition",
+			"before.*can",
+			"must.*before",
+			"order matters",
+			"sequence",
+			"chain",
+			"pipeline",
 		]
-		
-		const dependencyMatches = dependencyKeywords.filter(keyword => {
-			const regex = new RegExp(keyword.replace(/\*/g, '.*'), 'gi')
+
+		const dependencyMatches = dependencyKeywords.filter((keyword) => {
+			const regex = new RegExp(keyword.replace(/\*/g, ".*"), "gi")
 			return regex.test(normalizedTask)
 		}).length
-		
+
 		if (dependencyMatches > 0) {
 			complexityScore += 2 * dependencyMatches
 			reasons.push(`Contains ${dependencyMatches} dependency signal(s)`)
@@ -1549,18 +1693,38 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		// HEURISTIC 7: Multiple action verbs (indicates multi-step work)
 		const actionVerbs = [
-			'implement', 'create', 'add', 'fix', 'refactor', 'update', 'modify',
-			'build', 'write', 'generate', 'remove', 'delete', 'replace',
-			'migrate', 'convert', 'restructure', 'reorganize', 'rewrite',
-			'test', 'review', 'document', 'verify', 'validate', 'check',
+			"implement",
+			"create",
+			"add",
+			"fix",
+			"refactor",
+			"update",
+			"modify",
+			"build",
+			"write",
+			"generate",
+			"remove",
+			"delete",
+			"replace",
+			"migrate",
+			"convert",
+			"restructure",
+			"reorganize",
+			"rewrite",
+			"test",
+			"review",
+			"document",
+			"verify",
+			"validate",
+			"check",
 		]
-		
-		const verbCount = actionVerbs.filter(verb => {
+
+		const verbCount = actionVerbs.filter((verb) => {
 			// Use word boundaries to avoid partial matches
-			const regex = new RegExp(`\\b${verb}\\w*\\b`, 'gi')
+			const regex = new RegExp(`\\b${verb}\\w*\\b`, "gi")
 			return regex.test(normalizedTask)
 		}).length
-		
+
 		if (verbCount >= 3) {
 			complexityScore += 2
 			reasons.push(`Contains ${verbCount} different action verbs`)
@@ -1576,18 +1740,18 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		// HEURISTIC 9: List-like structures (numbered lists, bullet points, "and" chains)
 		const listPatterns = [
-			/\d+\.\s+/g,  // Numbered list
-			/-\s+/g,      // Bullet points
-			/\*\s+/g,     // Asterisk bullets
-			/,\s+and\s+/gi,  // Comma-separated with "and"
-			/;\s+/g,      // Semicolon-separated
+			/\d+\.\s+/g, // Numbered list
+			/-\s+/g, // Bullet points
+			/\*\s+/g, // Asterisk bullets
+			/,\s+and\s+/gi, // Comma-separated with "and"
+			/;\s+/g, // Semicolon-separated
 		]
-		
+
 		const listMatches = listPatterns.reduce((count, pattern) => {
 			const matches = normalizedTask.match(pattern) || []
 			return count + matches.length
 		}, 0)
-		
+
 		if (listMatches >= 3) {
 			complexityScore += 2
 			reasons.push(`Contains list-like structure (${listMatches} items)`)
@@ -1597,47 +1761,73 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		// HEURISTIC 10: Review/audit operations (often need multiple reviewers)
 		const reviewKeywords = [
-			'review all', 'review every', 'audit all', 'check all',
-			'review.*files', 'review.*test', 'review.*code',
-			'comprehensive review', 'full review', 'complete review',
-			'code review', 'test review', 'documentation review',
+			"review all",
+			"review every",
+			"audit all",
+			"check all",
+			"review.*files",
+			"review.*test",
+			"review.*code",
+			"comprehensive review",
+			"full review",
+			"complete review",
+			"code review",
+			"test review",
+			"documentation review",
 		]
-		
-		const reviewMatches = reviewKeywords.filter(keyword => {
-			const regex = new RegExp(keyword.replace(/\*/g, '.*'), 'gi')
+
+		const reviewMatches = reviewKeywords.filter((keyword) => {
+			const regex = new RegExp(keyword.replace(/\*/g, ".*"), "gi")
 			return regex.test(normalizedTask)
 		}).length
-		
-		if (reviewMatches > 0 && (fileCount >= 2 || normalizedTask.includes('all') || normalizedTask.includes('every'))) {
+
+		if (
+			reviewMatches > 0 &&
+			(fileCount >= 2 || normalizedTask.includes("all") || normalizedTask.includes("every"))
+		) {
 			complexityScore += 2
 			reasons.push(`Review operation with multiple targets`)
 		}
 
 		// HEURISTIC 11: Testing operations (often need multiple test files)
 		const testKeywords = [
-			'test all', 'test every', 'all tests', 'every test',
-			'write tests for', 'add tests for', 'create tests for',
-			'test coverage', 'test suite', 'test cases',
+			"test all",
+			"test every",
+			"all tests",
+			"every test",
+			"write tests for",
+			"add tests for",
+			"create tests for",
+			"test coverage",
+			"test suite",
+			"test cases",
 		]
-		
-		const testMatches = testKeywords.filter(keyword => normalizedTask.includes(keyword)).length
-		if (testMatches > 0 && (fileCount >= 2 || normalizedTask.includes('all') || normalizedTask.includes('every'))) {
+
+		const testMatches = testKeywords.filter((keyword) => normalizedTask.includes(keyword)).length
+		if (testMatches > 0 && (fileCount >= 2 || normalizedTask.includes("all") || normalizedTask.includes("every"))) {
 			complexityScore += 2
 			reasons.push(`Testing operation with multiple targets`)
 		}
 
 		// HEURISTIC 12: Database/persistence operations (often multi-file)
 		const dbKeywords = [
-			'add.*persistence', 'add.*database', 'sqlite', 'postgres', 'mysql',
-			'database.*backend', 'persistence.*layer', 'data.*storage',
-			'migration.*database', 'schema.*change',
+			"add.*persistence",
+			"add.*database",
+			"sqlite",
+			"postgres",
+			"mysql",
+			"database.*backend",
+			"persistence.*layer",
+			"data.*storage",
+			"migration.*database",
+			"schema.*change",
 		]
-		
-		const dbMatches = dbKeywords.filter(keyword => {
-			const regex = new RegExp(keyword.replace(/\*/g, '.*'), 'gi')
+
+		const dbMatches = dbKeywords.filter((keyword) => {
+			const regex = new RegExp(keyword.replace(/\*/g, ".*"), "gi")
 			return regex.test(normalizedTask)
 		}).length
-		
+
 		if (dbMatches > 0) {
 			complexityScore += 2
 			reasons.push(`Database/persistence operation (typically multi-file)`)
@@ -1646,7 +1836,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// Determine final complexity
 		const isComplex = complexityScore >= 3
 		let confidence: "high" | "medium" | "low" = "low"
-		
+
 		if (complexityScore >= 6) {
 			confidence = "high"
 		} else if (complexityScore >= 4) {
@@ -1664,9 +1854,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	 */
 	private async generateImplementationContext(task: string): Promise<string> {
 		const provider = this.providerRef.deref()
-		
-		provider?.log(`[Task#generateImplementationContext] Starting context generation for task (${task.length} chars)`)
-		
+
+		provider?.log(
+			`[Task#generateImplementationContext] Starting context generation for task (${task.length} chars)`,
+		)
+
 		// Detect if this is an implementation task
 		const implementationPatterns = [
 			/implement(?:ing|s)?\s+(?:a\s+)?(\w+)/i,
@@ -1694,7 +1886,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				matches.push(quotedMatch[1])
 			}
 		}
-		
+
 		// Extract module paths like txn_demo.store.build_store - look for the parent module
 		const modulePathPattern = /(\w+(?:\.\w+)+)\s*\(/g
 		let moduleMatch
@@ -1708,7 +1900,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				}
 			}
 		}
-		
+
 		// For "ResultStore" specifically - common patterns
 		if (task.toLowerCase().includes("resultstore") && !matches.includes("ResultStore")) {
 			provider?.log(`[Task#generateImplementationContext] Adding ResultStore from keyword match`)
@@ -1718,7 +1910,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			provider?.log(`[Task#generateImplementationContext] Adding store from keyword match`)
 			matches.push("store")
 		}
-		
+
 		provider?.log(`[Task#generateImplementationContext] Total matches: ${matches.join(", ")}`)
 
 		if (matches.length === 0) {
@@ -1737,22 +1929,24 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// Use glob to find files that might contain the interface/class definition
 				const { listFiles } = await import("../../services/glob/list-files")
 				const [allFiles] = await listFiles(this.cwd, false, 500)
-				
+
 				// Filter to source files that might contain the definition
 				const sourceExtensions = [".py", ".ts", ".tsx", ".js", ".jsx", ".java", ".go", ".rs", ".cs"]
-				const sourceFiles = allFiles.filter(f => 
-					sourceExtensions.some(ext => f.endsWith(ext)) &&
-					!f.includes("node_modules") &&
-					!f.includes("__pycache__") &&
-					!f.includes(".git")
+				const sourceFiles = allFiles.filter(
+					(f) =>
+						sourceExtensions.some((ext) => f.endsWith(ext)) &&
+						!f.includes("node_modules") &&
+						!f.includes("__pycache__") &&
+						!f.includes(".git"),
 				)
 
 				// Search for files containing the identifier as a class/interface/protocol
-				for (const file of sourceFiles.slice(0, 100)) { // Limit to first 100 files
+				for (const file of sourceFiles.slice(0, 100)) {
+					// Limit to first 100 files
 					try {
 						const fullPath = path.join(this.cwd, file)
 						const content = await fs.readFile(fullPath, "utf-8")
-						
+
 						// Check if this file defines the identifier we're looking for
 						const definitionPatterns = [
 							new RegExp(`class\\s+${identifier}\\s*[:\\(\\{]`, "i"),
@@ -1764,17 +1958,26 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						]
 
 						// Also match if the filename contains the identifier (e.g., "store" matches "store.py")
-						const fileBaseName = file.split("/").pop()?.split("\\").pop()?.replace(/\.\w+$/, "") || ""
+						const fileBaseName =
+							file
+								.split("/")
+								.pop()
+								?.split("\\")
+								.pop()
+								?.replace(/\.\w+$/, "") || ""
 						const isFileNameMatch = fileBaseName.toLowerCase() === identifier.toLowerCase()
-						
+
 						// Check for Protocol definitions in Python files
 						const hasProtocolDefinition = content.includes("(Protocol)") || content.includes("Protocol[")
 
-						const isDefinition = definitionPatterns.some(p => p.test(content)) || 
+						const isDefinition =
+							definitionPatterns.some((p) => p.test(content)) ||
 							(isFileNameMatch && hasProtocolDefinition)
-						
+
 						if (isDefinition) {
-							provider?.log(`[Task#generateImplementationContext] Found definition for ${identifier} in ${file}`)
+							provider?.log(
+								`[Task#generateImplementationContext] Found definition for ${identifier} in ${file}`,
+							)
 							contextParts.push(`<relevant_file path="${file}" reason="Contains ${identifier} definition">
 ${content.slice(0, 5000)}${content.length > 5000 ? "\n... (truncated)" : ""}
 </relevant_file>`)
@@ -2010,14 +2213,15 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 			nestingDepth++
 			current = current.parentTask
 		}
-		const MAX_PLANNER_DEPTH = 2 // Allow up to 2 levels of nested planning
+		const MAX_PLANNER_DEPTH = 1 // Only root tasks use planner mode - subtasks execute directly
 		const isSubtask = this.parentTask !== undefined
 		const exceedsMaxDepth = nestingDepth >= MAX_PLANNER_DEPTH
 
 		// Check if planner mode is enabled (read from configuration)
 		const cfg = vscode.workspace.getConfiguration()
-		const plannerModeEnabled = cfg.get<boolean>("roo.experimental.plannerMode") || cfg.get<boolean>("roo-cline.experimental.plannerMode")
-		
+		let plannerModeEnabled =
+			cfg.get<boolean>("roo.experimental.plannerMode") || cfg.get<boolean>("roo-cline.experimental.plannerMode")
+
 		// Allow planner mode for:
 		// 1. Root tasks (not subtasks)
 		// 2. Subtasks that are complex enough to need their own plan, but haven't exceeded max depth
@@ -2029,16 +2233,20 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 
 		// Log when planner mode is skipped due to depth limit
 		if (plannerModeEnabled && exceedsMaxDepth && task && !isSimpleRequest) {
-			this.providerRef.deref()?.log(
-				`[Task#startTask] Skipping planner mode for subtask at depth ${nestingDepth} (max depth: ${MAX_PLANNER_DEPTH}). Executing directly.`
-			)
+			this.providerRef
+				.deref()
+				?.log(
+					`[Task#startTask] Skipping planner mode for subtask at depth ${nestingDepth} (max depth: ${MAX_PLANNER_DEPTH}). Executing directly.`,
+				)
 		}
 
 		// Log when a subtask uses planner mode
 		if (plannerMode && isSubtask && task && !isSimpleRequest) {
-			this.providerRef.deref()?.log(
-				`[Task#startTask] Subtask at depth ${nestingDepth} using planner mode to break down complex work.`
-			)
+			this.providerRef
+				.deref()
+				?.log(
+					`[Task#startTask] Subtask at depth ${nestingDepth} using planner mode to break down complex work.`,
+				)
 		}
 
 		if (plannerMode && task && !isSimpleRequest) {
@@ -2048,18 +2256,24 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 
 				// Check circuit breaker before starting planner
 				if (shouldOpenCircuitBreaker && shouldOpenCircuitBreaker()) {
-					this.providerRef.deref()?.log(
-						`[Task#startTask] Circuit breaker is open - skipping planner mode to prevent rate limit cascade. Falling back to normal execution.`
-					)
+					this.providerRef
+						.deref()
+						?.log(
+							`[Task#startTask] Circuit breaker is open - skipping planner mode to prevent rate limit cascade. Falling back to normal execution.`,
+						)
 					// Fall through to normal execution instead of throwing
 				} else {
 					// Pre-check: Use heuristics to detect likely complexity
-					const complexityCheck = task ? this.detectTaskComplexity(task) : { isComplex: false, confidence: "low" as const, reasons: [] }
-					
+					const complexityCheck = task
+						? this.detectTaskComplexity(task)
+						: { isComplex: false, confidence: "low" as const, reasons: [] }
+
 					if (complexityCheck.isComplex && complexityCheck.confidence === "high") {
-						this.providerRef.deref()?.log(
-							`[Task#startTask] Heuristics indicate HIGH confidence this task is complex: ${complexityCheck.reasons.join(", ")}`
-						)
+						this.providerRef
+							.deref()
+							?.log(
+								`[Task#startTask] Heuristics indicate HIGH confidence this task is complex: ${complexityCheck.reasons.join(", ")}`,
+							)
 					}
 
 					const planner = new PlannerAgent(this)
@@ -2068,74 +2282,99 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 
 					// Post-check: Validate LLM decision against heuristics
 					const isEmptyPlan = !plan.subTransactions || plan.subTransactions.length === 0
-					
+
 					if (isEmptyPlan && complexityCheck.isComplex && complexityCheck.confidence !== "low") {
 						// LLM returned empty plan but heuristics say it's complex - retry with stronger prompt
-						this.providerRef.deref()?.log(
-							`[Task#startTask] VALIDATION FAILED: LLM returned empty plan, but heuristics indicate complexity (${complexityCheck.confidence} confidence, reasons: ${complexityCheck.reasons.join(", ")}). Retrying with stronger prompt.`
-						)
-						
+						this.providerRef
+							.deref()
+							?.log(
+								`[Task#startTask] VALIDATION FAILED: LLM returned empty plan, but heuristics indicate complexity (${complexityCheck.confidence} confidence, reasons: ${complexityCheck.reasons.join(", ")}). Retrying with stronger prompt.`,
+							)
+
 						try {
 							plan = await planner.generatePlan(task, 0, true) // Retry with forceComplex flag
 							this.plan = plan
-							
+
 							// Check again after retry
 							if (!plan.subTransactions || plan.subTransactions.length === 0) {
-								this.providerRef.deref()?.log(
-									`[Task#startTask] Retry also returned empty plan. Heuristics may be incorrect, or task is genuinely simple. Proceeding with direct execution.`
-								)
+								this.providerRef
+									.deref()
+									?.log(
+										`[Task#startTask] Retry also returned empty plan. Heuristics may be incorrect, or task is genuinely simple. Proceeding with direct execution.`,
+									)
 							} else {
-								this.providerRef.deref()?.log(
-									`[Task#startTask] Retry succeeded - LLM now created plan with ${plan.subTransactions.length} sub-transaction(s)`
-								)
+								this.providerRef
+									.deref()
+									?.log(
+										`[Task#startTask] Retry succeeded - LLM now created plan with ${plan.subTransactions.length} sub-transaction(s)`,
+									)
 							}
 						} catch (retryError) {
-							const retryErrorMessage = retryError instanceof Error ? retryError.message : String(retryError)
-							this.providerRef.deref()?.log(
-								`[Task#startTask] Retry failed: ${retryErrorMessage}. Proceeding with original empty plan.`
-							)
+							const retryErrorMessage =
+								retryError instanceof Error ? retryError.message : String(retryError)
+							this.providerRef
+								.deref()
+								?.log(
+									`[Task#startTask] Retry failed: ${retryErrorMessage}. Proceeding with original empty plan.`,
+								)
 						}
 					}
 
 					// Check if plan is empty (simple query) - fall through to normal execution
 					if (!plan.subTransactions || plan.subTransactions.length === 0) {
-						this.providerRef.deref()?.log(
-							`[Task#startTask] Planner returned empty plan for simple query, falling through to normal execution`
-						)
+						this.providerRef
+							.deref()
+							?.log(
+								`[Task#startTask] Planner returned empty plan for simple query, falling through to normal execution`,
+							)
 						// Fall through to normal execution below
 					} else {
 						const executor = new PlanExecutor(this)
 						const result = await executor.executePlan(plan)
 
 						if (result.success) {
+							// Merge parent worktree changes back to workspace (durability invariant)
+							await executor.mergeParentToWorkspace()
 							await this.say("text", "Plan executed successfully. All sub-transactions completed.")
+							// Emit TaskCompleted for parent task when planner mode succeeds
+							// This ensures the parent task is properly marked as completed
+							// for waitUntilCompleted and E2E test listeners
+							this.emit(RooCodeEventName.TaskCompleted, this.taskId, this.getTokenUsage(), this.toolUsage)
 						} else {
 							await this.say(
 								"text",
 								`Plan execution completed with failures. Failed sub-transactions: ${result.failedSubTransactions?.join(", ") || "unknown"}`,
 							)
+							// Even on partial failure, emit TaskCompleted since the plan execution finished
+							// The result.success flag indicates if all subtasks passed
+							this.emit(RooCodeEventName.TaskCompleted, this.taskId, this.getTokenUsage(), this.toolUsage)
 						}
 
-						// Planner mode execution complete
+						// Planner mode execution complete — signal the main loop to exit
+						this.finishedSuccessfully = true
 						return
 					}
 				}
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : String(error)
 				this.providerRef.deref()?.log(`[Task#startTask] Planner mode failed: ${errorMessage}`)
-				
+
 				// E2E mode: If error is due to blocked Task#ask in child, abort task immediately
 				const isE2EMode = !!(process.env.TEST_TORTURE_REPO || process.env.TEST_TORTURE_REPO_WORKSPACE)
 				if (isE2EMode && errorMessage.includes("Blocked Task#ask in e2e mode")) {
-					this.providerRef.deref()?.log(`[Task#startTask] E2E mode: Planner failed due to blocked Task#ask - Aborting task ${this.taskId}`)
+					this.providerRef
+						.deref()
+						?.log(
+							`[Task#startTask] E2E mode: Planner failed due to blocked Task#ask - Aborting task ${this.taskId}`,
+						)
 					// Abort the task immediately - do not fall through to normal execution
 					await this.abortTask()
 					return
 				}
-				
+
 				// Cancel all spawned child tasks to prevent them from continuing to make API calls
 				await this.cancelAllChildTasks()
-				
+
 				// Clean up worktrees and parent transaction
 				const provider = this.providerRef.deref()
 				const parentTxId = provider?.context?.globalState.get<string>("roo.current_tx_id")
@@ -2143,14 +2382,15 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 					try {
 						const { PlanExecutor } = await import("../planner/PlanExecutor")
 						const executor = new PlanExecutor(this)
-						
+
 						// Rollback all sub-transaction worktrees to prevent orphaned worktrees
 						await executor.rollbackAllSubTransactions(this.plan, parentTxId)
-						
+
 						// Clean up parent transaction
 						await (executor as any).cleanupParentTransaction(parentTxId)
 					} catch (cleanupError) {
-						const cleanupErrorMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+						const cleanupErrorMessage =
+							cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
 						provider?.log(`[Task#startTask] Error during planner cleanup: ${cleanupErrorMessage}`)
 						// Continue - don't block fallthrough to normal execution
 					}
@@ -2164,7 +2404,18 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 						// Ignore cleanup errors
 					}
 				}
-				// Fall through to normal execution
+				// Do NOT fall through to normal execution — the LLM already
+				// generated a plan JSON which is in the conversation. If normal
+				// mode runs, the LLM sees the plan and immediately calls
+				// attempt_completion, producing a "Task Completed" with zero
+				// actual work.  Instead, report the failure and stop.
+				await this.say(
+					"text",
+					`⚠ Planner mode failed: ${errorMessage}\n\nCheck the Roo Code output panel for details. ` +
+						`Common causes:\n- Control-Plane not running (check roo.cpPort)\n- CP port stale (reload window)\n- Sub-transaction creation failed`,
+				)
+				this.finishedSuccessfully = true // stop the main loop
+				return
 			}
 		}
 
@@ -2178,9 +2429,7 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 		}
 
 		// Task starting
-		const taskText = contextPrefix 
-			? `${contextPrefix}\n\n<task>\n${task}\n</task>`
-			: `<task>\n${task}\n</task>`
+		const taskText = contextPrefix ? `${contextPrefix}\n\n<task>\n${task}\n</task>` : `<task>\n${task}\n</task>`
 
 		await this.initiateTaskLoop([
 			{
@@ -2490,6 +2739,9 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 	public dispose(): void {
 		console.log(`[Task#dispose] disposing task ${this.taskId}.${this.instanceId}`)
 
+		// Clean up condense guard for this task
+		clearCondenseGuard(this.taskId)
+
 		// Dispose message queue and remove event listeners.
 		try {
 			if (this.messageQueueStateChangedHandler) {
@@ -2591,8 +2843,19 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 			this.childTaskId = newTask.taskId // Backward compatibility
 			this.childTaskIds.push(newTask.taskId) // Add to array
 
-			await provider.handleModeSwitch(mode) // Set child's mode.
-			await delay(500) // Allow mode change to take effect.
+			// Check if the requested mode has tool groups. If not (e.g., orchestrator with groups: []),
+			// force "code" mode so the subtask has tools to actually execute work.
+			// This allows orchestrator to delegate to modes like "architect" or "debug" that have tools,
+			// while preventing subtasks from inheriting orchestrator's empty tool set.
+			const state = await provider.getState()
+			const targetMode = getModeBySlug(mode, state?.customModes)
+			const effectiveMode = targetMode && targetMode.groups.length > 0 ? mode : "code"
+
+			// Wait for task mode initialization to complete, then set the effective mode directly.
+			// This avoids race conditions and ensures the child task uses the correct mode from the start.
+			// Don't use handleModeSwitch here as it affects provider state and causes timing issues.
+			await newTask.taskModeReady
+			newTask._taskMode = effectiveMode
 
 			this.emit(RooCodeEventName.TaskPaused, this.taskId)
 			this.emit(RooCodeEventName.TaskSpawned, newTask.taskId)
@@ -2602,30 +2865,31 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 	}
 
 	// Used when a sub-task is launched and the parent task is waiting for it to
-	// finish.
-	// TBD: Add a timeout to prevent infinite waiting.
+	// finish. Has a 30-minute timeout to prevent infinite waiting.
 	public async waitForSubtask() {
-		await new Promise<void>((resolve) => {
-			this.pauseInterval = setInterval(() => {
-				if (!this.isPaused) {
-					clearInterval(this.pauseInterval)
-					this.pauseInterval = undefined
-					resolve()
-				}
-			}, 1000)
+		// Clear any pre-existing interval
+		if (this.pauseInterval) {
+			clearInterval(this.pauseInterval)
+			this.pauseInterval = undefined
+		}
+
+		await pWaitFor(() => !this.isPaused, { interval: 1000, timeout: 1_800_000 }).catch(() => {
+			const provider = this.providerRef.deref()
+			provider?.log(`[Task#${this.taskId}] waitForSubtask timed out after 30 minutes`)
+			this.isPaused = false
 		})
 	}
 
 	public async completeSubtask(lastMessage: string) {
 		const provider = this.providerRef.deref()
 		const isE2EMode = !!(process.env.TEST_TORTURE_REPO || process.env.TEST_TORTURE_REPO_WORKSPACE)
-		
+
 		if (isE2EMode) {
 			provider?.log(
-				`[Task#completeSubtask] E2E mode: Completing subtask and resuming parent task - Task: ${this.taskId}, Subtask result length: ${lastMessage.length}`
+				`[Task#completeSubtask] E2E mode: Completing subtask and resuming parent task - Task: ${this.taskId}, Subtask result length: ${lastMessage.length}`,
 			)
 		}
-		
+
 		this.isPaused = false
 		this.childTaskId = undefined // Backward compatibility
 		// Note: childTaskIds array is managed by removeChildTaskId() method
@@ -2646,10 +2910,10 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 			// Set skipPrevResponseIdOnce to ensure the next API call sends the full conversation
 			// including the subtask result, not just from before the subtask was created
 			this.skipPrevResponseIdOnce = true
-			
+
 			if (isE2EMode) {
 				provider?.log(
-					`[Task#completeSubtask] E2E mode: Subtask result added to conversation, parent task should resume - Task: ${this.taskId}`
+					`[Task#completeSubtask] E2E mode: Subtask result added to conversation, parent task should resume - Task: ${this.taskId}`,
 				)
 			}
 		} catch (error) {
@@ -2671,7 +2935,9 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 		}
 
 		const childTaskIdsToCancel = [...this.childTaskIds] // Copy array to avoid modification during iteration
-		provider.log(`[Task#cancelAllChildTasks] Cancelling ${childTaskIdsToCancel.length} child tasks due to planner failure`)
+		provider.log(
+			`[Task#cancelAllChildTasks] Cancelling ${childTaskIdsToCancel.length} child tasks due to planner failure`,
+		)
 
 		// Cancel each child task
 		for (const childTaskId of childTaskIdsToCancel) {
@@ -2708,7 +2974,7 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 	/**
 	 * Comprehensive tool call repairer - fixes ALL common mistakes automatically
 	 * This ensures deterministic, error-free tool execution for research-grade systems.
-	 * 
+	 *
 	 * Repairs:
 	 * - Function-call syntax: read_file(["path"]) → <read_file><args>...</args></read_file>
 	 * - Wrong case: <ReadFile> → <read_file>
@@ -2719,17 +2985,17 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 		// Use dynamic import to avoid circular dependencies and ensure proper module loading
 		const { repairToolCalls: repair } = require("../assistant-message/toolCallRepairer")
 		const result = repair(text)
-		
+
 		// Log repairs for debugging
 		if (result.repaired && result.repairs.length > 0) {
 			const provider = this.providerRef.deref()
 			if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
 				provider.log(
-					`[Task#${this.taskId}] Tool call repairs applied:\n${result.repairs.map((r: string) => `  - ${r}`).join("\n")}`
+					`[Task#${this.taskId}] Tool call repairs applied:\n${result.repairs.map((r: string) => `  - ${r}`).join("\n")}`,
 				)
 			}
 		}
-		
+
 		return result.text
 	}
 
@@ -2745,66 +3011,52 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 	private enhanceSubtaskPrompt(
 		prompt: string,
 		agentType?: string,
-		fileTargetsFromSteps?: string[]
+		fileTargetsFromSteps?: string[],
+		worktreePath?: string,
 	): string {
 		let enhancedPrompt = prompt || ""
-		
-		// ===== ALWAYS ADD CRITICAL TOOL USAGE INSTRUCTIONS (UNCONDITIONAL) =====
-		// This ensures models NEVER ask users for information they can get from tools
-		const criticalToolInstructions = `\n\n⚠️⚠️⚠️ CRITICAL INSTRUCTIONS FOR THIS SUBTASK ⚠️⚠️⚠️
 
-YOU MUST USE TOOLS - DO NOT ASK THE USER FOR INFORMATION:
+		// If a worktree path is provided, tell the agent to operate exclusively inside it
+		if (worktreePath) {
+			enhancedPrompt = `[WORKSPACE DIRECTORY: ${worktreePath}]\nAll file operations (read_file, write_to_file, execute_command, etc.) MUST use paths relative to this workspace directory. Do NOT read, write, or execute anything outside this directory.\n\n${enhancedPrompt}`
+		}
 
-1. **ALWAYS use tools to gather information** - You have access to read_file, search_files, list_files, codebase_search, and execute_command tools.
+		// Tool-use instructions — must be explicit enough for models that expect formal function-calling
+		const criticalToolInstructions = `\n\nIMPORTANT: You have full tool access. Start by reading files with read_file, then make changes with write_to_file, and run commands with execute_command. Use XML format:
+<read_file>
+<args>
+  <file>
+    <path>path/to/file</path>
+  </file>
+</args>
+</read_file>
+Do NOT ask the user for permission or file contents. Do NOT delegate via new_task or switch_mode — complete the work directly.`
 
-2. **NEVER ask the user to:**
-   - Provide file contents or paste files
-   - Use "Show file" commands
-   - Manually share code or information
-   - Read files for you
-
-3. **If you need file contents:**
-   - Use read_file tool immediately if you know the file path
-   - If you don't know the file path, use search_files or list_files first
-   - **CRITICAL for search_files:** ALWAYS provide the <path> parameter - use "." for workspace root if unsure
-   - Example: <search_files><path>.</path><regex>.*</regex><file_pattern>*test*.py</file_pattern></search_files>
-   - Then use read_file with the discovered paths
-
-4. **Tool format requirement:**
-   - MUST use XML format: <read_file><args><file><path>file.py</path></file></args></read_file>
-   - MUST use XML format: <search_files><path>.</path><regex>pattern</regex></search_files>
-   - NEVER use function-call syntax: read_file(["file.py"]) ❌ or search_files({path: "src"}) ❌
-
-5. **Your first action should be:** Use the appropriate tool (read_file, search_files, etc.) to gather the information you need, then proceed with the task.
-
-REMEMBER: You are an autonomous agent. Use your tools. Do not ask the user for information you can obtain yourself.`
-		
-		// If file targets are provided from steps, add them explicitly with strong instruction
+		// If file targets are provided from steps, add them as helpful context
 		if (fileTargetsFromSteps && fileTargetsFromSteps.length > 0) {
-			enhancedPrompt = `${enhancedPrompt}\n\n📁 FILES TO WORK WITH (from plan steps):\n${fileTargetsFromSteps.map((f: string) => `- ${f}`).join("\n")}\n\n🚨 ACTION REQUIRED: You MUST use read_file tool NOW to read these files. Do NOT ask the user. Start immediately with:\n<read_file>\n<args>\n${fileTargetsFromSteps.slice(0, 5).map(f => `  <file>\n    <path>${f}</path>\n  </file>`).join("\n")}\n</args>\n</read_file>`
+			enhancedPrompt = `${enhancedPrompt}\n\nRelevant files (from plan steps):\n${fileTargetsFromSteps.map((f: string) => `- ${f}`).join("\n")}`
 		}
-		
+
 		// Check if prompt contains file-like paths (has / or common extensions)
-		const hasFilePaths = /\/|\.(py|ts|js|tsx|jsx|java|go|rs|cpp|c|h|md|txt|json|yaml|yml|xml|html|css)$/i.test(enhancedPrompt)
-		
+		const hasFilePaths = /\/|\.(py|ts|js|tsx|jsx|java|go|rs|cpp|c|h|md|txt|json|yaml|yml|xml|html|css)$/i.test(
+			enhancedPrompt,
+		)
+
 		// Extract file paths from the prompt using comprehensive pattern
-		const filePathPattern = /(?:^|\s)(?:\.\/)?[\w\/\-\.]+\.(?:py|ts|js|tsx|jsx|java|go|rs|cpp|c|h|md|txt|json|yaml|yml|xml|html|css|rb|php|swift|kt|scala|r|m|mm|pl|sh|bat|ps1)(?:\s|$)/gi
-		const extractedFilePaths = (enhancedPrompt.match(filePathPattern) || []).map(p => p.trim()).filter((p, i, arr) => arr.indexOf(p) === i) // dedupe
-		
-		// If file paths are mentioned in the prompt, add STRONG instruction to use read_file
+		const filePathPattern =
+			/(?:^|\s)(?:\.\/)?[\w\/\-\.]+\.(?:py|ts|js|tsx|jsx|java|go|rs|cpp|c|h|md|txt|json|yaml|yml|xml|html|css|rb|php|swift|kt|scala|r|m|mm|pl|sh|bat|ps1)(?:\s|$)/gi
+		const extractedFilePaths = (enhancedPrompt.match(filePathPattern) || [])
+			.map((p) => p.trim())
+			.filter((p, i, arr) => arr.indexOf(p) === i) // dedupe
+
+		// If file paths are mentioned, note them naturally
 		if (hasFilePaths && extractedFilePaths.length > 0) {
-			enhancedPrompt = `${enhancedPrompt}\n\n📄 FILES DETECTED IN TASK:\n${extractedFilePaths.map(f => `- ${f}`).join("\n")}\n\n🚨 IMMEDIATE ACTION: Use read_file tool NOW to read these files. Example:\n<read_file>\n<args>\n${extractedFilePaths.slice(0, 5).map(f => `  <file>\n    <path>${f}</path>\n  </file>`).join("\n")}\n</args>\n</read_file>\n\nIf there are more than 5 files, make additional read_file calls.`
-		} else if (!hasFilePaths) {
-			// If no file paths detected, add instruction to search for files
-			const searchInstruction = agentType === "reviewer" || enhancedPrompt.toLowerCase().includes("review")
-				? `\n\n🔍 NO FILE PATHS DETECTED - SEARCH REQUIRED:\nBefore starting, use search_files to find the relevant files. IMPORTANT: search_files REQUIRES a <path> parameter - use "." for workspace root if unsure. Example:\n<search_files>\n<path>.</path>\n<regex>.*</regex>\n<file_pattern>*test*.py</file_pattern>\n</search_files>\nThen use read_file to examine the found files. Do NOT ask the user.`
-				: `\n\n🔍 INFORMATION GATHERING:\nIf this task requires file access, use search_files, list_files, or codebase_search to find relevant files, then use read_file to examine them. CRITICAL: When using search_files, ALWAYS provide the <path> parameter - use "." for workspace root if unsure. Do NOT ask the user for file contents.`
-			enhancedPrompt = `${enhancedPrompt}${searchInstruction}`
+			enhancedPrompt = `${enhancedPrompt}\n\nFiles mentioned:\n${extractedFilePaths.map((f) => `- ${f}`).join("\n")}`
 		}
-		
+
 		// Always append the critical instructions at the end (most prominent position)
 		enhancedPrompt = `${enhancedPrompt}${criticalToolInstructions}`
-		
+
 		return enhancedPrompt
 	}
 
@@ -2813,6 +3065,7 @@ REMEMBER: You are an autonomous agent. Use your tools. Do not ask the user for i
 	 */
 	public async spawnChildTasks(plan: {
 		subTransactions: import("@roo-code/types").SubTransaction[]
+		worktreePaths?: Map<string, string> // subTxId → worktree path (pre-created)
 	}): Promise<Task[]> {
 		const provider = this.providerRef.deref()
 		if (!provider) {
@@ -2826,62 +3079,89 @@ REMEMBER: You are an autonomous agent. Use your tools. Do not ask the user for i
 				let fileTargetsFromSteps: string[] | undefined
 				if (subTx.steps && subTx.steps.length > 0) {
 					fileTargetsFromSteps = subTx.steps
-						.filter((step: any) => step.target && (step.type === "edit_file" || step.type === "read_file" || step.type === "review_file"))
+						.filter(
+							(step: any) =>
+								step.target &&
+								(step.type === "write_to_file" ||
+									step.type === "edit_file" ||
+									step.type === "read_file" ||
+									step.type === "review_file"),
+						)
 						.map((step: any) => step.target)
 						.filter((target: string, index: number, self: string[]) => self.indexOf(target) === index) // dedupe
 				}
-				
+
+				// Resolve the worktree path for this sub-transaction (if pre-created)
+				const worktreePath = plan.worktreePaths?.get(subTx.id)
+
 				// VALIDATION: Check that file targets from plan steps actually exist
-				// This prevents LLM hallucinations where the planner references non-existent files
+				// Validate against the worktree path if available, otherwise parent's cwd
 				if (fileTargetsFromSteps && fileTargetsFromSteps.length > 0) {
-					const { existing, nonExistent } = await validateFilePaths(fileTargetsFromSteps, this.cwd)
-					
+					const { existing, nonExistent } = await validateFilePaths(
+						fileTargetsFromSteps,
+						worktreePath || this.cwd,
+					)
+
 					if (nonExistent.length > 0) {
 						provider.log(
-							`[Task.spawnChildTasks] Warning: Sub-transaction ${subTx.id} references non-existent files: ${nonExistent.join(", ")}`
+							`[Task.spawnChildTasks] Warning: Sub-transaction ${subTx.id} references non-existent files: ${nonExistent.join(", ")}`,
 						)
 						// Filter out non-existent files from targets
 						// The subtask will need to use search_files to find the right files
 						fileTargetsFromSteps = existing.length > 0 ? existing : undefined
 					}
 				}
-				
+
 				// Also validate file paths mentioned in the prompt itself
 				const promptPaths = extractFilePathsFromText(subTx.prompt || "")
 				if (promptPaths.length > 0) {
-					const { nonExistent } = await validateFilePaths(promptPaths, this.cwd)
+					const { nonExistent } = await validateFilePaths(promptPaths, worktreePath || this.cwd)
 					if (nonExistent.length > 0) {
 						provider.log(
-							`[Task.spawnChildTasks] Warning: Sub-transaction ${subTx.id} prompt references non-existent files: ${nonExistent.join(", ")}`
+							`[Task.spawnChildTasks] Warning: Sub-transaction ${subTx.id} prompt references non-existent files: ${nonExistent.join(", ")}`,
 						)
 						// We don't block the task, but we'll add a warning to the prompt
 					}
 				}
-				
+
 				// Store original prompt for user display (without internal instructions)
 				const originalPrompt = subTx.prompt || ""
-				
+
 				// Enhance prompt for LLM (with internal tool usage instructions)
 				const enhancedPrompt = this.enhanceSubtaskPrompt(
 					originalPrompt,
 					subTx.agentType,
-					fileTargetsFromSteps
+					fileTargetsFromSteps,
+					worktreePath,
 				)
-				
+
 				// Create task with enhanced prompt (for LLM execution)
 				// The enhanced prompt includes tool usage instructions that prevent the model from asking for files
+				// If a worktree path was pre-created, pass it as workspacePath so the task's cwd is
+				// correct from construction time (before startTask fires).
 				const child = await provider.createTask(
 					enhancedPrompt, // LLM uses this (with tool instructions)
 					undefined,
 					this, // parent
 					{
 						initialTodos: [],
-					},
+						...(worktreePath && { workspacePath: worktreePath }),
+					} as any,
 				)
 				if (child) {
 					// Set agent type and sub-transaction ID
 					child.agentType = subTx.agentType
 					child.subTransactionId = subTx.id
+
+					// CRITICAL: Override mode for planner-spawned subtasks.
+					// The child inherits the parent's mode via initializeTaskMode()
+					// which reads provider.getState().mode. If the parent is in
+					// "orchestrator" mode (groups: []), children would have NO tools
+					// and can't do any work. Force children to "code" mode which has
+					// all tool groups needed for implementation.
+					await child.taskModeReady
+					child._taskMode = "code"
+
 					this.childTaskIds.push(child.taskId)
 					children.push(child)
 				}
@@ -2902,9 +3182,16 @@ REMEMBER: You are an autonomous agent. Use your tools. Do not ask the user for i
 	}
 
 	/**
-	 * Wait for specific child tasks to complete
+	 * Wait for specific child tasks to complete.
+	 * @param childIds - Task IDs to wait for
+	 * @param childRefs - Optional direct task object references (bypasses clineStack lookup).
+	 *                     Use this when the caller already holds references to avoid race conditions
+	 *                     where finishSubTask pops the child from the stack before this lookup runs.
 	 */
-	public async waitForChildren(childIds: string[]): Promise<Map<string, import("../planner/types").ChildResult>> {
+	public async waitForChildren(
+		childIds: string[],
+		childRefs?: Map<string, Task>,
+	): Promise<Map<string, import("../planner/types").ChildResult>> {
 		const results = new Map<string, import("../planner/types").ChildResult>()
 		const provider = this.providerRef.deref()
 		if (!provider) {
@@ -2916,30 +3203,26 @@ REMEMBER: You are an autonomous agent. Use your tools. Do not ask the user for i
 		await Promise.all(
 			childIds.map(async (childId) => {
 				const startTime = Date.now()
-				const child = provider.getTaskById(childId)
+				// Prefer direct reference (immune to clineStack pop race) over ID lookup
+				const child = childRefs?.get(childId) ?? provider.getTaskById(childId)
 				if (!child) {
+					provider.log(
+						`[Task#waitForChildren] Child task ${childId} not found in stack or refs - ` +
+							`it may have already completed and been popped from clineStack`,
+					)
 					results.set(childId, { success: false, error: "Child task not found" })
 					return
 				}
 
-				// Wait for task to start if it hasn't yet
-				if (child.taskStatus === TaskStatus.None) {
-					await delay(1000) // Give task time to start
-					// Re-check status
-					if (child.taskStatus === TaskStatus.None) {
-						// Task never started, mark as failed
-						results.set(childId, { success: false, error: "Task never started" })
-						return
-					}
-				}
-
 				// Wait for child to complete (check status) - handle all active states
+				// Also exit if finishedSuccessfully is set (subtask completed via finishSubTask)
 				while (
 					(child.taskStatus === TaskStatus.Running ||
 						child.taskStatus === TaskStatus.Interactive ||
 						child.taskStatus === TaskStatus.Resumable) &&
 					!child.abandoned &&
 					!child.abort &&
+					!child.finishedSuccessfully &&
 					Date.now() - startTime < TIMEOUT_MS
 				) {
 					await delay(500)
@@ -2957,15 +3240,30 @@ REMEMBER: You are an autonomous agent. Use your tools. Do not ask the user for i
 				}
 
 				// Check if task completed successfully
-				// Note: TaskStatus.None means task never started, Idle means completed normally
-				const success = !child.abandoned && !child.abort && child.taskStatus === TaskStatus.Idle
+				// finishedSuccessfully is the authoritative signal from finishSubTask — it is
+				// set BEFORE the child is popped from the stack, so it's always reliable.
+				// TaskStatus.Idle is a secondary indicator (may not be set for subtasks that
+				// exit through finishSubTask, since their idleAsk is never assigned).
+				const success =
+					child.finishedSuccessfully ||
+					(!child.abandoned && !child.abort && child.taskStatus === TaskStatus.Idle)
+
+				if (!success) {
+					provider.log(
+						`[Task#waitForChildren] Child ${childId} evaluated as FAILED: ` +
+							`finishedSuccessfully=${child.finishedSuccessfully}, abandoned=${child.abandoned}, ` +
+							`abort=${child.abort}, taskStatus=${child.taskStatus}`,
+					)
+				}
 
 				// E2E mode: If child aborted due to blocked Task#ask, immediately abort parent
 				if (child.e2eBlockedAskAbort) {
 					const isE2EMode = !!(process.env.TEST_TORTURE_REPO || process.env.TEST_TORTURE_REPO_WORKSPACE)
 					if (isE2EMode) {
 						const errorMessage = `Blocked Task#ask in e2e mode: ${child.e2eBlockedAskAbort.type} (child task)`
-						provider.log(`[Task#waitForChildren] E2E mode: ${errorMessage} - Aborting parent task ${this.taskId}`)
+						provider.log(
+							`[Task#waitForChildren] E2E mode: ${errorMessage} - Aborting parent task ${this.taskId}`,
+						)
 						// Abort parent task immediately
 						await this.abortTask()
 						throw new Error(errorMessage)
@@ -3043,7 +3341,7 @@ REMEMBER: You are an autonomous agent. Use your tools. Do not ask the user for i
 
 		this.emit(RooCodeEventName.TaskStarted)
 
-		while (!this.abort) {
+		while (!this.abort && !this.finishedSuccessfully) {
 			const didEndLoop = await this.recursivelyMakeClineRequests(nextUserContent, includeFileDetails)
 			includeFileDetails = false // We only need file details the first time.
 
@@ -3087,6 +3385,11 @@ REMEMBER: You are an autonomous agent. Use your tools. Do not ask the user for i
 
 			if (this.abort) {
 				throw new Error(`[RooCode#recursivelyMakeRooRequests] task ${this.taskId}.${this.instanceId} aborted`)
+			}
+
+			// Subtask completed via finishSubTask — stop the loop cleanly (no throw)
+			if (this.finishedSuccessfully) {
+				return true
 			}
 
 			if (this.consecutiveMistakeLimit > 0 && this.consecutiveMistakeCount >= this.consecutiveMistakeLimit) {
@@ -3175,11 +3478,11 @@ REMEMBER: You are an autonomous agent. Use your tools. Do not ask the user for i
 			// Add environment details as its own text block, separate from tool
 			// results.
 			let finalUserContent = [...parsedUserContent, { type: "text" as const, text: environmentDetails }]
-			
+
 			// Fix #2: Inject hard constraint message before next LLM call if validation error occurred
 			if (this.forceConstraintNextTurn && this.pendingValidationError) {
 				let constraintMessage: string
-				
+
 				// Fix #3: Enhanced constraint for consecutive read_file validation errors
 				if (this.pendingValidationError.tool === "read_file") {
 					if (this.consecutiveReadFileValidationErrors >= 2) {
@@ -3197,13 +3500,10 @@ Only AFTER you have a valid file path from the discovery tool results should you
 				} else {
 					constraintMessage = `SYSTEM: Tool call invalid last turn. ${this.pendingValidationError.message}`
 				}
-				
+
 				// Prepend constraint as high-priority system message
-				finalUserContent = [
-					{ type: "text" as const, text: constraintMessage },
-					...finalUserContent,
-				]
-				
+				finalUserContent = [{ type: "text" as const, text: constraintMessage }, ...finalUserContent]
+
 				// Clear flag after injection (one-turn only)
 				this.forceConstraintNextTurn = false
 				this.pendingValidationError = null
@@ -3333,7 +3633,7 @@ Only AFTER you have a valid file path from the discovery tool results should you
 							const provider = this.providerRef.deref()
 							const modelId = this.api.getModel().id
 							provider?.log(
-								`[LLM] Response chunk received - Provider: ${this.apiConfiguration.apiProvider}, Model: ${modelId}, Task: ${this.taskId}, Chunk #${chunkCount}, Type: ${chunk.type}`
+								`[LLM] Response chunk received - Provider: ${this.apiConfiguration.apiProvider}, Model: ${modelId}, Task: ${this.taskId}, Chunk #${chunkCount}, Type: ${chunk.type}`,
 							)
 						}
 
@@ -3368,99 +3668,112 @@ Only AFTER you have a valid file path from the discovery tool results should you
 									pendingGroundingSources.push(...chunk.sources)
 								}
 								break
-			case "text": {
-				assistantMessage += chunk.text
+							case "text": {
+								assistantMessage += chunk.text
 
-				// Logging: Track tool protocol and model for debugging
-				const modelId = getModelId(this.apiConfiguration)
-				const apiProtocol = getApiProtocol(this.apiConfiguration.apiProvider, modelId)
-				const provider = await this.providerRef.deref()
-				
-				// Fix #4: Comprehensive audit logging - Raw model output
-				if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
-					provider.log(
-						`[Task#${this.taskId}] [AUDIT:RAW] Raw model output chunk - Provider: ${this.apiConfiguration.apiProvider}, Model: ${modelId}, Protocol: ${apiProtocol}, Chunk length: ${chunk.text.length}`,
-					)
-					if (chunk.text.length < 500) {
-						provider.log(`[Task#${this.taskId}] [AUDIT:RAW] Content: ${JSON.stringify(chunk.text)}`)
-					}
-				}
+								// Logging: Track tool protocol and model for debugging
+								const modelId = getModelId(this.apiConfiguration)
+								const apiProtocol = getApiProtocol(this.apiConfiguration.apiProvider, modelId)
+								const provider = await this.providerRef.deref()
 
-				// Pre-process: Comprehensive tool call repairer
-				// Automatically fixes ALL common mistakes (function-call syntax, wrong case, missing tags, etc.)
-				// This ensures deterministic, error-free tool execution
-				let processedChunk = this.repairToolCalls(chunk.text)
-				
-				// Fix #4: Audit logging - Post-repair output
-				if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION && processedChunk !== chunk.text) {
-					provider.log(
-						`[Task#${this.taskId}] [AUDIT:REPAIRED] Tool call repairer modified output. Original length: ${chunk.text.length}, Repaired length: ${processedChunk.length}`,
-					)
-					if (processedChunk.length < 500) {
-						provider.log(`[Task#${this.taskId}] [AUDIT:REPAIRED] Repaired content: ${JSON.stringify(processedChunk)}`)
-					}
-				}
-				
-				// Parse raw assistant message chunk into content blocks.
-				const prevLength = this.assistantMessageContent.length
-				this.assistantMessageContent = this.assistantMessageParser.processChunk(processedChunk)
-				
-				// Fix #4: Audit logging - Parsed tool calls
-				if (this.assistantMessageContent.length > prevLength) {
-					const newBlocks = this.assistantMessageContent.slice(prevLength)
-					const toolCalls = newBlocks.filter((b) => b.type === "tool_use")
-					if (toolCalls.length > 0 && provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
-						provider.log(
-							`[Task#${this.taskId}] [AUDIT:PARSED] Parsed ${toolCalls.length} tool call(s): ${toolCalls.map((b) => `${b.name}(${JSON.stringify(b.params)})`).join(", ")}`,
-						)
-					}
-				}
-				
-				// Fix #2 & #5: Check for validation errors during streaming
-				const validationErrors = this.assistantMessageParser.getValidationErrors()
-				if (validationErrors.length > 0 && !this.pendingValidationError) {
-					this.pendingValidationError = validationErrors[0]
-					this.forceConstraintNextTurn = true
-				}
+								// Fix #4: Comprehensive audit logging - Raw model output
+								if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
+									provider.log(
+										`[Task#${this.taskId}] [AUDIT:RAW] Raw model output chunk - Provider: ${this.apiConfiguration.apiProvider}, Model: ${modelId}, Protocol: ${apiProtocol}, Chunk length: ${chunk.text.length}`,
+									)
+									if (chunk.text.length < 500) {
+										provider.log(
+											`[Task#${this.taskId}] [AUDIT:RAW] Content: ${JSON.stringify(chunk.text)}`,
+										)
+									}
+								}
 
-				// Fix #2: Detect malformed XML tool tags for OpenAI providers
-				// If we're using OpenAI protocol and see XML-like tags that look like tool calls
-				// but aren't properly parsed, warn and potentially reject them
-				if (apiProtocol === "openai" && chunk.text) {
-					// Check for XML tags that look like tool calls but might be malformed
-					const xmlTagPattern = /<(\w+)>/g
-					const matches = [...chunk.text.matchAll(xmlTagPattern)]
-					const potentialToolNames = matches.map((m) => m[1])
-					const knownToolNames = ["bash", "command", "execute_command", "read_file", "write_to_file"]
-					const suspiciousTags = potentialToolNames.filter(
-						(tag) => knownToolNames.some((known) => tag.toLowerCase().includes(known.toLowerCase())) && !toolNames.includes(tag as any),
-					)
+								// Pre-process: Comprehensive tool call repairer
+								// Automatically fixes ALL common mistakes (function-call syntax, wrong case, missing tags, etc.)
+								// This ensures deterministic, error-free tool execution
+								let processedChunk = this.repairToolCalls(chunk.text)
 
-					if (suspiciousTags.length > 0 && provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
-						provider.log(
-							`[Task#${this.taskId}] WARNING: Detected suspicious XML-like tags that might be malformed tool calls: ${suspiciousTags.join(", ")}. These will be parsed as text, not executed as tools.`,
-						)
-					}
-				}
+								// Fix #4: Audit logging - Post-repair output
+								if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION && processedChunk !== chunk.text) {
+									provider.log(
+										`[Task#${this.taskId}] [AUDIT:REPAIRED] Tool call repairer modified output. Original length: ${chunk.text.length}, Repaired length: ${processedChunk.length}`,
+									)
+									if (processedChunk.length < 500) {
+										provider.log(
+											`[Task#${this.taskId}] [AUDIT:REPAIRED] Repaired content: ${JSON.stringify(processedChunk)}`,
+										)
+									}
+								}
 
-				// Logging: Track tool call detection
-				if (this.assistantMessageContent.length > prevLength) {
-					const newBlocks = this.assistantMessageContent.slice(prevLength)
-					const toolCalls = newBlocks.filter((b) => b.type === "tool_use")
-					if (toolCalls.length > 0 && provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
-						provider.log(
-							`[Task#${this.taskId}] Detected ${toolCalls.length} tool call(s) via XML parsing: ${toolCalls.map((b) => b.name).join(", ")}`,
-						)
-					}
-					// New content we need to present, reset to
-					// false in case previous content set this to true.
-					this.userMessageContentReady = false
-				}
+								// Parse raw assistant message chunk into content blocks.
+								const prevLength = this.assistantMessageContent.length
+								this.assistantMessageContent = this.assistantMessageParser.processChunk(processedChunk)
 
-				// Present content to user.
-				presentAssistantMessage(this)
-				break
-			}
+								// Fix #4: Audit logging - Parsed tool calls
+								if (this.assistantMessageContent.length > prevLength) {
+									const newBlocks = this.assistantMessageContent.slice(prevLength)
+									const toolCalls = newBlocks.filter((b) => b.type === "tool_use")
+									if (toolCalls.length > 0 && provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
+										provider.log(
+											`[Task#${this.taskId}] [AUDIT:PARSED] Parsed ${toolCalls.length} tool call(s): ${toolCalls.map((b) => `${b.name}(${JSON.stringify(b.params)})`).join(", ")}`,
+										)
+									}
+								}
+
+								// Fix #2 & #5: Check for validation errors during streaming
+								const validationErrors = this.assistantMessageParser.getValidationErrors()
+								if (validationErrors.length > 0 && !this.pendingValidationError) {
+									this.pendingValidationError = validationErrors[0]
+									this.forceConstraintNextTurn = true
+								}
+
+								// Fix #2: Detect malformed XML tool tags for OpenAI providers
+								// If we're using OpenAI protocol and see XML-like tags that look like tool calls
+								// but aren't properly parsed, warn and potentially reject them
+								if (apiProtocol === "openai" && chunk.text) {
+									// Check for XML tags that look like tool calls but might be malformed
+									const xmlTagPattern = /<(\w+)>/g
+									const matches = [...chunk.text.matchAll(xmlTagPattern)]
+									const potentialToolNames = matches.map((m) => m[1])
+									const knownToolNames = [
+										"bash",
+										"command",
+										"execute_command",
+										"read_file",
+										"write_to_file",
+									]
+									const suspiciousTags = potentialToolNames.filter(
+										(tag) =>
+											knownToolNames.some((known) =>
+												tag.toLowerCase().includes(known.toLowerCase()),
+											) && !toolNames.includes(tag as any),
+									)
+
+									if (suspiciousTags.length > 0 && provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
+										provider.log(
+											`[Task#${this.taskId}] WARNING: Detected suspicious XML-like tags that might be malformed tool calls: ${suspiciousTags.join(", ")}. These will be parsed as text, not executed as tools.`,
+										)
+									}
+								}
+
+								// Logging: Track tool call detection
+								if (this.assistantMessageContent.length > prevLength) {
+									const newBlocks = this.assistantMessageContent.slice(prevLength)
+									const toolCalls = newBlocks.filter((b) => b.type === "tool_use")
+									if (toolCalls.length > 0 && provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
+										provider.log(
+											`[Task#${this.taskId}] Detected ${toolCalls.length} tool call(s) via XML parsing: ${toolCalls.map((b) => b.name).join(", ")}`,
+										)
+									}
+									// New content we need to present, reset to
+									// false in case previous content set this to true.
+									this.userMessageContentReady = false
+								}
+
+								// Present content to user.
+								presentAssistantMessage(this)
+								break
+							}
 						}
 
 						if (this.abort) {
@@ -3663,11 +3976,15 @@ Only AFTER you have a valid file path from the discovery tool results should you
 						// cancel task.
 
 						// Determine cancellation reason BEFORE aborting to ensure correct persistence
-						const cancelReason: ClineApiReqCancelReason = this.abort ? "user_cancelled" : "streaming_failed"
+						// Only treat as "user_cancelled" if explicitly set (via ClineProvider.cancelTask)
+						// Otherwise it's a streaming failure (timeout, auth error, billing error, etc.)
+						const cancelReason: ClineApiReqCancelReason =
+							this.abortReason === "user_cancelled" ? "user_cancelled" : "streaming_failed"
 
-						const streamingFailedMessage = this.abort
-							? undefined
-							: (error.message ?? JSON.stringify(serializeError(error), null, 2))
+						const streamingFailedMessage =
+							this.abortReason === "user_cancelled"
+								? undefined
+								: (error.message ?? JSON.stringify(serializeError(error), null, 2))
 
 						// Persist interruption details first to both UI and API histories
 						await abortStream(cancelReason, streamingFailedMessage)
@@ -3685,7 +4002,7 @@ Only AFTER you have a valid file path from the discovery tool results should you
 					const provider = this.providerRef.deref()
 					const modelId = this.api.getModel().id
 					provider?.log(
-						`[LLM] Stream consumption completed - Provider: ${this.apiConfiguration.apiProvider}, Model: ${modelId}, Task: ${this.taskId}`
+						`[LLM] Stream consumption completed - Provider: ${this.apiConfiguration.apiProvider}, Model: ${modelId}, Task: ${this.taskId}`,
 					)
 				}
 
@@ -3700,7 +4017,7 @@ Only AFTER you have a valid file path from the discovery tool results should you
 				const provider = this.providerRef.deref()
 				const modelId = this.api.getModel().id
 				provider?.log(
-					`[LLM] State machine resumed after LLM call - Provider: ${this.apiConfiguration.apiProvider}, Model: ${modelId}, Task: ${this.taskId}`
+					`[LLM] State machine resumed after LLM call - Provider: ${this.apiConfiguration.apiProvider}, Model: ${modelId}, Task: ${this.taskId}`,
 				)
 
 				// Set any blocks to be complete to allow `presentAssistantMessage`
@@ -3719,7 +4036,7 @@ Only AFTER you have a valid file path from the discovery tool results should you
 				// Now that the stream is complete, finalize any remaining partial content blocks
 				this.assistantMessageParser.finalizeContentBlocks()
 				this.assistantMessageContent = this.assistantMessageParser.getContentBlocks()
-				
+
 				// Fix #2 & #5: Check for validation errors and set flag for hard constraint injection
 				const validationErrors = this.assistantMessageParser.getValidationErrors()
 				if (validationErrors.length > 0) {
@@ -3804,7 +4121,11 @@ Only AFTER you have a valid file path from the discovery tool results should you
 					// 	this.userMessageContentReady = true
 					// }
 
-					await pWaitFor(() => this.userMessageContentReady)
+					await pWaitFor(() => this.userMessageContentReady, { timeout: 300_000 }).catch(() => {
+						const provider = this.providerRef.deref()
+						provider?.log(`[Task#${this.taskId}] userMessageContentReady timed out after 5 minutes`)
+						this.userMessageContentReady = true // Force ready to break the deadlock
+					})
 
 					// If the model did not tool use, then we need to tell it to
 					// either use a tool or attempt_completion.
@@ -3817,44 +4138,54 @@ Only AFTER you have a valid file path from the discovery tool results should you
 							.filter((block) => block.type === "text")
 							.map((block) => (block.type === "text" ? block.content : ""))
 							.join(" ")
-						
+
 						if (fullText.trim().length > 0) {
-							const { repairToolCalls, validateRepairedToolCalls } = require("../assistant-message/toolCallRepairer")
+							const {
+								repairToolCalls,
+								validateRepairedToolCalls,
+							} = require("../assistant-message/toolCallRepairer")
 							const repairResult = repairToolCalls(fullText)
-							
+
 							if (repairResult.repaired && validateRepairedToolCalls(repairResult.text)) {
 								// Repair found valid tool calls - reparse the repaired text
 								const provider = this.providerRef.deref()
 								if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
 									provider.log(
-										`[Task#${this.taskId}] Fallback repair succeeded! Repairs: ${repairResult.repairs.join(", ")}`
+										`[Task#${this.taskId}] Fallback repair succeeded! Repairs: ${repairResult.repairs.join(", ")}`,
 									)
 								}
-								
+
 								// Reset parser and reparse the repaired text
 								this.assistantMessageParser.reset()
-								this.assistantMessageContent = this.assistantMessageParser.processChunk(repairResult.text)
+								this.assistantMessageContent = this.assistantMessageParser.processChunk(
+									repairResult.text,
+								)
 								this.assistantMessageParser.finalizeContentBlocks()
 								this.assistantMessageContent = this.assistantMessageParser.getContentBlocks()
-								
+
 								// Check again if tools were detected after repair
-								const didToolUseAfterRepair = this.assistantMessageContent.some((block) => block.type === "tool_use")
+								const didToolUseAfterRepair = this.assistantMessageContent.some(
+									(block) => block.type === "tool_use",
+								)
 								if (didToolUseAfterRepair) {
 									// Success! Tools were detected after repair - continue normally
 									continue
 								}
 							}
 						}
-						
+
 						// Check if model is giving up with "cannot read" or "technical issues" excuses
 						const textContent = this.assistantMessageContent
 							.filter((block) => block.type === "text")
 							.map((block) => (block.type === "text" ? block.content : ""))
 							.join(" ")
 							.toLowerCase()
-						
-						const isGivingUp = /cannot.*read|unable.*read|technical.*issue|tooling.*issue|cannot.*search|unable.*search|cannot.*file|unable.*file/.test(textContent)
-						
+
+						const isGivingUp =
+							/cannot.*read|unable.*read|technical.*issue|tooling.*issue|cannot.*search|unable.*search|cannot.*file|unable.*file/.test(
+								textContent,
+							)
+
 						if (isGivingUp) {
 							// Model is giving up - force it to use tools with very explicit instructions
 							this.userMessageContent.push({
@@ -3960,7 +4291,7 @@ The tools are available and working. Use them now.`,
 
 		const {
 			browserViewportSize,
-			mode,
+			mode: globalMode,
 			customModes,
 			customModePrompts,
 			customInstructions,
@@ -3972,6 +4303,14 @@ The tools are available and working. Use them now.`,
 			maxReadFileLine,
 			apiConfiguration,
 		} = state ?? {}
+
+		// Use the task's own mode (set per-task for planner children) rather than
+		// the global provider mode.  This ensures subtasks spawned in "code" mode
+		// get code-mode tools even when the global mode is "orchestrator".
+		// For child tasks, _taskMode MUST be "code" (set in initializeTaskMode).
+		// Never fall back to globalMode for children — that would give them
+		// the parent's mode (e.g. orchestrator with zero tools).
+		const mode = this.parentTask ? this._taskMode || "code" : this._taskMode || globalMode
 
 		return await (async () => {
 			const provider = this.providerRef.deref()
@@ -4005,9 +4344,11 @@ The tools are available and working. Use them now.`,
 					newTaskRequireTodos: vscode.workspace
 						.getConfiguration("roo-cline")
 						.get<boolean>("newTaskRequireTodos", false),
+					enableCheckpoints: this.enableCheckpoints,
 				},
 				undefined, // todoList
 				this.api.getModel().id,
+				!!this.parentTask, // isChildTask — blocks new_task/switch_mode tools
 			)
 
 			// If agent type is set, combine agent-specific prompt with base prompt
@@ -4029,7 +4370,7 @@ The tools are available and working. Use them now.`,
 		)
 	}
 
-	private async handleContextWindowExceededError(): Promise<void> {
+	private async handleContextWindowExceededError(error?: unknown, skipApiCondense = false): Promise<void> {
 		const state = await this.providerRef.deref()?.getState()
 		const { profileThresholds = {} } = state ?? {}
 
@@ -4042,50 +4383,87 @@ The tools are available and working. Use them now.`,
 			settings: this.apiConfiguration,
 		})
 
-		const contextWindow = modelInfo.contextWindow
+		// CRITICAL: Cap context window so we actually truncate. Model may have 200k window but TPM/request
+		// limit can be 30k - with raw contextWindow we'd never hit the condense threshold (30k/200k=15%).
+		const contextWindow = Math.min(modelInfo.contextWindow, REQUEST_TOO_LARGE_CAP)
 
 		// Get the current profile ID using the helper method
 		const currentProfileId = this.getCurrentProfileId(state)
 
-		// Log the context window error for debugging
+		// Stage 2: use more aggressive reduction to avoid repeated "request too large" errors
+		const reductionPercent =
+			process.env.TEST_TORTURE_STAGE === "2"
+				? FORCED_CONTEXT_REDUCTION_PERCENT_STAGE2
+				: FORCED_CONTEXT_REDUCTION_PERCENT
+
+		// Proportional reduction: if error says "Requested 30403, Limit 30000", reduce by (30403-30000)/30403 ≈ 1.3%
+		// Add 15% safety buffer since we remove by message count (not exact token count). Cap at 50%.
+		// Ensure we remove at least 2 messages (1 pair) so truncation actually happens.
+		const DEFAULT_LIMIT = 30_000
+		const nums = error ? parseRequestTooLargeNumbers(error) : null
+		const limit = nums?.limit ?? DEFAULT_LIMIT
+		const requested = nums?.requested ?? contextTokens ?? limit + 1
+		const excessFraction = requested > limit ? (requested - limit) / requested : 0.15 // default 15% if unknown
+		const safetyBuffer = 0.15 // 15% buffer (e.g. 1.3% over → remove 16.3%) for safe margin
+		const messages = this.apiConversationHistory
+		const minFracToRemove = messages.length > 2 ? 2 / (messages.length - 1) : 0.15
+		const fracToRemove = Math.max(minFracToRemove, Math.min(0.5, excessFraction + safetyBuffer))
+
 		console.warn(
-			`[Task#${this.taskId}] Context window exceeded for model ${this.api.getModel().id}. ` +
-				`Current tokens: ${contextTokens}, Context window: ${contextWindow}. ` +
-				`Forcing truncation to ${FORCED_CONTEXT_REDUCTION_PERCENT}% of current context.`,
+			`[Task#${this.taskId}] Context/request too large for model ${this.api.getModel().id}. ` +
+				`Requested: ${requested}, Limit: ${limit}. Reducing by ${Math.round(fracToRemove * 100)}% of messages.`,
 		)
 
-		// Force aggressive truncation by keeping only 75% of the conversation history
-		const truncateResult = await truncateConversationIfNeeded({
-			messages: this.apiConversationHistory,
-			totalTokens: contextTokens || 0,
-			maxTokens,
-			contextWindow,
-			apiHandler: this.api,
-			autoCondenseContext: true,
-			autoCondenseContextPercent: FORCED_CONTEXT_REDUCTION_PERCENT,
-			systemPrompt: await this.getSystemPrompt(),
-			taskId: this.taskId,
-			profileThresholds,
-			currentProfileId,
-		})
-
-		if (truncateResult.messages !== this.apiConversationHistory) {
-			await this.overwriteApiConversationHistory(truncateResult.messages)
+		// GUARANTEE reduction: remove proportionally (e.g. 10% over → ~18% of messages; 1.3% over → ~9%)
+		if (messages.length > 2) {
+			let trimmed = truncateConversation(messages, fracToRemove, this.taskId)
+			if (trimmed.length >= messages.length) {
+				trimmed = truncateConversation(messages, 0.2, this.taskId)
+			}
+			if (trimmed.length < messages.length) {
+				await this.overwriteApiConversationHistory(trimmed)
+				this.providerRef
+					.deref()
+					?.log(
+						`[Task#${this.taskId}] Hard truncated ${messages.length - trimmed.length} messages (frac=${fracToRemove.toFixed(2)}) to reduce request size`,
+					)
+			}
 		}
 
-		if (truncateResult.summary) {
-			const { summary, cost, prevContextTokens, newContextTokens = 0 } = truncateResult
-			const contextCondense: ContextCondense = { summary, cost, newContextTokens, prevContextTokens }
-			await this.say(
-				"condense_context",
-				undefined /* text */,
-				undefined /* images */,
-				false /* partial */,
-				undefined /* checkpoint */,
-				undefined /* progressStatus */,
-				{ isNonInteractive: true } /* options */,
-				contextCondense,
-			)
+		// Condense/summarize via API call — skip when called from TPM handler to avoid burning TPM budget
+		if (!skipApiCondense) {
+			const truncateResult = await truncateConversationIfNeeded({
+				messages: this.apiConversationHistory,
+				totalTokens: contextTokens || 0,
+				maxTokens,
+				contextWindow,
+				apiHandler: this.api,
+				autoCondenseContext: true,
+				autoCondenseContextPercent: reductionPercent,
+				systemPrompt: await this.getSystemPrompt(),
+				taskId: this.taskId,
+				profileThresholds,
+				currentProfileId,
+			})
+
+			if (truncateResult.messages !== this.apiConversationHistory) {
+				await this.overwriteApiConversationHistory(truncateResult.messages)
+			}
+
+			if (truncateResult.summary) {
+				const { summary, cost, prevContextTokens, newContextTokens = 0 } = truncateResult
+				const contextCondense: ContextCondense = { summary, cost, newContextTokens, prevContextTokens }
+				await this.say(
+					"condense_context",
+					undefined /* text */,
+					undefined /* images */,
+					false /* partial */,
+					undefined /* checkpoint */,
+					undefined /* progressStatus */,
+					{ isNonInteractive: true } /* options */,
+					contextCondense,
+				)
+			}
 		}
 	}
 
@@ -4156,7 +4534,11 @@ The tools are available and working. Use them now.`,
 		this.lastUsedInstructions = systemPrompt
 		const { contextTokens } = this.getTokenUsage()
 
-		if (contextTokens) {
+		// Only run pre-request condense on the FIRST attempt (retryAttempt === 0).
+		// On retries, the error handler already truncated/condensed the context.
+		// Running condense again on retry burns TPM budget and causes a death spiral:
+		//   TPM 429 → wait 65s → retry → condense (burns TPM) → actual request → TPM 429 → repeat
+		if (contextTokens && retryAttempt === 0) {
 			const modelInfo = this.api.getModel().info
 
 			const maxTokens = getModelMaxOutputTokens({
@@ -4165,6 +4547,8 @@ The tools are available and working. Use them now.`,
 				settings: this.apiConfiguration,
 			})
 
+			// Use the model's actual context window — don't artificially cap it.
+			// Condense should only fire when context genuinely approaches the limit.
 			const contextWindow = modelInfo.contextWindow
 
 			// Get the current profile ID using the helper method
@@ -4275,32 +4659,64 @@ The tools are available and working. Use them now.`,
 		const provider: string = this.apiConfiguration.apiProvider || "unknown"
 		const modelId: string = this.api.getModel().id || "unknown"
 
-		// Check and wait for rate limits before making the request
-		await waitForRateLimit(provider, modelId)
+		// Check and wait for rate limits before making the request (abort-aware)
+		const rateLimitWaitStart = Date.now()
+		await waitForRateLimit(provider, modelId, () => this.abort)
+		const rateLimitWaitMs = Date.now() - rateLimitWaitStart
+		if (rateLimitWaitMs > 1000) {
+			// Log if we had to wait for rate limit (helps diagnose timeout context)
+			this.providerRef
+				.deref()
+				?.log(
+					`[LLM] Rate limit wait completed - Provider: ${provider}, Model: ${modelId}, Task: ${this.taskId}, Wait time: ${rateLimitWaitMs}ms`,
+				)
+		}
 
 		// LLM Request Lifecycle Instrumentation
 		const requestStartTime = Date.now()
-		this.providerRef.deref()?.log(`[LLM] Request sent - Provider: ${provider}, Model: ${modelId}, Task: ${this.taskId}`)
-		
-		// Set up 30-second timeout for response
+		this.providerRef
+			.deref()
+			?.log(`[LLM] Request sent - Provider: ${provider}, Model: ${modelId}, Task: ${this.taskId}`)
+
+		// Set up timeout for first chunk response
 		let responseTimeout: NodeJS.Timeout | null = null
 		let firstChunkReceived = false
 		let streamCompleted = false
-		
-		const LLM_RESPONSE_TIMEOUT_MS = 30_000 // 30 seconds
+
+		// 90 seconds allows for API load/network delays while still catching stalled requests
+		// (increased from 30s due to real-world API timeouts under load)
+		const LLM_RESPONSE_TIMEOUT_MS = 90_000 // 90 seconds
 		let timeoutError: Error | null = null
 		responseTimeout = setTimeout(() => {
 			if (!firstChunkReceived && !streamCompleted) {
 				const elapsed = Date.now() - requestStartTime
-				this.providerRef.deref()?.log(
-					`[LLM] TIMEOUT - No response received within 30s. Provider: ${provider}, Model: ${modelId}, Task: ${this.taskId}, Elapsed: ${elapsed}ms`
+
+				// Calculate approximate request size for diagnostics
+				const messageCount = cleanConversationHistory.length
+				const systemPromptLength = systemPrompt?.length || 0
+				const conversationLength = cleanConversationHistory.reduce(
+					(sum, msg) => sum + JSON.stringify(msg).length,
+					0,
 				)
-				// Create error that will be thrown when iterator is accessed
-				timeoutError = new Error("LLM request stalled (no response/stream completion)")
-				// Abort the task
-				this.abortTask().catch(() => {
-					// Ignore abort errors
-				})
+				const approxTotalChars = systemPromptLength + conversationLength
+
+				// Log detailed timeout diagnostics
+				this.providerRef
+					.deref()
+					?.log(
+						`[LLM] TIMEOUT - No response received within ${LLM_RESPONSE_TIMEOUT_MS / 1000}s. ` +
+							`Provider: ${provider}, Model: ${modelId}, Task: ${this.taskId}, ` +
+							`Elapsed: ${elapsed}ms, Messages: ${messageCount}, ` +
+							`Approx size: ${Math.round(approxTotalChars / 1000)}k chars, ` +
+							`Retry attempt: ${retryAttempt}`,
+					)
+
+				// Create retryable timeout error (marked with LLM_TIMEOUT prefix for detection)
+				// Don't call abortTask() here - let retry logic handle it
+				timeoutError = new Error(
+					`LLM_TIMEOUT: No response received within ${LLM_RESPONSE_TIMEOUT_MS / 1000}s ` +
+						`(elapsed: ${elapsed}ms, messages: ${messageCount}, size: ${Math.round(approxTotalChars / 1000)}k chars)`,
+				)
 			}
 		}, LLM_RESPONSE_TIMEOUT_MS)
 
@@ -4315,28 +4731,30 @@ The tools are available and working. Use them now.`,
 			if (timeoutError) {
 				throw timeoutError
 			}
-			
+
 			// Awaiting first chunk to see if it will throw an error.
 			this.isWaitingForFirstChunk = true
 			const firstChunk = await iterator.next()
-			
+
 			// Check for timeout error after awaiting (timeout might have fired during await)
 			if (timeoutError) {
 				throw timeoutError
 			}
-			
+
 			firstChunkReceived = true
 			if (responseTimeout) {
 				clearTimeout(responseTimeout)
 				responseTimeout = null
 			}
 			const firstChunkElapsed = Date.now() - requestStartTime
-			this.providerRef.deref()?.log(
-				`[LLM] First chunk received - Provider: ${provider}, Model: ${modelId}, Task: ${this.taskId}, Elapsed: ${firstChunkElapsed}ms`
-			)
+			this.providerRef
+				.deref()
+				?.log(
+					`[LLM] First chunk received - Provider: ${provider}, Model: ${modelId}, Task: ${this.taskId}, Elapsed: ${firstChunkElapsed}ms`,
+				)
 			yield firstChunk.value
 			this.isWaitingForFirstChunk = false
-			
+
 			// Clear rate limit on successful first chunk
 			await clearRateLimit(provider, modelId)
 		} catch (error) {
@@ -4348,46 +4766,166 @@ The tools are available and working. Use them now.`,
 			}
 			await this.logApiFailure(error, provider, modelId, "stream:first-chunk")
 			const isContextWindowExceededError = checkContextWindowExceededError(error)
-			
+
 			// Check for authentication errors (401) - these should fail fast, not retry
 			const isAuthError = isAuthenticationError(error)
 			if (isAuthError) {
 				const errorMsg = error.message || JSON.stringify(error)
-				this.providerRef.deref()?.log(
-					`[Task#${this.taskId}] Authentication error (401) detected - failing fast. Error: ${errorMsg}`
-				)
-				// Abort the task immediately - authentication errors won't succeed on retry
-				await this.abortTask()
+				this.providerRef
+					.deref()
+					?.log(
+						`[Task#${this.taskId}] Authentication error (401) detected - failing fast. Error: ${errorMsg}`,
+					)
+				// Signal abort so the outer catch block handles it (don't call abortTask here to avoid double-abort)
+				this.abort = true
 				throw new Error(`Authentication failed: ${errorMsg}. Check your API key configuration.`)
 			}
 
 			// Check for billing/credits errors (402) - these should fail fast, not retry
-			const isBillingError = isBillingError(error)
-			if (isBillingError) {
+			const isBilling = isBillingError(error)
+			if (isBilling) {
 				const errorMsg = error.message || JSON.stringify(error)
-				this.providerRef.deref()?.log(
-					`[Task#${this.taskId}] Billing error (402) detected - failing fast. Error: ${errorMsg}`
-				)
-				// Abort the task immediately - billing errors won't succeed on retry without adding credits
-				await this.abortTask()
+				this.providerRef
+					.deref()
+					?.log(`[Task#${this.taskId}] Billing error (402) detected - failing fast. Error: ${errorMsg}`)
+				// Signal abort so the outer catch block handles it (don't call abortTask here to avoid double-abort)
+				this.abort = true
 				throw new Error(`Insufficient credits: ${errorMsg}. Please add credits to your account.`)
 			}
 
-			// If it's a context window error and we haven't exceeded max retries for this error type
-			if (isContextWindowExceededError && retryAttempt < MAX_CONTEXT_WINDOW_RETRIES) {
-				console.warn(
-					`[Task#${this.taskId}] Context window exceeded for model ${this.api.getModel().id}. ` +
-						`Retry attempt ${retryAttempt + 1}/${MAX_CONTEXT_WINDOW_RETRIES}. ` +
-						`Attempting automatic truncation...`,
+			// Check for timeout errors - retry up to MAX_TIMEOUT_RETRIES times
+			const MAX_TIMEOUT_RETRIES = 2
+			const isTimeoutError = error.message?.includes("LLM_TIMEOUT:")
+			if (isTimeoutError && retryAttempt < MAX_TIMEOUT_RETRIES) {
+				const errorMsg = error.message || "Request timeout"
+				this.providerRef
+					.deref()
+					?.log(
+						`[Task#${this.taskId}] Timeout detected - retry attempt ${retryAttempt + 1}/${MAX_TIMEOUT_RETRIES}. Error: ${errorMsg}`,
+					)
+
+				// Wait before retrying (30s for first retry, 60s for second retry)
+				const retryDelaySeconds = 30 * (retryAttempt + 1)
+				await this.say(
+					"api_req_retry_delayed",
+					`${errorMsg}\n\nAPI response timeout. Retrying in ${retryDelaySeconds} seconds... (attempt ${retryAttempt + 1}/${MAX_TIMEOUT_RETRIES})`,
+					undefined,
+					false,
 				)
-				await this.handleContextWindowExceededError()
-				// Retry the request after handling the context window error
+				await delay(retryDelaySeconds * 1000)
+
+				// Retry the request
 				yield* this.attemptApiRequest(retryAttempt + 1)
 				return
 			}
 
+			// TPM (tokens per minute) rate limits: if the request itself exceeds the TPM limit,
+			// waiting alone won't help — we must also condense context to fit within the limit.
+			const isTPMError = checkIsTPMRateLimitError(error)
+			let tpmRetryExhausted = false
+			if (isTPMError && retryAttempt < MAX_CONTEXT_WINDOW_RETRIES) {
+				const errorMsg = error.message || error.error?.message || "TPM rate limit exceeded"
+				let canRetry = true
+
+				// Check if request size exceeds TPM limit (e.g. "Requested 32494, Limit 30000")
+				const nums = parseRequestTooLargeNumbers(error)
+				if (nums && nums.requested > nums.limit) {
+					const tokensBefore = nums.requested
+					console.warn(
+						`[Task#${this.taskId}] TPM error: request (${nums.requested}) > limit (${nums.limit}). ` +
+							`Condensing context to fit within TPM limit. Messages: ${this.apiConversationHistory.length}.`,
+					)
+
+					// Condense context using BOTH hard truncation AND API-based summarization.
+					// The failed request was rejected by the API (0 TPM used), so a smaller condense
+					// call (SUMMARY_PROMPT + conversation ≈ 12-15k tokens) should succeed within
+					// the 30k TPM limit. After condensing, we wait for TPM reset before retrying.
+					try {
+						await this.handleContextWindowExceededError(error, /* skipApiCondense */ false)
+					} catch (condenseError) {
+						// If condense itself hits TPM or other error, fall back to hard truncation only
+						console.warn(
+							`[Task#${this.taskId}] API condensation failed during TPM handling: ${condenseError}. ` +
+								`Falling back to hard truncation only.`,
+						)
+						await this.handleContextWindowExceededError(error, /* skipApiCondense */ true)
+					}
+
+					// Verify that context actually got smaller. Use message count as proxy —
+					// if we couldn't even reduce messages, the system prompt alone likely exceeds TPM.
+					const msgsAfter = this.apiConversationHistory.length
+					if (msgsAfter <= 2) {
+						// Only system prompt + 1-2 messages remain — can't shrink further
+						console.warn(
+							`[Task#${this.taskId}] TPM error: after condensation only ${msgsAfter} messages remain. ` +
+								`System prompt likely exceeds TPM limit (${nums.limit}). Stopping retries.`,
+						)
+						canRetry = false
+						tpmRetryExhausted = true
+					}
+				}
+
+				if (canRetry) {
+					// Wait for TPM window to reset. The condense call above used some TPM budget,
+					// so we wait a full window to ensure the retry has a fresh budget.
+					const TPM_WAIT_SECONDS = 65 // 65s to ensure the 60s TPM window fully resets
+					console.warn(
+						`[Task#${this.taskId}] TPM rate limit hit for ${this.api.getModel().id}. ` +
+							`Waiting ${TPM_WAIT_SECONDS}s for window reset (attempt ${retryAttempt + 1}/${MAX_CONTEXT_WINDOW_RETRIES})`,
+					)
+					for (let i = TPM_WAIT_SECONDS; i > 0; i--) {
+						await this.say(
+							"api_req_retry_delayed",
+							`${errorMsg}\n\nTPM rate limit - condensed context, waiting ${i}s for window reset (attempt ${retryAttempt + 1})...`,
+							undefined,
+							true,
+						)
+						await delay(1000)
+					}
+					await this.say(
+						"api_req_retry_delayed",
+						`${errorMsg}\n\nTPM window reset. Context condensed. Retrying now...`,
+						undefined,
+						false,
+					)
+					yield* this.attemptApiRequest(retryAttempt + 1)
+					return
+				}
+				// else: condensation failed to help, fall through to api_req_failed ask below
+			}
+			// If TPM retries exhausted (hit MAX_CONTEXT_WINDOW_RETRIES), mark so general retry block skips it
+			if (isTPMError && retryAttempt >= MAX_CONTEXT_WINDOW_RETRIES) {
+				tpmRetryExhausted = true
+			}
+
+			// If it's a context window error and we haven't exceeded max retries for this error type
+			if (isContextWindowExceededError && retryAttempt < MAX_CONTEXT_WINDOW_RETRIES) {
+				const msgCountBefore = this.apiConversationHistory.length
+				console.warn(
+					`[Task#${this.taskId}] Context window exceeded for model ${this.api.getModel().id}. ` +
+						`Retry attempt ${retryAttempt + 1}/${MAX_CONTEXT_WINDOW_RETRIES}. ` +
+						`Messages: ${msgCountBefore}. Attempting automatic truncation...`,
+				)
+				await this.handleContextWindowExceededError(error)
+				const msgCountAfter = this.apiConversationHistory.length
+				// If we couldn't shrink the conversation at all, don't retry (prevents infinite loop)
+				if (msgCountAfter >= msgCountBefore && msgCountBefore <= 4) {
+					console.warn(
+						`[Task#${this.taskId}] Context could not be reduced (${msgCountBefore} → ${msgCountAfter} messages). ` +
+							`Not enough messages to truncate. Stopping retries.`,
+					)
+					// Fall through to the normal error handling below instead of retrying
+				} else {
+					// Retry the request after handling the context window error
+					yield* this.attemptApiRequest(retryAttempt + 1)
+					return
+				}
+			}
+
 			// note that this api_req_failed ask is unique in that we only present this option if the api hasn't streamed any content yet (ie it fails on the first chunk due), as it would allow them to hit a retry button. However if the api failed mid-stream, it could be in any arbitrary state where some tools may have executed, so that error is handled differently and requires cancelling the task entirely.
-			if (autoApprovalEnabled && alwaysApproveResubmit) {
+			// Don't auto-retry TPM errors here — they already had their own retry loop above.
+			// Retrying without truncation will produce the exact same "Requested X, Limit Y" forever.
+			if (autoApprovalEnabled && alwaysApproveResubmit && retryAttempt < MAX_AUTO_RETRIES && !tpmRetryExhausted) {
 				let errorMsg
 
 				if (error.error?.metadata?.raw) {
@@ -4409,10 +4947,10 @@ The tools are available and working. Use them now.`,
 				let coordinatorHandled = false
 				if (isRateLimitError(error)) {
 					await recordRateLimitError(provider, modelId, error)
-					
+
 					// Get the delay from coordinator and show countdown
 					const coordinatorDelayMs = await getRateLimitDelay(provider, modelId)
-					
+
 					if (coordinatorDelayMs > 0) {
 						const delaySeconds = Math.ceil(coordinatorDelayMs / 1000)
 						for (let i = delaySeconds; i > 0; i--) {
@@ -4424,11 +4962,11 @@ The tools are available and working. Use them now.`,
 							)
 							await delay(1000)
 						}
-						// Now wait for the actual reset
-						await waitForRateLimit(provider, modelId)
+						// Now wait for the actual reset (abort-aware)
+						await waitForRateLimit(provider, modelId, () => this.abort)
 						coordinatorHandled = true
 					}
-					
+
 					// Also handle Gemini-specific retry details if present
 					const geminiRetryDetails = error.errorDetails?.find(
 						(detail: any) => detail["@type"] === "type.googleapis.com/google.rpc.RetryInfo",
@@ -4441,13 +4979,26 @@ The tools are available and working. Use them now.`,
 					}
 				}
 
-				// Only use exponential backoff if coordinator didn't handle it
-				// Wait for the greater of the exponential delay or the rate limit delay
-				const finalDelay = coordinatorHandled ? 0 : Math.max(exponentialDelay, rateLimitDelay)
+				// Only use exponential backoff if coordinator didn't handle it.
+				// For 429 errors: prefer API's "try again in Xs" over configured rateLimitDelay.
+				// rateLimitDelay can be 271s+ (user's inter-request spacing) — we must not wait
+				// that long when the API explicitly says "try again in 11s".
+				let finalDelay: number
+				if (coordinatorHandled) {
+					finalDelay = 0
+				} else if (isRateLimitError(error)) {
+					const apiRetrySeconds = extractRetryAfterSeconds(error)
+					const buffer = 2
+					const useSeconds = apiRetrySeconds != null ? Math.ceil(apiRetrySeconds + buffer) : exponentialDelay
+					// Use the API suggestion (capped) — never use rateLimitDelay for 429 retries
+					finalDelay = Math.min(useSeconds, Math.max(exponentialDelay, 15))
+				} else {
+					finalDelay = Math.max(exponentialDelay, rateLimitDelay)
+				}
 
 				// Only show countdown if we still need to wait (coordinator already waited)
 				if (finalDelay > 0) {
-					// Show countdown timer with exponential backoff
+					// Show countdown timer
 					for (let i = finalDelay; i > 0; i--) {
 						await this.say(
 							"api_req_retry_delayed",
@@ -4473,10 +5024,7 @@ The tools are available and working. Use them now.`,
 				return
 			} else {
 				const errorMessage = error.message ?? JSON.stringify(serializeError(error), null, 2)
-				const { response } = await this.ask(
-					"api_req_failed",
-					errorMessage,
-				)
+				const { response } = await this.ask("api_req_failed", errorMessage)
 
 				if (response !== "yesButtonClicked") {
 					// This will never happen since if noButtonClicked, we will
@@ -4501,7 +5049,7 @@ The tools are available and working. Use them now.`,
 		// it's saying "yield all remaining values from this iterator". This
 		// effectively passes along all subsequent chunks from the original
 		// stream.
-		
+
 		// Track stream completion by wrapping iterator consumption
 		let chunkCount = 1 // First chunk already received
 		try {
@@ -4516,10 +5064,12 @@ The tools are available and working. Use them now.`,
 				responseTimeout = null
 			}
 			const streamCompleteElapsed = Date.now() - requestStartTime
-			this.providerRef.deref()?.log(
-				`[LLM] Stream completed - Provider: ${provider}, Model: ${modelId}, Task: ${this.taskId}, ` +
-				`Chunks: ${chunkCount}, Elapsed: ${streamCompleteElapsed}ms`
-			)
+			this.providerRef
+				.deref()
+				?.log(
+					`[LLM] Stream completed - Provider: ${provider}, Model: ${modelId}, Task: ${this.taskId}, ` +
+						`Chunks: ${chunkCount}, Elapsed: ${streamCompleteElapsed}ms`,
+				)
 		} catch (streamError) {
 			streamCompleted = true
 			if (responseTimeout) {
@@ -4528,10 +5078,12 @@ The tools are available and working. Use them now.`,
 			}
 			await this.logApiFailure(streamError, provider, modelId, "stream:consume")
 			const streamErrorElapsed = Date.now() - requestStartTime
-			this.providerRef.deref()?.log(
-				`[LLM] Stream error - Provider: ${provider}, Model: ${modelId}, Task: ${this.taskId}, ` +
-				`Elapsed: ${streamErrorElapsed}ms, Error: ${streamError}`
-			)
+			this.providerRef
+				.deref()
+				?.log(
+					`[LLM] Stream error - Provider: ${provider}, Model: ${modelId}, Task: ${this.taskId}, ` +
+						`Elapsed: ${streamErrorElapsed}ms, Error: ${streamError}`,
+				)
 			throw streamError
 		}
 	}
@@ -4796,6 +5348,10 @@ The tools are available and working. Use them now.`,
 
 	public get cwd() {
 		return this.workspacePath
+	}
+
+	public set cwd(value: string) {
+		this.workspacePath = value
 	}
 
 	/**

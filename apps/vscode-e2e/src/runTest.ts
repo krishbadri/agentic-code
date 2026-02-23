@@ -7,12 +7,12 @@ import { runTests } from "@vscode/test-electron"
 
 // Create a synchronous logger that writes to file immediately (no buffering)
 // __dirname in compiled output is apps/vscode-e2e/out, so we go up one level to apps/vscode-e2e/
-const LOG_FILE = path.join(__dirname, '../runner-lifecycle.log')
+const LOG_FILE = path.join(__dirname, "../runner-lifecycle.log")
 function logSync(message: string) {
 	const timestamp = new Date().toISOString()
 	const line = `[${timestamp}] ${message}\n`
 	// Write synchronously to ensure it's flushed immediately
-	fsSync.appendFileSync(LOG_FILE, line, 'utf-8')
+	fsSync.appendFileSync(LOG_FILE, line, "utf-8")
 	console.error(message) // Also log to console
 }
 
@@ -21,7 +21,7 @@ function logSync(message: string) {
 const unhandledRejections: Array<{ reason: unknown; promise: Promise<unknown>; timestamp: number }> = []
 const uncaughtExceptions: Array<{ error: Error; timestamp: number }> = []
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on("unhandledRejection", (reason, promise) => {
 	const timestamp = Date.now()
 	logSync(`[RUN-TEST-LIFECYCLE] ========================================`)
 	logSync(`[RUN-TEST-LIFECYCLE] UNHANDLED REJECTION IN TEST RUNNER PROCESS`)
@@ -35,40 +35,44 @@ process.on('unhandledRejection', (reason, promise) => {
 	unhandledRejections.push({ reason, promise, timestamp })
 })
 
-process.on('uncaughtException', (error) => {
+process.on("uncaughtException", (error) => {
 	const timestamp = Date.now()
 	logSync(`[RUN-TEST-LIFECYCLE] ========================================`)
 	logSync(`[RUN-TEST-LIFECYCLE] UNCAUGHT EXCEPTION IN TEST RUNNER PROCESS`)
 	logSync(`[RUN-TEST-LIFECYCLE] Timestamp: ${new Date(timestamp).toISOString()}`)
 	logSync(`[RUN-TEST-LIFECYCLE] Error: ${error.message}`)
-	logSync(`[RUN-TEST-LIFECYCLE] Stack: ${error.stack || 'NO STACK'}`)
+	logSync(`[RUN-TEST-LIFECYCLE] Stack: ${error.stack || "NO STACK"}`)
 	logSync(`[RUN-TEST-LIFECYCLE] Process PID: ${process.pid}`)
 	logSync(`[RUN-TEST-LIFECYCLE] ========================================`)
 	uncaughtExceptions.push({ error, timestamp })
 	// Don't exit immediately - let the error propagate to the try-catch
 })
 
-process.on('exit', (code) => {
+process.on("exit", (code) => {
 	logSync(`[RUN-TEST-LIFECYCLE] ========================================`)
 	logSync(`[RUN-TEST-LIFECYCLE] PROCESS EXITING`)
 	logSync(`[RUN-TEST-LIFECYCLE] Exit code: ${code}`)
 	logSync(`[RUN-TEST-LIFECYCLE] Unhandled rejections: ${unhandledRejections.length}`)
 	if (unhandledRejections.length > 0) {
 		unhandledRejections.forEach((ur, i) => {
-			logSync(`[RUN-TEST-LIFECYCLE]   Rejection ${i + 1} (${new Date(ur.timestamp).toISOString()}): ${ur.reason instanceof Error ? ur.reason.message : String(ur.reason)}`)
+			logSync(
+				`[RUN-TEST-LIFECYCLE]   Rejection ${i + 1} (${new Date(ur.timestamp).toISOString()}): ${ur.reason instanceof Error ? ur.reason.message : String(ur.reason)}`,
+			)
 		})
 	}
 	logSync(`[RUN-TEST-LIFECYCLE] Uncaught exceptions: ${uncaughtExceptions.length}`)
 	if (uncaughtExceptions.length > 0) {
 		uncaughtExceptions.forEach((ue, i) => {
-			logSync(`[RUN-TEST-LIFECYCLE]   Exception ${i + 1} (${new Date(ue.timestamp).toISOString()}): ${ue.error.message}`)
-			logSync(`[RUN-TEST-LIFECYCLE]   Stack: ${ue.error.stack || 'NO STACK'}`)
+			logSync(
+				`[RUN-TEST-LIFECYCLE]   Exception ${i + 1} (${new Date(ue.timestamp).toISOString()}): ${ue.error.message}`,
+			)
+			logSync(`[RUN-TEST-LIFECYCLE]   Stack: ${ue.error.stack || "NO STACK"}`)
 		})
 	}
 	logSync(`[RUN-TEST-LIFECYCLE] ========================================`)
 })
 
-process.on('SIGTERM', () => {
+process.on("SIGTERM", () => {
 	logSync(`[RUN-TEST-LIFECYCLE] ========================================`)
 	logSync(`[RUN-TEST-LIFECYCLE] SIGTERM RECEIVED - PROCESS BEING KILLED`)
 	logSync(`[RUN-TEST-LIFECYCLE] Process PID: ${process.pid}`)
@@ -76,7 +80,7 @@ process.on('SIGTERM', () => {
 	process.exit(143) // Standard exit code for SIGTERM
 })
 
-process.on('SIGINT', () => {
+process.on("SIGINT", () => {
 	logSync(`[RUN-TEST-LIFECYCLE] ========================================`)
 	logSync(`[RUN-TEST-LIFECYCLE] SIGINT RECEIVED - CTRL+C OR KILL`)
 	logSync(`[RUN-TEST-LIFECYCLE] Process PID: ${process.pid}`)
@@ -85,30 +89,32 @@ process.on('SIGINT', () => {
 })
 
 function getTortureRepoRoot(): string | undefined {
-	return (
-		process.env.TORTURE_REPO_ROOT ||
-		process.env.REPO_ROOT ||
-		process.env.TXN_AGENT_TORTURE_REPO
-	)
+	return process.env.TORTURE_REPO_ROOT || process.env.REPO_ROOT || process.env.TXN_AGENT_TORTURE_REPO
 }
 
 async function main() {
 	// Initialize log file
 	try {
-		fsSync.writeFileSync(LOG_FILE, `=== TEST RUNNER LIFECYCLE LOG ===\nStarted: ${new Date().toISOString()}\nPID: ${process.pid}\n\n`, 'utf-8')
+		fsSync.writeFileSync(
+			LOG_FILE,
+			`=== TEST RUNNER LIFECYCLE LOG ===\nStarted: ${new Date().toISOString()}\nPID: ${process.pid}\n\n`,
+			"utf-8",
+		)
 	} catch (e) {
-		console.error('Failed to initialize log file:', e)
+		console.error("Failed to initialize log file:", e)
 	}
-	
-	logSync('[RUN-TEST-LIFECYCLE] main() function started')
-	
+
+	logSync("[RUN-TEST-LIFECYCLE] main() function started")
+
 	// Define these outside try block so they're accessible in catch handler
-	let extensionDevelopmentPath: string = ''
-	let extensionTestsPath: string = ''
-	let testWorkspace: string = ''
-	
+	let extensionDevelopmentPath: string = ""
+	let extensionTestsPath: string = ""
+	let testWorkspace: string = ""
+	let userDataDir: string = ""
+	let extensionsDir: string = ""
+
 	try {
-		logSync('[RUN-TEST-LIFECYCLE] Entering try block')
+		logSync("[RUN-TEST-LIFECYCLE] Entering try block")
 		// The folder containing the Extension Manifest package.json
 		// Passed to `--extensionDevelopmentPath`
 		extensionDevelopmentPath = path.resolve(__dirname, "../../../src")
@@ -120,28 +126,26 @@ async function main() {
 		// Determine if we're running torture repo test
 		// Set env vars programmatically to ensure they override any existing values
 		const isTortureTest = process.env.TEST_TORTURE_REPO === "1" || process.argv.includes("--torture")
-		
+
 		if (isTortureTest) {
 			const tortureRepoRoot = getTortureRepoRoot()
 			if (!tortureRepoRoot) {
 				const cwd = process.cwd()
 				console.error(`[torture-test] ERROR: Missing torture repo path env var.`)
 				console.error(`[torture-test] CWD: ${cwd}`)
-				console.error(
-					`[torture-test] Checked env keys: TORTURE_REPO_ROOT, REPO_ROOT, TXN_AGENT_TORTURE_REPO`,
-				)
+				console.error(`[torture-test] Checked env keys: TORTURE_REPO_ROOT, REPO_ROOT, TXN_AGENT_TORTURE_REPO`)
 				process.exit(1)
 			}
 			// Force-set torture repo environment variables
 			process.env.TEST_TORTURE_REPO = "1"
 			process.env.TEST_TORTURE_REPO_WORKSPACE = tortureRepoRoot
 			testWorkspace = tortureRepoRoot
-			
+
 			console.log(`[runTest] Torture repo test mode enabled`)
 			console.log(`[runTest] TEST_TORTURE_REPO=${process.env.TEST_TORTURE_REPO}`)
 			console.log(`[runTest] TEST_TORTURE_REPO_WORKSPACE=${process.env.TEST_TORTURE_REPO_WORKSPACE}`)
 			console.log(`[runTest] OPENROUTER_API_KEY present: ${!!process.env.OPENROUTER_API_KEY}`)
-			
+
 			// Verify workspace exists
 			try {
 				await fs.access(testWorkspace)
@@ -154,6 +158,30 @@ async function main() {
 			testWorkspace =
 				process.env.TEST_TORTURE_REPO_WORKSPACE ||
 				(await fs.mkdtemp(path.join(os.tmpdir(), "roo-test-workspace-")))
+		}
+
+		// Use unique VS Code user-data-dir/extensions-dir per run.
+		// This helps avoid Windows "mutex already exists" issues when a VS Code instance is already running.
+		userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "roo-vscode-user-data-"))
+		extensionsDir = await fs.mkdtemp(path.join(os.tmpdir(), "roo-vscode-extensions-"))
+
+		// Seed user-data-dir with our checked-in test settings (planner/transactional mode, etc.).
+		// Without this, the temp profile starts "blank" and the extension may refuse to start Control-Plane
+		// (e.g. missing roo.controlPlane.rootPath).
+		try {
+			const e2eRoot = path.resolve(__dirname, "..") // __dirname is apps/vscode-e2e/out in compiled output
+			// Copy ONLY the minimal settings file to avoid ENOSPC from copying caches.
+			const templateSettingsPath = path.join(e2eRoot, ".vscode-test", "user-data", "User", "settings.json")
+			if (fsSync.existsSync(templateSettingsPath)) {
+				const destUserDir = path.join(userDataDir, "User")
+				await fs.mkdir(destUserDir, { recursive: true })
+				await fs.copyFile(templateSettingsPath, path.join(destUserDir, "settings.json"))
+				logSync(`[RUN-TEST-LIFECYCLE] Seeded user-data settings from: ${templateSettingsPath}`)
+			} else {
+				logSync(`[RUN-TEST-LIFECYCLE] No template settings found at: ${templateSettingsPath}`)
+			}
+		} catch (e) {
+			logSync(`[RUN-TEST-LIFECYCLE] Failed to seed user-data-dir: ${e instanceof Error ? e.message : String(e)}`)
 		}
 
 		// Get test filter from command line arguments or environment variable
@@ -190,8 +218,8 @@ async function main() {
 		logSync(`[RUN-TEST-LIFECYCLE] ========================================`)
 		logSync(`[torture-test] Launching VS Code with workspace: ${testWorkspace}`)
 
-		logSync('[RUN-TEST-LIFECYCLE] About to call runTests()')
-		
+		logSync("[RUN-TEST-LIFECYCLE] About to call runTests()")
+
 		const runTestsStartTime = Date.now()
 		let runTestsResolved = false
 		let runTestsRejected = false
@@ -200,11 +228,16 @@ async function main() {
 		let runTestsRejectionTime: number | null = null
 
 		// Create a promise that tracks runTests() lifecycle
-		logSync('[RUN-TEST-LIFECYCLE] Creating runTests() promise wrapper')
+		logSync("[RUN-TEST-LIFECYCLE] Creating runTests() promise wrapper")
 		const runTestsPromise = runTests({
 			extensionDevelopmentPath,
 			extensionTestsPath,
-			launchArgs: [testWorkspace, "--disable-workspace-trust"],
+			launchArgs: [
+				testWorkspace,
+				"--disable-workspace-trust",
+				`--user-data-dir=${userDataDir}`,
+				`--extensions-dir=${extensionsDir}`,
+			],
 			extensionTestsEnv,
 			version: process.env.VSCODE_VERSION || "1.101.2",
 		}).then(
@@ -227,17 +260,19 @@ async function main() {
 				logSync(`[RUN-TEST-LIFECYCLE] ========================================`)
 				logSync(`[RUN-TEST-LIFECYCLE] runTests() REJECTED/THREW ERROR`)
 				logSync(`[RUN-TEST-LIFECYCLE] Duration before failure: ${duration}ms (${Math.round(duration / 1000)}s)`)
-				logSync(`[RUN-TEST-LIFECYCLE] Error type: ${error instanceof Error ? error.constructor.name : typeof error}`)
+				logSync(
+					`[RUN-TEST-LIFECYCLE] Error type: ${error instanceof Error ? error.constructor.name : typeof error}`,
+				)
 				if (error instanceof Error) {
 					logSync(`[RUN-TEST-LIFECYCLE] Error message: ${error.message}`)
-					logSync(`[RUN-TEST-LIFECYCLE] Error stack: ${error.stack || 'NO STACK'}`)
-					if ('code' in error) {
+					logSync(`[RUN-TEST-LIFECYCLE] Error stack: ${error.stack || "NO STACK"}`)
+					if ("code" in error) {
 						logSync(`[RUN-TEST-LIFECYCLE] Error code: ${(error as any).code}`)
 					}
-					if ('signal' in error) {
+					if ("signal" in error) {
 						logSync(`[RUN-TEST-LIFECYCLE] Error signal: ${(error as any).signal}`)
 					}
-					if ('exitCode' in error) {
+					if ("exitCode" in error) {
 						logSync(`[RUN-TEST-LIFECYCLE] Error exitCode: ${(error as any).exitCode}`)
 					}
 				} else {
@@ -247,7 +282,7 @@ async function main() {
 				logSync(`[RUN-TEST-LIFECYCLE] Uncaught exceptions at time of failure: ${uncaughtExceptions.length}`)
 				logSync(`[RUN-TEST-LIFECYCLE] ========================================`)
 				throw error
-			}
+			},
 		)
 
 		// Set up a watchdog timeout to detect if runTests() hangs
@@ -267,14 +302,16 @@ async function main() {
 		}, WATCHDOG_TIMEOUT_MS)
 
 		// Download VS Code, unzip it and run the integration test
-		logSync('[RUN-TEST-LIFECYCLE] Awaiting runTests() promise...')
+		logSync("[RUN-TEST-LIFECYCLE] Awaiting runTests() promise...")
 		try {
 			await runTestsPromise
 			clearTimeout(watchdogTimeout)
-			logSync('[RUN-TEST-LIFECYCLE] runTests() promise resolved without error')
+			logSync("[RUN-TEST-LIFECYCLE] runTests() promise resolved without error")
 		} catch (error) {
 			clearTimeout(watchdogTimeout)
-			logSync(`[RUN-TEST-LIFECYCLE] runTests() promise rejected, error: ${error instanceof Error ? error.message : String(error)}`)
+			logSync(
+				`[RUN-TEST-LIFECYCLE] runTests() promise rejected, error: ${error instanceof Error ? error.message : String(error)}`,
+			)
 			// Error already logged in the promise rejection handler above
 			throw error
 		}
@@ -294,6 +331,19 @@ async function main() {
 			}
 		}
 
+		// Clean up VS Code run dirs
+		try {
+			if (userDataDir) {
+				await fs.rm(userDataDir, { recursive: true, force: true })
+			}
+			if (extensionsDir) {
+				await fs.rm(extensionsDir, { recursive: true, force: true })
+			}
+			logSync(`[RUN-TEST-LIFECYCLE] VS Code user-data/extensions dirs cleaned up`)
+		} catch (cleanupError) {
+			logSync(`[RUN-TEST-LIFECYCLE] Failed to clean up VS Code dirs: ${cleanupError}`)
+		}
+
 		logSync(`[RUN-TEST-LIFECYCLE] ========================================`)
 		logSync(`[RUN-TEST-LIFECYCLE] TEST RUNNER COMPLETED SUCCESSFULLY`)
 		logSync(`[RUN-TEST-LIFECYCLE] Total duration: ${Date.now() - runTestsStartTime}ms`)
@@ -306,60 +356,62 @@ async function main() {
 		logSync(`[RUN-TEST-LIFECYCLE] Error type: ${error instanceof Error ? error.constructor.name : typeof error}`)
 		if (error instanceof Error) {
 			logSync(`[RUN-TEST-LIFECYCLE] Error message: ${error.message}`)
-			logSync(`[RUN-TEST-LIFECYCLE] Error stack: ${error.stack || 'NO STACK'}`)
-			if ('code' in error) {
+			logSync(`[RUN-TEST-LIFECYCLE] Error stack: ${error.stack || "NO STACK"}`)
+			if ("code" in error) {
 				logSync(`[RUN-TEST-LIFECYCLE] Error code: ${(error as any).code}`)
 			}
-			if ('signal' in error) {
+			if ("signal" in error) {
 				logSync(`[RUN-TEST-LIFECYCLE] Error signal: ${(error as any).signal}`)
 			}
-			if ('exitCode' in error) {
+			if ("exitCode" in error) {
 				logSync(`[RUN-TEST-LIFECYCLE] Error exitCode: ${(error as any).exitCode}`)
 			}
 		} else {
 			logSync(`[RUN-TEST-LIFECYCLE] Error (non-Error type): ${JSON.stringify(error)}`)
 		}
-		
+
 		// Determine the ROOT CAUSE of the failure
 		logSync(`[RUN-TEST-LIFECYCLE] ========================================`)
 		logSync(`[RUN-TEST-LIFECYCLE] ROOT CAUSE ANALYSIS:`)
-		
+
 		if (uncaughtExceptions.length > 0) {
 			logSync(`[RUN-TEST-LIFECYCLE] ROOT CAUSE: Uncaught exception(s) in test runner process`)
 			uncaughtExceptions.forEach((ue, i) => {
 				logSync(`[RUN-TEST-LIFECYCLE]   Exception ${i + 1} (${new Date(ue.timestamp).toISOString()}):`)
 				logSync(`[RUN-TEST-LIFECYCLE]     Message: ${ue.error.message}`)
-				logSync(`[RUN-TEST-LIFECYCLE]     Stack: ${ue.error.stack || 'NO STACK'}`)
+				logSync(`[RUN-TEST-LIFECYCLE]     Stack: ${ue.error.stack || "NO STACK"}`)
 			})
 		} else if (unhandledRejections.length > 0) {
 			logSync(`[RUN-TEST-LIFECYCLE] ROOT CAUSE: Unhandled promise rejection(s) in test runner process`)
 			unhandledRejections.forEach((ur, i) => {
 				logSync(`[RUN-TEST-LIFECYCLE]   Rejection ${i + 1} (${new Date(ur.timestamp).toISOString()}):`)
-				logSync(`[RUN-TEST-LIFECYCLE]     Reason: ${ur.reason instanceof Error ? ur.reason.message : String(ur.reason)}`)
+				logSync(
+					`[RUN-TEST-LIFECYCLE]     Reason: ${ur.reason instanceof Error ? ur.reason.message : String(ur.reason)}`,
+				)
 				if (ur.reason instanceof Error && ur.reason.stack) {
 					logSync(`[RUN-TEST-LIFECYCLE]     Stack: ${ur.reason.stack}`)
 				}
 			})
 		} else if (error instanceof Error) {
-			if (error.message.includes('timeout') || error.message.includes('Timeout')) {
+			if (error.message.includes("timeout") || error.message.includes("Timeout")) {
 				logSync(`[RUN-TEST-LIFECYCLE] ROOT CAUSE: Timeout - runTests() or VS Code process timed out`)
 				logSync(`[RUN-TEST-LIFECYCLE]   This could be:`)
 				logSync(`[RUN-TEST-LIFECYCLE]   - Mocha test timeout (check suite/index.ts timeout setting)`)
 				logSync(`[RUN-TEST-LIFECYCLE]   - VS Code extension host timeout`)
 				logSync(`[RUN-TEST-LIFECYCLE]   - VS Code process hang/crash`)
-			} else if (error.message.includes('exit') || 'exitCode' in error) {
+			} else if (error.message.includes("exit") || "exitCode" in error) {
 				logSync(`[RUN-TEST-LIFECYCLE] ROOT CAUSE: VS Code process exited unexpectedly`)
-				logSync(`[RUN-TEST-LIFECYCLE]   Exit code: ${(error as any).exitCode || 'unknown'}`)
+				logSync(`[RUN-TEST-LIFECYCLE]   Exit code: ${(error as any).exitCode || "unknown"}`)
 				logSync(`[RUN-TEST-LIFECYCLE]   This usually indicates:`)
 				logSync(`[RUN-TEST-LIFECYCLE]   - VS Code crashed`)
 				logSync(`[RUN-TEST-LIFECYCLE]   - Extension host crashed`)
 				logSync(`[RUN-TEST-LIFECYCLE]   - Test suite threw uncaught error`)
-			} else if (error.message.includes('ENOENT') || error.message.includes('not found')) {
+			} else if (error.message.includes("ENOENT") || error.message.includes("not found")) {
 				logSync(`[RUN-TEST-LIFECYCLE] ROOT CAUSE: File or path not found`)
 				logSync(`[RUN-TEST-LIFECYCLE]   Check that all paths exist:`)
-				logSync(`[RUN-TEST-LIFECYCLE]   - Extension path: ${extensionDevelopmentPath || 'NOT SET'}`)
-				logSync(`[RUN-TEST-LIFECYCLE]   - Test path: ${extensionTestsPath || 'NOT SET'}`)
-				logSync(`[RUN-TEST-LIFECYCLE]   - Workspace: ${testWorkspace || 'NOT SET'}`)
+				logSync(`[RUN-TEST-LIFECYCLE]   - Extension path: ${extensionDevelopmentPath || "NOT SET"}`)
+				logSync(`[RUN-TEST-LIFECYCLE]   - Test path: ${extensionTestsPath || "NOT SET"}`)
+				logSync(`[RUN-TEST-LIFECYCLE]   - Workspace: ${testWorkspace || "NOT SET"}`)
 			} else {
 				logSync(`[RUN-TEST-LIFECYCLE] ROOT CAUSE: Error from runTests() or VS Code`)
 				logSync(`[RUN-TEST-LIFECYCLE]   Error message: ${error.message}`)
@@ -368,7 +420,7 @@ async function main() {
 			logSync(`[RUN-TEST-LIFECYCLE] ROOT CAUSE: Unknown error type`)
 			logSync(`[RUN-TEST-LIFECYCLE]   Error: ${JSON.stringify(error)}`)
 		}
-		
+
 		logSync(`[RUN-TEST-LIFECYCLE] ========================================`)
 		logSync(`[RUN-TEST-LIFECYCLE] SUMMARY:`)
 		logSync(`[RUN-TEST-LIFECYCLE]   Unhandled rejections: ${unhandledRejections.length}`)

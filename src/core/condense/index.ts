@@ -6,10 +6,36 @@ import { t } from "../../i18n"
 import { ApiHandler } from "../../api"
 import { ApiMessage } from "../task-persistence/apiMessages"
 import { maybeRemoveImageBlocks } from "../../api/transform/image-cleaning"
+import { isAnyRateLimited } from "../rate-limit/RateLimitCoordinator"
 
 export const N_MESSAGES_TO_KEEP = 3
 export const MIN_CONDENSE_THRESHOLD = 5 // Minimum percentage of context window to trigger condensing
 export const MAX_CONDENSE_THRESHOLD = 100 // Maximum percentage of context window to trigger condensing
+
+/**
+ * Per-task guard to prevent spamming condense attempts when there aren't enough messages.
+ * Tracks the message count and timestamp of the last "not enough messages" failure.
+ * Condense won't be re-attempted until new messages are added or a cooldown expires.
+ */
+interface CondenseGuard {
+	/** Message count when condense last failed with "not enough messages" */
+	failedAtMessageCount: number
+	/** Timestamp of last failure */
+	failedAt: number
+}
+
+const condenseGuards = new Map<string, CondenseGuard>()
+const CONDENSE_COOLDOWN_MS = 60_000 // 60s cooldown after "not enough messages" failure
+
+/** Reset the condense guard for a task (call when new messages are added) */
+export function resetCondenseGuard(taskId: string): void {
+	condenseGuards.delete(taskId)
+}
+
+/** Clean up guard for a completed task */
+export function clearCondenseGuard(taskId: string): void {
+	condenseGuards.delete(taskId)
+}
 
 const SUMMARY_PROMPT = `\
 Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
@@ -101,6 +127,19 @@ export async function summarizeConversation(
 
 	const response: SummarizeResponse = { messages, cost: 0, summary: "" }
 
+	// Guard: if condense recently failed with "not enough messages" for this task,
+	// don't retry until new messages are added or cooldown expires.
+	const guard = condenseGuards.get(taskId)
+	if (guard) {
+		const cooldownExpired = Date.now() - guard.failedAt > CONDENSE_COOLDOWN_MS
+		const newMessagesAdded = messages.length > guard.failedAtMessageCount
+		if (!cooldownExpired && !newMessagesAdded) {
+			return { ...response, error: "Condense skipped: not enough messages (guard active)" }
+		}
+		// Guard condition no longer applies — clear it
+		condenseGuards.delete(taskId)
+	}
+
 	// Always preserve the first message (which may contain slash command content)
 	const firstMessage = messages[0]
 	// Get messages to summarize, including the first message and excluding the last N messages
@@ -111,6 +150,13 @@ export async function summarizeConversation(
 			messages.length <= N_MESSAGES_TO_KEEP + 1
 				? t("common:errors.condense_not_enough_messages")
 				: t("common:errors.condensed_recently")
+
+		// Set the guard so we don't spam this check
+		condenseGuards.set(taskId, {
+			failedAtMessageCount: messages.length,
+			failedAt: Date.now(),
+		})
+
 		return { ...response, error }
 	}
 
@@ -156,6 +202,14 @@ export async function summarizeConversation(
 			const error = t("common:errors.condense_handler_invalid")
 			return { ...response, error }
 		}
+	}
+
+	// Global rate limit gate: if ANY provider/model is currently rate-limited (e.g. TPM 429),
+	// skip the API call entirely. Making a condense call during active backoff burns TPM budget
+	// and causes the actual retry to fail too, creating a death spiral.
+	if (await isAnyRateLimited()) {
+		console.warn(`[summarizeConversation] Skipping: rate limit active. Will fall back to hard truncation.`)
+		return { ...response, error: "Skipped: rate limit backoff active" }
 	}
 
 	const stream = handlerToUse.createMessage(promptToUse, requestMessages)

@@ -17,9 +17,7 @@ Parameters:
 
 ⚠️ REQUIRED: path must be a non-empty string. Calls missing path will fail and must be corrected. If you do not know the path, use list_files or search_files first to discover available files.
 
-⚠️ CRITICAL: You MUST use XML format. Function-call syntax like read_file([...]) will NOT work.
-
-Usage (XML format ONLY):
+Usage:
 <read_file>
 <args>
   <file>
@@ -28,8 +26,6 @@ Usage (XML format ONLY):
   </file>
 </args>
 </read_file>
-
-❌ DO NOT use: read_file(["path/to/file"]) or read_file("path/to/file")
 
 Examples:
 
@@ -66,16 +62,7 @@ ${isMultipleReadsEnabled ? `2. Reading multiple files (within the ${maxConcurren
 			: ""
 	}
 
-${isMultipleReadsEnabled ? "3. " : "2. "}Reading an entire file:
-<read_file>
-<args>
-  <file>
-    <path>config.json</path>
-  </file>
-</args>
-</read_file>
-
-IMPORTANT: You MUST use this Efficient Reading Strategy:
+IMPORTANT: Efficient Reading Strategy:
 - ${isMultipleReadsEnabled ? `You MUST read all related files and implementations together in a single operation (up to ${maxConcurrentReads} files at once)` : "You MUST read files one at a time, as multiple file reads are currently disabled"}
 - You MUST obtain all necessary context before proceeding with changes
 ${

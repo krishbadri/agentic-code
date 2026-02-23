@@ -18,7 +18,7 @@ import { getModelParams } from "../transform/model-params"
 import { BaseProvider } from "./base-provider"
 import type { SingleCompletionHandler, ApiHandlerCreateMessageMetadata } from "../index"
 import { calculateApiCostAnthropic } from "../../shared/cost"
-import { maybeVcrWrapStream, type VcrRequestDescriptor } from "../vcr/recordReplay"
+import { maybeVcrWrapStreamLazy, type VcrRequestDescriptor } from "../vcr/recordReplay"
 import { isVcrEnabled } from "../vcr/vcrConfig"
 
 export class AnthropicHandler extends BaseProvider implements SingleCompletionHandler {
@@ -43,7 +43,6 @@ export class AnthropicHandler extends BaseProvider implements SingleCompletionHa
 		messages: Anthropic.Messages.MessageParam[],
 		metadata?: ApiHandlerCreateMessageMetadata,
 	): ApiStream {
-		let stream: AnthropicStream<Anthropic.Messages.RawMessageStreamEvent>
 		const cacheControl: CacheControlEphemeral = { type: "ephemeral" }
 		let { id: modelId, betas = [], maxTokens, temperature, reasoning: thinking } = this.getModel()
 
@@ -55,116 +54,116 @@ export class AnthropicHandler extends BaseProvider implements SingleCompletionHa
 			betas.push("context-1m-2025-08-07")
 		}
 
-		switch (modelId) {
-			case "claude-sonnet-4-5":
-			case "claude-sonnet-4-20250514":
-			case "claude-opus-4-1-20250805":
-			case "claude-opus-4-20250514":
-			case "claude-3-7-sonnet-20250219":
-			case "claude-3-5-sonnet-20241022":
-			case "claude-3-5-haiku-20241022":
-			case "claude-3-opus-20240229":
-			case "claude-haiku-4-5-20251001":
-			case "claude-3-haiku-20240307": {
-				/**
-				 * The latest message will be the new user message, one before
-				 * will be the assistant message from a previous request, and
-				 * the user message before that will be a previously cached user
-				 * message. So we need to mark the latest user message as
-				 * ephemeral to cache it for the next request, and mark the
-				 * second to last user message as ephemeral to let the server
-				 * know the last message to retrieve from the cache for the
-				 * current request.
-				 */
-				const userMsgIndices = messages.reduce(
-					(acc, msg, index) => (msg.role === "user" ? [...acc, index] : acc),
-					[] as number[],
-				)
+		const vcrDescriptor: VcrRequestDescriptor = {
+			providerName: "anthropic",
+			model: modelId,
+			endpoint: "anthropic-messages",
+			params: {
+				messages,
+				system: systemPrompt,
+				max_tokens: maxTokens ?? ANTHROPIC_DEFAULT_MAX_TOKENS,
+				temperature,
+				thinking,
+				stream: true,
+			},
+		}
 
-				const lastUserMsgIndex = userMsgIndices[userMsgIndices.length - 1] ?? -1
-				const secondLastMsgUserIndex = userMsgIndices[userMsgIndices.length - 2] ?? -1
+		const createRealStream = async (): Promise<AnthropicStream<Anthropic.Messages.RawMessageStreamEvent>> => {
+			switch (modelId) {
+				case "claude-sonnet-4-5":
+				case "claude-sonnet-4-20250514":
+				case "claude-opus-4-1-20250805":
+				case "claude-opus-4-20250514":
+				case "claude-3-7-sonnet-20250219":
+				case "claude-3-5-sonnet-20241022":
+				case "claude-3-5-haiku-20241022":
+				case "claude-3-opus-20240229":
+				case "claude-haiku-4-5-20251001":
+				case "claude-3-haiku-20240307": {
+					/**
+					 * The latest message will be the new user message, one before
+					 * will be the assistant message from a previous request, and
+					 * the user message before that will be a previously cached user
+					 * message. So we need to mark the latest user message as
+					 * ephemeral to cache it for the next request, and mark the
+					 * second to last user message as ephemeral to let the server
+					 * know the last message to retrieve from the cache for the
+					 * current request.
+					 */
+					const userMsgIndices = messages.reduce(
+						(acc, msg, index) => (msg.role === "user" ? [...acc, index] : acc),
+						[] as number[],
+					)
 
-				stream = await this.client.messages.create(
-					{
+					const lastUserMsgIndex = userMsgIndices[userMsgIndices.length - 1] ?? -1
+					const secondLastMsgUserIndex = userMsgIndices[userMsgIndices.length - 2] ?? -1
+
+					return (await this.client.messages.create(
+						{
+							model: modelId,
+							max_tokens: maxTokens ?? ANTHROPIC_DEFAULT_MAX_TOKENS,
+							temperature,
+							thinking,
+							// Setting cache breakpoint for system prompt so new tasks can reuse it.
+							system: [{ text: systemPrompt, type: "text", cache_control: cacheControl }],
+							messages: messages.map((message, index) => {
+								if (index === lastUserMsgIndex || index === secondLastMsgUserIndex) {
+									return {
+										...message,
+										content:
+											typeof message.content === "string"
+												? [{ type: "text", text: message.content, cache_control: cacheControl }]
+												: message.content.map((content, contentIndex) =>
+														contentIndex === message.content.length - 1
+															? { ...content, cache_control: cacheControl }
+															: content,
+													),
+									}
+								}
+								return message
+							}),
+							stream: true,
+						},
+						(() => {
+							// prompt caching: https://x.com/alexalbert__/status/1823751995901272068
+							// https://github.com/anthropics/anthropic-sdk-typescript?tab=readme-ov-file#default-headers
+							// https://github.com/anthropics/anthropic-sdk-typescript/commit/c920b77fc67bd839bfeb6716ceab9d7c9bbe7393
+							switch (modelId) {
+								case "claude-sonnet-4-5":
+								case "claude-sonnet-4-20250514":
+								case "claude-opus-4-1-20250805":
+								case "claude-opus-4-20250514":
+								case "claude-3-7-sonnet-20250219":
+								case "claude-3-5-sonnet-20241022":
+								case "claude-3-5-haiku-20241022":
+								case "claude-3-opus-20240229":
+								case "claude-haiku-4-5-20251001":
+								case "claude-3-haiku-20240307":
+									betas.push("prompt-caching-2024-07-31")
+									return { headers: { "anthropic-beta": betas.join(",") } }
+								default:
+									return undefined
+							}
+						})(),
+					)) as any
+				}
+				default: {
+					return (await this.client.messages.create({
 						model: modelId,
 						max_tokens: maxTokens ?? ANTHROPIC_DEFAULT_MAX_TOKENS,
 						temperature,
-						thinking,
-						// Setting cache breakpoint for system prompt so new tasks can reuse it.
-						system: [{ text: systemPrompt, type: "text", cache_control: cacheControl }],
-						messages: messages.map((message, index) => {
-							if (index === lastUserMsgIndex || index === secondLastMsgUserIndex) {
-								return {
-									...message,
-									content:
-										typeof message.content === "string"
-											? [{ type: "text", text: message.content, cache_control: cacheControl }]
-											: message.content.map((content, contentIndex) =>
-													contentIndex === message.content.length - 1
-														? { ...content, cache_control: cacheControl }
-														: content,
-												),
-								}
-							}
-							return message
-						}),
+						system: [{ text: systemPrompt, type: "text" }],
+						messages,
 						stream: true,
-					},
-					(() => {
-						// prompt caching: https://x.com/alexalbert__/status/1823751995901272068
-						// https://github.com/anthropics/anthropic-sdk-typescript?tab=readme-ov-file#default-headers
-						// https://github.com/anthropics/anthropic-sdk-typescript/commit/c920b77fc67bd839bfeb6716ceab9d7c9bbe7393
-
-						// Then check for models that support prompt caching
-						switch (modelId) {
-							case "claude-sonnet-4-5":
-							case "claude-sonnet-4-20250514":
-							case "claude-opus-4-1-20250805":
-							case "claude-opus-4-20250514":
-							case "claude-3-7-sonnet-20250219":
-							case "claude-3-5-sonnet-20241022":
-							case "claude-3-5-haiku-20241022":
-							case "claude-3-opus-20240229":
-							case "claude-haiku-4-5-20251001":
-							case "claude-3-haiku-20240307":
-								betas.push("prompt-caching-2024-07-31")
-								return { headers: { "anthropic-beta": betas.join(",") } }
-							default:
-								return undefined
-						}
-					})(),
-				)
-				break
-			}
-			default: {
-				stream = (await this.client.messages.create({
-					model: modelId,
-					max_tokens: maxTokens ?? ANTHROPIC_DEFAULT_MAX_TOKENS,
-					temperature,
-					system: [{ text: systemPrompt, type: "text" }],
-					messages,
-					stream: true,
-				})) as any
-				break
+					})) as any
+				}
 			}
 		}
 
-		// Wrap stream with VCR if enabled
-		if (isVcrEnabled()) {
-			const descriptor: VcrRequestDescriptor = {
-				providerName: "anthropic",
-				model: modelId,
-				endpoint: "anthropic-messages",
-				params: {
-					messages: messages,
-					system: systemPrompt,
-					max_tokens: maxTokens ?? ANTHROPIC_DEFAULT_MAX_TOKENS,
-					temperature,
-					thinking,
-				},
-			}
-			stream = (await maybeVcrWrapStream(descriptor, stream)) as AnthropicStream<Anthropic.Messages.RawMessageStreamEvent>
-		}
+		// IMPORTANT: In replay mode, do NOT create the real stream (would make a live network call).
+		const stream = isVcrEnabled()
+			? ((await maybeVcrWrapStreamLazy(vcrDescriptor, createRealStream)) as any)
+			: await createRealStream()
 
 		let inputTokens = 0
 		let outputTokens = 0

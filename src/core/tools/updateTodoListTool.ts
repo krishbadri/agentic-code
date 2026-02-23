@@ -11,12 +11,24 @@ let approvedTodoList: TodoItem[] | undefined = undefined
 
 /**
  * Add a todo item to the task's todoList.
+ * @param cline Task instance
+ * @param content Todo content
+ * @param status Todo status (default: "pending")
+ * @param id Optional todo ID
+ * @param project Optional project name (default: "default")
  */
-export function addTodoToTask(cline: Task, content: string, status: TodoStatus = "pending", id?: string): TodoItem {
+export function addTodoToTask(
+	cline: Task,
+	content: string,
+	status: TodoStatus = "pending",
+	id?: string,
+	project?: string,
+): TodoItem {
 	const todo: TodoItem = {
 		id: id ?? crypto.randomUUID(),
 		content,
 		status,
+		project: project ?? "default", // Default project isolation
 	}
 	if (!cline.todoList) cline.todoList = []
 	cline.todoList.push(todo)
@@ -24,11 +36,16 @@ export function addTodoToTask(cline: Task, content: string, status: TodoStatus =
 }
 
 /**
- * Update the status of a todo item by id.
+ * Update the status of a todo item by id (within a specific project).
+ * @param cline Task instance
+ * @param id Todo ID
+ * @param nextStatus New status
+ * @param project Optional project name (default: "default")
  */
-export function updateTodoStatusForTask(cline: Task, id: string, nextStatus: TodoStatus): boolean {
+export function updateTodoStatusForTask(cline: Task, id: string, nextStatus: TodoStatus, project?: string): boolean {
 	if (!cline.todoList) return false
-	const idx = cline.todoList.findIndex((t) => t.id === id)
+	const targetProject = project ?? "default"
+	const idx = cline.todoList.findIndex((t) => t.id === id && (t.project ?? "default") === targetProject)
 	if (idx === -1) return false
 	const current = cline.todoList[idx]
 	if (
@@ -43,29 +60,65 @@ export function updateTodoStatusForTask(cline: Task, id: string, nextStatus: Tod
 }
 
 /**
- * Remove a todo item by id.
+ * Remove a todo item by id (within a specific project).
+ * @param cline Task instance
+ * @param id Todo ID
+ * @param project Optional project name (default: "default")
  */
-export function removeTodoFromTask(cline: Task, id: string): boolean {
+export function removeTodoFromTask(cline: Task, id: string, project?: string): boolean {
 	if (!cline.todoList) return false
-	const idx = cline.todoList.findIndex((t) => t.id === id)
+	const targetProject = project ?? "default"
+	const idx = cline.todoList.findIndex((t) => t.id === id && (t.project ?? "default") === targetProject)
 	if (idx === -1) return false
 	cline.todoList.splice(idx, 1)
 	return true
 }
 
 /**
- * Get a copy of the todoList.
+ * Get a copy of the todoList (filtered by project if specified).
+ * @param cline Task instance
+ * @param project Optional project name to filter by (default: returns all todos)
  */
-export function getTodoListForTask(cline: Task): TodoItem[] | undefined {
-	return cline.todoList?.slice()
+export function getTodoListForTask(cline: Task, project?: string): TodoItem[] | undefined {
+	if (!cline.todoList) return undefined
+	if (project === undefined) {
+		// No filter - return all todos
+		return cline.todoList.slice()
+	}
+	// Filter by project
+	return cline.todoList.filter((t) => (t.project ?? "default") === project)
 }
 
 /**
- * Set the todoList for the task.
+ * Set the todoList for the task (project-aware).
+ * If project is specified, only replaces todos for that project.
+ * If project is omitted, replaces the entire todo list (backward compatibility).
+ * @param cline Task instance
+ * @param todos New todos to set
+ * @param project Optional project name for isolation
  */
-export async function setTodoListForTask(cline?: Task, todos?: TodoItem[]) {
+export async function setTodoListForTask(cline?: Task, todos?: TodoItem[], project?: string) {
 	if (cline === undefined) return
-	cline.todoList = Array.isArray(todos) ? todos : []
+
+	if (!Array.isArray(todos)) {
+		cline.todoList = []
+		return
+	}
+
+	if (project === undefined) {
+		// No project specified - replace entire list (backward compatibility)
+		cline.todoList = todos
+		return
+	}
+
+	// Project specified - only replace todos for that project
+	if (!cline.todoList) cline.todoList = []
+
+	// Remove existing todos for this project
+	cline.todoList = cline.todoList.filter((t) => (t.project ?? "default") !== project)
+
+	// Add new todos for this project
+	cline.todoList.push(...todos)
 }
 
 /**
@@ -100,13 +153,14 @@ function normalizeStatus(status: string | undefined): TodoStatus {
 	return "pending"
 }
 
-export function parseMarkdownChecklist(md: string): TodoItem[] {
+export function parseMarkdownChecklist(md: string, project?: string): TodoItem[] {
 	if (typeof md !== "string") return []
 	const lines = md
 		.split(/\r?\n/)
 		.map((l) => l.trim())
 		.filter(Boolean)
 	const todos: TodoItem[] = []
+	const targetProject = project ?? "default"
 	for (const line of lines) {
 		// Support both "[ ] Task" and "- [ ] Task" formats
 		const match = line.match(/^(?:-\s*)?\[\s*([ xX\-~])\s*\]\s+(.+)$/)
@@ -116,12 +170,13 @@ export function parseMarkdownChecklist(md: string): TodoItem[] {
 		else if (match[1] === "-" || match[1] === "~") status = "in_progress"
 		const id = crypto
 			.createHash("md5")
-			.update(match[2] + status)
+			.update(match[2] + status + targetProject) // Include project in hash for uniqueness
 			.digest("hex")
 		todos.push({
 			id,
 			content: match[2],
 			status,
+			project: targetProject,
 		})
 	}
 	return todos
@@ -140,6 +195,8 @@ function validateTodos(todos: any[]): { valid: boolean; error?: string } {
 			return { valid: false, error: `Item ${i + 1} is missing content` }
 		if (t.status && !todoStatusSchema.options.includes(t.status as TodoStatus))
 			return { valid: false, error: `Item ${i + 1} has invalid status` }
+		if (t.project && typeof t.project !== "string")
+			return { valid: false, error: `Item ${i + 1} has invalid project (must be string)` }
 	}
 	return { valid: true }
 }
@@ -170,10 +227,11 @@ export async function updateTodoListTool(
 	}
 	try {
 		const todosRaw = block.params.todos
+		const project = block.params.project ?? "default" // Default project for isolation
 
 		let todos: TodoItem[]
 		try {
-			todos = parseMarkdownChecklist(todosRaw || "")
+			todos = parseMarkdownChecklist(todosRaw || "", project)
 		} catch {
 			cline.consecutiveMistakeCount++
 			cline.recordToolError("update_todo_list")
@@ -193,6 +251,7 @@ export async function updateTodoListTool(
 			id: t.id,
 			content: t.content,
 			status: normalizeStatus(t.status),
+			project: t.project ?? project, // Ensure project is set
 		}))
 
 		const approvalMsg = JSON.stringify({
@@ -222,14 +281,14 @@ export async function updateTodoListTool(
 			)
 		}
 
-		await setTodoListForTask(cline, normalizedTodos)
+		await setTodoListForTask(cline, normalizedTodos, project)
 
 		// If todo list changed, output new todo list in markdown format
 		if (isTodoListChanged) {
 			const md = todoListToMarkdown(normalizedTodos)
-			pushToolResult(formatResponse.toolResult("User edits todo:\n\n" + md))
+			pushToolResult(formatResponse.toolResult(`User edits todo (project: ${project}):\n\n` + md))
 		} else {
-			pushToolResult(formatResponse.toolResult("Todo list updated successfully."))
+			pushToolResult(formatResponse.toolResult(`Todo list updated successfully (project: ${project}).`))
 		}
 	} catch (error) {
 		await handleError("update todo list", error)

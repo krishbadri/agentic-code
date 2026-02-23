@@ -42,7 +42,12 @@ export function truncateConversation(messages: ApiMessage[], fracToRemove: numbe
 	TelemetryService.instance.captureSlidingWindowTruncation(taskId)
 	const truncatedMessages = [messages[0]]
 	const rawMessagesToRemove = Math.floor((messages.length - 1) * fracToRemove)
-	const messagesToRemove = rawMessagesToRemove - (rawMessagesToRemove % 2)
+	let messagesToRemove = rawMessagesToRemove - (rawMessagesToRemove % 2)
+	// CRITICAL: when fracToRemove > 0 we must remove something. Round-to-even can give 0 (e.g. raw=1→0).
+	// That causes "request too large" to retry forever without shrinking. Force at least 2 when we have room.
+	if (fracToRemove > 0 && messagesToRemove === 0 && messages.length >= 4) {
+		messagesToRemove = 2
+	}
 	const remainingMessages = messages.slice(messagesToRemove + 1)
 	truncatedMessages.push(...remainingMessages)
 

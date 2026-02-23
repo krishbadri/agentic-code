@@ -1,9 +1,27 @@
 /**
  * Global Rate Limit Coordinator
- * 
+ *
  * Prevents rate limit cascades by coordinating API requests across all tasks/subtasks.
  * When a 429 error is encountered, all pending requests wait for the rate limit window to reset.
  */
+
+/**
+ * Extract "try again in Xs" or similar from error message.
+ * Returns seconds to wait, or null if not found.
+ */
+export function extractRetryAfterSeconds(error: any): number | null {
+	const info = extractRateLimitInfo(error)
+	if (info.resetAfterSeconds && info.resetAfterSeconds > 0 && info.resetAfterSeconds < 600) {
+		return info.resetAfterSeconds
+	}
+	if (info.resetTimestamp) {
+		const waitMs = info.resetTimestamp - Date.now()
+		if (waitMs > 0 && waitMs < 600000) {
+			return Math.ceil(waitMs / 1000)
+		}
+	}
+	return null
+}
 
 /**
  * Check if an error is a rate limit error (429)
@@ -14,13 +32,13 @@ export function isRateLimitError(error: any): boolean {
 	if (error?.status === 429 || error?.statusCode === 429) {
 		return true
 	}
-	
+
 	// Check error message for rate limit indicators
 	const errorMessage = error?.message || error?.error?.message || String(error || "")
 	if (errorMessage && typeof errorMessage === "string") {
 		return /429|rate limit|rate limit reached|rate limit exceeded/i.test(errorMessage)
 	}
-	
+
 	return false
 }
 
@@ -30,17 +48,24 @@ export function isRateLimitError(error: any): boolean {
  * Checks both status code and error message patterns
  */
 export function isAuthenticationError(error: any): boolean {
+	// Never treat rate limits as auth failures, even if some SDKs misreport status codes.
+	if (isRateLimitError(error)) {
+		return false
+	}
+
 	// Check for status code 401
 	if (error?.status === 401 || error?.statusCode === 401) {
 		return true
 	}
-	
+
 	// Check error message for authentication error indicators
 	const errorMessage = error?.message || error?.error?.message || String(error || "")
 	if (errorMessage && typeof errorMessage === "string") {
-		return /401|incorrect api key|invalid api key|authentication failed|unauthorized|not-provided/i.test(errorMessage)
+		return /401|incorrect api key|invalid api key|authentication failed|unauthorized|not-provided/i.test(
+			errorMessage,
+		)
 	}
-	
+
 	return false
 }
 
@@ -54,13 +79,15 @@ export function isBillingError(error: any): boolean {
 	if (error?.status === 402 || error?.statusCode === 402) {
 		return true
 	}
-	
+
 	// Check error message for billing/credits error indicators
 	const errorMessage = error?.message || error?.error?.message || String(error || "")
 	if (errorMessage && typeof errorMessage === "string") {
-		return /402|insufficient credits|insufficient balance|payment required|billing|credits|account.*never purchased/i.test(errorMessage)
+		return /402|insufficient credits|insufficient balance|payment required|billing|credits|account.*never purchased/i.test(
+			errorMessage,
+		)
 	}
-	
+
 	return false
 }
 
@@ -158,13 +185,16 @@ function extractRateLimitInfo(error: any): RateLimitInfo {
 	}
 
 	// Try to extract from error message (common patterns)
-	// Check multiple possible locations for the error message
+	// Check multiple possible locations for the error message (OpenAI Responses API, etc.)
 	const errorMessages: string[] = []
 	if (error.message) errorMessages.push(error.message)
 	if (error.error?.message) errorMessages.push(error.error.message)
 	if (error.error?.error?.message) errorMessages.push(error.error.error.message)
+	if (error.error?.metadata?.raw && typeof error.error.metadata.raw === "string") {
+		errorMessages.push(error.error.metadata.raw)
+	}
 	if (typeof error === "string") errorMessages.push(error)
-	
+
 	// Also check if error itself is an Error object with a message
 	if (error instanceof Error && error.message) {
 		errorMessages.push(error.message)
@@ -172,7 +202,7 @@ function extractRateLimitInfo(error: any): RateLimitInfo {
 
 	for (const errorMsg of errorMessages) {
 		if (!errorMsg || typeof errorMsg !== "string") continue
-		
+
 		info.errorMessage = errorMsg
 
 		// Pattern: "try again in Xms" or "try again in X ms" (milliseconds)
@@ -219,7 +249,7 @@ function extractRateLimitInfo(error: any): RateLimitInfo {
 				break // Found it, stop searching
 			}
 		}
-		
+
 		// Also try "retry after X seconds" pattern
 		const retryAfterMatch = errorMsg.match(/retry after ([\d.]+)\s*seconds?/i)
 		if (retryAfterMatch && retryAfterMatch[1]) {
@@ -296,11 +326,7 @@ function extractRateLimitInfo(error: any): RateLimitInfo {
 /**
  * Record a rate limit error and update global state
  */
-export async function recordRateLimitError(
-	provider: string,
-	modelId: string,
-	error: any,
-): Promise<void> {
+export async function recordRateLimitError(provider: string, modelId: string, error: any): Promise<void> {
 	const release = await mutex.acquire()
 	try {
 		const key = getStateKey(provider, modelId)
@@ -315,11 +341,16 @@ export async function recordRateLimitError(
 			console.log(`[RateLimitCoordinator] Using reset timestamp: ${new Date(resetTime).toISOString()}`)
 		} else if (info.resetAfterSeconds) {
 			// Use Retry-After seconds (API told us exactly how long to wait)
-			// Add 0.5 second buffer to account for clock skew and processing time
-			// Round up to nearest second (e.g., 1.122s -> wait 2s total)
-			const waitSeconds = Math.ceil(info.resetAfterSeconds + 0.5)
+			// Add buffer to account for clock skew and processing time.
+			// Torture/e2e runs are especially sensitive to thrash (repeated rapid retries burn the whole timeout),
+			// so add a larger safety buffer when TEST_TORTURE_REPO=1.
+			// Round up to nearest second (e.g., 1.122s -> wait 2s total).
+			const bufferSeconds = process.env.TEST_TORTURE_REPO === "1" ? 5 : 0.5
+			const waitSeconds = Math.ceil(info.resetAfterSeconds + bufferSeconds)
 			resetTime = now + waitSeconds * 1000
-			console.log(`[RateLimitCoordinator] Extracted ${info.resetAfterSeconds}s from error, waiting ${waitSeconds}s (from message: ${info.errorMessage?.substring(0, 100)})`)
+			console.log(
+				`[RateLimitCoordinator] Extracted ${info.resetAfterSeconds}s from error, waiting ${waitSeconds}s (from message: ${info.errorMessage?.substring(0, 100)})`,
+			)
 		} else {
 			// Default: wait 60 seconds (typical TPM window) - only used if API doesn't specify
 			resetTime = now + 60000
@@ -378,10 +409,15 @@ export async function getRateLimitDelay(provider: string, modelId: string): Prom
 /**
  * Wait for rate limit to clear before proceeding
  */
-export async function waitForRateLimit(provider: string, modelId: string): Promise<void> {
+export async function waitForRateLimit(provider: string, modelId: string, abortCheck?: () => boolean): Promise<void> {
 	const delay = await getRateLimitDelay(provider, modelId)
 	if (delay > 0) {
-		await new Promise((resolve) => setTimeout(resolve, delay))
+		// Use abort-aware polling instead of a single long setTimeout
+		const endTime = Date.now() + delay
+		while (Date.now() < endTime) {
+			if (abortCheck?.()) return
+			await new Promise((resolve) => setTimeout(resolve, 1000))
+		}
 		// Clear the rate limit state after waiting
 		const release = await mutex.acquire()
 		try {
@@ -402,18 +438,10 @@ export async function clearRateLimit(provider: string, modelId: string): Promise
 		const key = getStateKey(provider, modelId)
 		const state = rateLimitState.get(key)
 
-		// Only clear if we haven't hit consecutive errors
-		// If we have, keep the state but reduce consecutive count
+		// On successful request, always clear rate limit state entirely.
+		// Keeping stale state causes the next request to wait for a stale resetTime.
 		if (state) {
-			if (state.consecutiveErrors <= 1) {
-				rateLimitState.delete(key)
-			} else {
-				// Reduce consecutive errors but keep rate limit state
-				rateLimitState.set(key, {
-					...state,
-					consecutiveErrors: Math.max(0, state.consecutiveErrors - 1),
-				})
-			}
+			rateLimitState.delete(key)
 		}
 	} finally {
 		release()
@@ -426,4 +454,24 @@ export async function clearRateLimit(provider: string, modelId: string): Promise
 export async function isRateLimited(provider: string, modelId: string): Promise<boolean> {
 	const delay = await getRateLimitDelay(provider, modelId)
 	return delay > 0
+}
+
+/**
+ * Check if ANY provider/model is currently rate limited.
+ * Used as a global gate to prevent auxiliary API calls (condense, planner, etc.)
+ * from burning TPM budget during an active backoff window.
+ */
+export async function isAnyRateLimited(): Promise<boolean> {
+	const release = await mutex.acquire()
+	try {
+		const now = Date.now()
+		for (const [key, state] of rateLimitState) {
+			if (state.isRateLimited && state.resetTime > now) {
+				return true
+			}
+		}
+		return false
+	} finally {
+		release()
+	}
 }
