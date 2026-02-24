@@ -457,7 +457,7 @@ export async function presentAssistantMessage(cline: Task) {
 			if (!block.partial) {
 				cline.recordToolUsage(block.name)
 				TelemetryService.instance.captureToolUsage(cline.taskId, block.name)
-				cline.taskLogger?.logToolCall(block.name, true)
+				cline.taskLogger?.logToolCall(block.name, true, block.params as Record<string, unknown>)
 
 				// P3 Replay: Log full tool call with input for reproducibility
 				cline.logToolCall(block.name, block.params as Record<string, unknown>)
@@ -816,6 +816,13 @@ async function runPostEditQualityGate(task: Task): Promise<void> {
 		const verdict = await evaluateQualityGate(task, "auto")
 
 		if (verdict.action === "rollback") {
+			task.taskLogger?.logQualityGate(
+				"rollback",
+				verdict.score.testsPassing,
+				verdict.score.testsTotal,
+				verdict.score.compileClean,
+				verdict.reason,
+			)
 			const message = await executeQualityGateRollback(task, verdict)
 			// Reset checkpoint flag — state was rolled back, next edit needs a fresh snapshot
 			task.currentStreamingDidCheckpoint = false
@@ -825,6 +832,12 @@ async function runPostEditQualityGate(task: Task): Promise<void> {
 				text: `\n\n⚠️ POST-EDIT QUALITY GATE FAILED — AUTOMATIC ROLLBACK\n${message}`,
 			})
 		} else if (verdict.action === "save") {
+			task.taskLogger?.logQualityGate(
+				"save",
+				verdict.score.testsPassing,
+				verdict.score.testsTotal,
+				verdict.score.compileClean,
+			)
 			// Get the shadow checkpoint hash from the last checkpoint_saved message.
 			// ShadowCheckpointService.saveCheckpoint emits the "checkpoint" event synchronously
 			// before the saveCheckpoint promise resolves, and the event handler pushes to
@@ -835,8 +848,10 @@ async function runPostEditQualityGate(task: Task): Promise<void> {
 			if (shadowHashMsg?.text) {
 				recordCheckpointSaved(task, `auto-${Date.now()}`, shadowHashMsg.text, verdict.score)
 			}
+		} else {
+			// "skip": no test framework detectable — cannot validate, do nothing
+			task.taskLogger?.logQualityGate("skip", 0, 0, true, verdict.reason)
 		}
-		// "skip": no test framework detectable — cannot validate, do nothing
 	} catch (error: unknown) {
 		// Non-fatal: quality gate errors must never break tool execution
 		console.error("[PostEditQualityGate] Error (non-fatal):", error)

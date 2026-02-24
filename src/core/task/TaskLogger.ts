@@ -31,11 +31,29 @@ export class TaskLogger {
 		})
 	}
 
-	logToolCall(name: string, success: boolean): void {
+	logToolCall(name: string, success: boolean, params?: Record<string, unknown>): void {
 		this.logger.info("tool called", {
 			ctx: "tool",
 			name,
 			success,
+			...(params ? { params } : {}),
+		})
+	}
+
+	logQualityGate(
+		action: "save" | "rollback" | "skip",
+		testsPassing: number,
+		testsTotal: number,
+		compileClean: boolean,
+		reason?: string,
+	): void {
+		this.logger.info("quality gate", {
+			ctx: "quality",
+			action,
+			testsPassing,
+			testsTotal,
+			compileClean,
+			...(reason ? { reason } : {}),
 		})
 	}
 
