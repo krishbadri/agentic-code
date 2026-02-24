@@ -1,7 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk"
 import * as vscode from "vscode"
 
-import { RooCodeEventName, type ClineAskResponse } from "@roo-code/types"
+import { RooCodeEventName } from "@roo-code/types"
+import type { ClineAskResponse } from "../../shared/WebviewMessage"
 import { TelemetryService } from "@roo-code/telemetry"
 
 import { Task } from "../task/Task"
@@ -117,7 +118,10 @@ export async function attemptCompletionTool(
 					await cline.say("completion_result", removeClosingTag("result", result), undefined, false)
 
 					TelemetryService.instance.captureTaskCompleted(cline.taskId)
-					cline.emit(RooCodeEventName.TaskCompleted, cline.taskId, cline.getTokenUsage(), cline.toolUsage)
+					const tokenUsageCmpl0 = cline.getTokenUsage()
+					cline.taskLogger?.logTaskEnd("success", tokenUsageCmpl0 as any, cline.toolUsage as any)
+					cline.taskLogger?.close()
+					cline.emit(RooCodeEventName.TaskCompleted, cline.taskId, tokenUsageCmpl0, cline.toolUsage)
 
 					await cline.ask("command", removeClosingTag("command", command), block.partial).catch(() => {})
 				}
@@ -140,7 +144,10 @@ export async function attemptCompletionTool(
 			// Users must use execute_command tool separately before attempt_completion
 			await cline.say("completion_result", result, undefined, false)
 			TelemetryService.instance.captureTaskCompleted(cline.taskId)
-			cline.emit(RooCodeEventName.TaskCompleted, cline.taskId, cline.getTokenUsage(), cline.toolUsage)
+			const tokenUsageCmpl1 = cline.getTokenUsage()
+			cline.taskLogger?.logTaskEnd("success", tokenUsageCmpl1 as any, cline.toolUsage as any)
+			cline.taskLogger?.close()
+			cline.emit(RooCodeEventName.TaskCompleted, cline.taskId, tokenUsageCmpl1, cline.toolUsage)
 
 			if (cline.parentTask) {
 				const didApprove = await askFinishSubTaskApproval()

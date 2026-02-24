@@ -181,7 +181,7 @@ export class OpenAiHandler extends BaseProvider implements SingleCompletionHandl
 					max_tokens: requestOptions.max_tokens ?? undefined,
 					stream: requestOptions.stream,
 					stream_options: requestOptions.stream_options,
-					reasoning: requestOptions.reasoning ?? undefined,
+					reasoning: (reasoning as any) ?? undefined,
 				},
 			}
 

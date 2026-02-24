@@ -1,7 +1,8 @@
 import cloneDeep from "clone-deep"
 import { serializeError } from "serialize-error"
 
-import type { ToolName, ClineAsk, ToolProgressStatus, ClineAskResponse } from "@roo-code/types"
+import type { ToolName, ClineAsk, ToolProgressStatus } from "@roo-code/types"
+import type { ClineAskResponse } from "../../shared/WebviewMessage"
 import { getApiProtocol, getModelId } from "@roo-code/types"
 import { TelemetryService } from "@roo-code/telemetry"
 
