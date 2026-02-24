@@ -267,7 +267,7 @@ function isRegression(newScore: QualityScore, prevScore: QualityScore): boolean 
 const stateCache = new Map<string, QualityGateState>()
 
 function getCacheKey(task: Task): string {
-	return task.rootTaskId || (task as any).rootTask?.taskId || task.taskId
+	return task.taskId
 }
 
 function getState(task: Task): QualityGateState {

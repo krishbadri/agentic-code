@@ -183,9 +183,13 @@ export class Git {
 	/**
 	 * Reset a worktree to a specific commit (hard reset).
 	 * R33: Used for progress gate rollback.
+	 * Cleans untracked files first so test artifacts (coverage, __pycache__,
+	 * jest transform caches) from the bad state don't survive the reset and
+	 * corrupt subsequent test runs.
 	 */
 	public async resetHard(tx_id: string, targetRef: string): Promise<void> {
 		const wt = this.worktreePath(tx_id)
+		await this.git(["clean", "-fd"], wt)
 		await this.git(["reset", "--hard", targetRef], wt)
 	}
 

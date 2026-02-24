@@ -40,6 +40,7 @@ import { Task } from "../task/Task"
 import { codebaseSearchTool } from "../tools/codebaseSearchTool"
 import { experiments, EXPERIMENT_IDS } from "../../shared/experiments"
 import { applyDiffToolLegacy } from "../tools/applyDiffTool"
+import { evaluateQualityGate, executeQualityGateRollback, recordCheckpointSaved } from "../checkpoints/QualityGate"
 
 /**
  * Processes and presents assistant message content to the user interface.
@@ -455,6 +456,7 @@ export async function presentAssistantMessage(cline: Task) {
 			if (!block.partial) {
 				cline.recordToolUsage(block.name)
 				TelemetryService.instance.captureToolUsage(cline.taskId, block.name)
+				cline.taskLogger?.logToolCall(block.name, true)
 
 				// P3 Replay: Log full tool call with input for reproducibility
 				cline.logToolCall(block.name, block.params as Record<string, unknown>)
@@ -568,6 +570,7 @@ export async function presentAssistantMessage(cline: Task) {
 				case "write_to_file":
 					await checkpointSaveAndMark(cline)
 					await writeToFileTool(cline, block, askApproval, handleError, pushToolResult, removeClosingTag)
+					if (!block.partial) await runPostEditQualityGate(cline)
 					break
 				case "update_todo_list":
 					await updateTodoListTool(cline, block, askApproval, handleError, pushToolResult, removeClosingTag)
@@ -588,6 +591,7 @@ export async function presentAssistantMessage(cline: Task) {
 					if (isMultiFileApplyDiffEnabled) {
 						await checkpointSaveAndMark(cline)
 						await applyDiffTool(cline, block, askApproval, handleError, pushToolResult, removeClosingTag)
+						if (!block.partial) await runPostEditQualityGate(cline)
 					} else {
 						await checkpointSaveAndMark(cline)
 						await applyDiffToolLegacy(
@@ -598,16 +602,19 @@ export async function presentAssistantMessage(cline: Task) {
 							pushToolResult,
 							removeClosingTag,
 						)
+						if (!block.partial) await runPostEditQualityGate(cline)
 					}
 					break
 				}
 				case "insert_content":
 					await checkpointSaveAndMark(cline)
 					await insertContentTool(cline, block, askApproval, handleError, pushToolResult, removeClosingTag)
+					if (!block.partial) await runPostEditQualityGate(cline)
 					break
 				case "search_and_replace":
 					await checkpointSaveAndMark(cline)
 					await searchAndReplaceTool(cline, block, askApproval, handleError, pushToolResult, removeClosingTag)
+					if (!block.partial) await runPostEditQualityGate(cline)
 					break
 				case "read_file":
 					// Check if this model should use the simplified single-file read tool
@@ -793,5 +800,44 @@ async function checkpointSaveAndMark(task: Task) {
 		task.currentStreamingDidCheckpoint = true
 	} catch (error) {
 		console.error(`[Task#presentAssistantMessage] Error saving checkpoint: ${error.message}`, error)
+	}
+}
+
+/**
+ * After a file-mutating tool completes, run quality gate.
+ * If tests pass: record as verified safe checkpoint.
+ * If tests regress: rollback to last safe checkpoint and inform LLM.
+ */
+async function runPostEditQualityGate(task: Task): Promise<void> {
+	if (!task.enableCheckpoints) return
+
+	try {
+		const verdict = await evaluateQualityGate(task, "auto")
+
+		if (verdict.action === "rollback") {
+			const message = await executeQualityGateRollback(task, verdict)
+			// Reset checkpoint flag — state was rolled back, next edit needs a fresh snapshot
+			task.currentStreamingDidCheckpoint = false
+			// Append rollback notice to user message so LLM sees it
+			task.userMessageContent.push({
+				type: "text",
+				text: `\n\n⚠️ POST-EDIT QUALITY GATE FAILED — AUTOMATIC ROLLBACK\n${message}`,
+			})
+		} else if (verdict.action === "save") {
+			// Get the shadow checkpoint hash from the last checkpoint_saved message.
+			// ShadowCheckpointService.saveCheckpoint emits the "checkpoint" event synchronously
+			// before the saveCheckpoint promise resolves, and the event handler pushes to
+			// task.clineMessages synchronously (before its first await in addToClineMessages).
+			// So by the time checkpointSaveAndMark returns, the shadow hash is already in
+			// clineMessages — no race condition.
+			const shadowHashMsg = task.clineMessages.filter((m) => m.say === "checkpoint_saved").at(-1)
+			if (shadowHashMsg?.text) {
+				recordCheckpointSaved(task, `auto-${Date.now()}`, shadowHashMsg.text, verdict.score)
+			}
+		}
+		// "skip": no test framework detectable — cannot validate, do nothing
+	} catch (error: unknown) {
+		// Non-fatal: quality gate errors must never break tool execution
+		console.error("[PostEditQualityGate] Error (non-fatal):", error)
 	}
 }
