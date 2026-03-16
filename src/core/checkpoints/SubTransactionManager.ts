@@ -3,6 +3,7 @@ import type { SubTransaction } from "@roo-code/types"
 import { getCheckpointService } from "./index"
 import { getWorkspacePath } from "../../utils/path"
 import crypto from "crypto"
+import * as vscode from "vscode"
 
 /**
  * SubTransactionManager
@@ -13,6 +14,11 @@ import crypto from "crypto"
  */
 export class SubTransactionManager {
 	constructor(private task: Task) {}
+
+	private isStrictMode(): boolean {
+		const cfg = vscode.workspace.getConfiguration()
+		return cfg.get<boolean>("roo.experimental.txStrictMode") ?? true
+	}
 
 	/**
 	 * Create a new sub-transaction
@@ -35,6 +41,8 @@ export class SubTransactionManager {
 
 		const provider = this.task.providerRef.deref()
 		provider?.log(`[SubTransactionManager] Created sub-transaction ${subTxn.id} at checkpoint ${baseCommit}`)
+
+		this.task.taskLogger?.logSubTxCreated(subTxn.id, baseCommit)
 
 		return subTxn
 	}
@@ -59,32 +67,57 @@ export class SubTransactionManager {
 
 		// P2 FIX: Run safety checks via Control-Plane's /safety-gate endpoint
 		// Safety gates are enforced - if checks fail, commit is blocked
-		if (subTxn.safetyChecks && subTxn.safetyChecks.length > 0) {
+		if ((subTxn.safetyChecks && subTxn.safetyChecks.length > 0) || subTxn.safetyClause) {
 			provider?.log(`[SubTransactionManager] Running safety checks for sub-transaction ${subTxn.id}`)
 
 			const safetyGate = await this.runSafetyGate(subTxn)
 
 			if (!safetyGate.ok) {
-				// Safety checks failed - abort the sub-transaction
-				subTxn.status = "ABORTED"
-				subTxn.failure = {
-					kind: "SAFETY_FAIL",
-					message: `Safety checks failed at: ${safetyGate.failedAt}`,
-				}
+				// R7 FIX: Safety failure MUST trigger rollback, not just throw.
+				// Previously this threw an exception without rolling back to the
+				// prior commit point, violating R7.
 				subTxn.safetyGate = safetyGate
-				subTxn.endedAt = Date.now()
 
 				provider?.log(
 					`[SubTransactionManager] Commit BLOCKED for ${subTxn.id} - safety gate failed at: ${safetyGate.failedAt}`,
 				)
 
+				this.task.taskLogger?.logSafetyGate(subTxn.id, false, subTxn.safetyChecks ?? [])
+
+				// Rollback to baseCommit (restores system state, preserves agent state)
+				await this.abortSubTransaction(subTxn, {
+					kind: "SAFETY_FAIL",
+					message: `Safety checks failed at: ${safetyGate.failedAt}`,
+				})
+
 				throw new Error(
-					`Cannot commit sub-transaction ${subTxn.id}: safety checks failed at ${safetyGate.failedAt}`,
+					`Cannot commit sub-transaction ${subTxn.id}: safety checks failed at ${safetyGate.failedAt}. Rolled back to ${subTxn.baseCommit}.`,
 				)
 			}
 
 			subTxn.safetyGate = safetyGate
 			provider?.log(`[SubTransactionManager] Safety gate PASSED for ${subTxn.id}`)
+			this.task.taskLogger?.logSafetyGate(subTxn.id, true, subTxn.safetyChecks ?? [])
+		}
+
+		// R4/R5 FIX: Run progress gate (test monotonicity) via Control-Plane.
+		// Spec R5: commit only if Safety AND Progress are satisfied.
+		// The safety gate above checked Safety; now check Progress.
+		const progressOk = await this.runProgressGate(subTxn)
+		if (!progressOk) {
+			provider?.log(
+				`[SubTransactionManager] Commit BLOCKED for ${subTxn.id} - progress gate failed (test regression)`,
+			)
+
+			// R7: Rollback on progress failure
+			await this.abortSubTransaction(subTxn, {
+				kind: "SAFETY_FAIL",
+				message: "Progress gate failed: test count decreased (monotonicity violation)",
+			})
+
+			throw new Error(
+				`Cannot commit sub-transaction ${subTxn.id}: progress gate failed. Rolled back to ${subTxn.baseCommit}.`,
+			)
 		}
 
 		// Get current HEAD as endCommit
@@ -107,6 +140,8 @@ export class SubTransactionManager {
 		subTxn.endedAt = Date.now()
 
 		provider?.log(`[SubTransactionManager] Committed sub-transaction ${subTxn.id} at checkpoint ${currentHead}`)
+
+		this.task.taskLogger?.logSubTxEvent(subTxn.id, "committed", currentHead)
 
 		// Clear current sub-transaction
 		this.task.currentSubTransaction = undefined
@@ -157,13 +192,14 @@ export class SubTransactionManager {
 		}
 
 		try {
+			const requestBody = subTxn.safetyClause ? { clause: subTxn.safetyClause } : { checks: subTxn.safetyChecks }
 			const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${parentTxId}/sub-tx/${subTxn.id}/safety-gate`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
 					"X-Actor-Id": "human",
 				},
-				body: JSON.stringify({ checks: subTxn.safetyChecks }),
+				body: JSON.stringify(requestBody),
 				signal: AbortSignal.timeout(15_000),
 			})
 
@@ -186,6 +222,70 @@ export class SubTransactionManager {
 				results: [],
 				failedAt: `ERROR: ${errorMessage}`,
 			}
+		}
+	}
+
+	/**
+	 * R4/R5: Run progress gate via Control-Plane's /tx/:tx_id/checkpoint endpoint.
+	 *
+	 * The progress oracle checks that passing test count is monotonically
+	 * non-decreasing (R33 default). Returns true if progress is satisfied
+	 * or if CP is unavailable (non-fatal).
+	 */
+	private async runProgressGate(subTxn: SubTransaction): Promise<boolean> {
+		const provider = this.task.providerRef.deref()
+		const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
+		const txId = provider?.context?.globalState.get<string>("roo.current_tx_id")
+
+		if (!cpPort || !txId) {
+			if (this.isStrictMode()) {
+				provider?.log(`[SubTransactionManager] CRITICAL: CP unavailable, blocking commit (strict mode)`)
+				return false
+			}
+			provider?.log(`[SubTransactionManager] DEGRADED_MODE: CP unavailable, allowing commit`)
+			return true
+		}
+
+		try {
+			const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${txId}/checkpoint`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"X-Actor-Id": "human",
+				},
+				body: JSON.stringify({
+					reason: "auto",
+				}),
+				signal: AbortSignal.timeout(120_000), // tests can be slow
+			})
+
+			if (res.ok) {
+				provider?.log(`[SubTransactionManager] Progress gate PASSED for ${subTxn.id}`)
+				return true
+			}
+
+			const body = await res.json().catch(() => ({}))
+			const code = (body as any).code
+			if (code === "PROGRESS_VIOLATION") {
+				provider?.log(`[SubTransactionManager] Progress gate FAILED for ${subTxn.id}: test count decreased`)
+				return false
+			}
+
+			// Other HTTP errors — log but don't block (ambiguous server error, not a gate decision)
+			provider?.log(`[SubTransactionManager] Progress gate returned HTTP ${res.status} (non-fatal)`)
+			return true
+		} catch (error) {
+			// CP unreachable mid-fetch
+			if (this.isStrictMode()) {
+				provider?.log(
+					`[SubTransactionManager] CRITICAL: CP unreachable during progress gate, blocking commit (strict mode): ${error instanceof Error ? error.message : String(error)}`,
+				)
+				return false
+			}
+			provider?.log(
+				`[SubTransactionManager] DEGRADED_MODE: CP unreachable during progress gate, allowing commit: ${error instanceof Error ? error.message : String(error)}`,
+			)
+			return true
 		}
 	}
 
@@ -229,6 +329,8 @@ export class SubTransactionManager {
 		}
 
 		provider?.log(`[SubTransactionManager] Aborted sub-transaction ${subTxn.id}`)
+
+		this.task.taskLogger?.logSubTxEvent(subTxn.id, "aborted")
 
 		// Clear current sub-transaction
 		this.task.currentSubTransaction = undefined
