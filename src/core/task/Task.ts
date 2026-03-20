@@ -331,6 +331,17 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	currentSubTransaction?: import("../checkpoints/types").SubTransaction
 	subTransactions: import("../checkpoints/types").SubTransaction[] = []
 
+	// Optional structured task logger for sub-transaction events
+	taskLogger?: {
+		logSubTxCreated(subTxId: string, baseCommit: string): void
+		logSubTxEvent(subTxId: string, event: string, detail?: string): void
+		logSafetyGate(subTxId: string, passed: boolean, checks: string[]): void
+		logToolCall(toolName: string, allowed: boolean, params: Record<string, unknown>): void
+		logQualityGate(...args: unknown[]): void
+		logTaskEnd(status: string, tokenUsage: unknown, toolUsage: unknown): void
+		close(): void
+	}
+
 	// Planner mode
 	plan?: import("../planner/types").Plan
 	worktreePath?: string
