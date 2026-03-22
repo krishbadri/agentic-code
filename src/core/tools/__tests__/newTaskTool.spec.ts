@@ -33,6 +33,14 @@ vi.mock("../../prompts/responses", () => ({
 	},
 }))
 
+// Mock file-path extraction / validation used by newTaskTool to prevent
+// filesystem access during tests (added after original tests were written).
+vi.mock("../../../utils/fs", () => ({
+	extractFilePathsFromText: vi.fn(() => []),
+	validateFilePaths: vi.fn(async () => ({ existing: [], nonExistent: [] })),
+	fileExistsAtPath: vi.fn(() => true),
+}))
+
 vi.mock("../updateTodoListTool", () => ({
 	parseMarkdownChecklist: vi.fn((md: string) => {
 		// Simple mock implementation

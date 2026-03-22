@@ -16,8 +16,17 @@ vitest.mock("fs/promises")
 // Mock TerminalRegistry to control terminal creation
 vitest.mock("../../../integrations/terminal/TerminalRegistry")
 
-// Mock Terminal and ExecaTerminal classes
-vitest.mock("../../../integrations/terminal/Terminal")
+// Mock Terminal and ExecaTerminal classes.
+// Terminal.compressTerminalOutput (static, inherited from BaseTerminal) must return a string;
+// the default auto-mock returns undefined which causes "Cannot read properties of undefined".
+vitest.mock("../../../integrations/terminal/Terminal", () => ({
+	Terminal: class {
+		static compressTerminalOutput = vitest.fn((input: string) => input)
+		terminal = { show: vitest.fn() }
+		getCurrentWorkingDirectory = vitest.fn()
+		runCommand = vitest.fn()
+	},
+}))
 vitest.mock("../../../integrations/terminal/ExecaTerminal")
 
 // Import the actual executeCommand function (not mocked)

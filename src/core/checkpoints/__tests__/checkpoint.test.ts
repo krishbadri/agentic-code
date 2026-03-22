@@ -179,13 +179,15 @@ describe("Checkpoint functionality", () => {
 			expect(mockTask.enableCheckpoints).toBe(true)
 		})
 
-		it("should handle errors gracefully and disable checkpoints", async () => {
+		it("should handle errors gracefully without disabling checkpoints", async () => {
 			mockCheckpointService.saveCheckpoint.mockRejectedValue(new Error("Save failed"))
 
 			const result = await checkpointSave(mockTask)
 
+			// Non-Control-Plane errors are logged but do not disable checkpoints,
+			// so the tools remain available for subsequent explicit invocations.
 			expect(result).toBeUndefined()
-			expect(mockTask.enableCheckpoints).toBe(false)
+			expect(mockTask.enableCheckpoints).toBe(true)
 		})
 	})
 
