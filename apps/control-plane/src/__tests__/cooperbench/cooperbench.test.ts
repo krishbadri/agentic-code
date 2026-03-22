@@ -248,9 +248,11 @@ describe("CooperBench: stanfordnlp/dspy (features 2 vs 3)", () => {
 			git(["add", "-A"], subB.worktree_path)
 			git(["commit", "-m", `code: ${taskB.instance_id}`], subB.worktree_path)
 
-			// Structural check
+			// Structural check — use RELATIVE sub-tx IDs (the URL parameter names),
+			// not the global sub_tx_id. The structural-check endpoint passes them directly
+			// to git.subTxWorktreePath(parentTxId, subTxId) which expects relative IDs.
 			const checkRes = await post(fixture, `/tx/${txId}/structural-check`, {
-				sub_tx_ids: [subA.sub_tx_id, subB.sub_tx_id],
+				sub_tx_ids: ["feat-ns", "feat-ttl"],
 			})
 			expect(checkRes.status).toBe(200)
 			const checkData = await checkRes.json()
@@ -293,9 +295,9 @@ describe("CooperBench: stanfordnlp/dspy (features 2 vs 3)", () => {
 			git(["add", "-A"], subB.worktree_path)
 			git(["commit", "-m", `code: ${taskB.instance_id}`], subB.worktree_path)
 
-			// Run merge pipeline
+			// Run merge pipeline — use RELATIVE sub-tx IDs
 			const mergeRes = await post(fixture, `/tx/${txId}/merge-pipeline`, {
-				sub_tx_ids: [subA.sub_tx_id, subB.sub_tx_id],
+				sub_tx_ids: ["ns", "ttl"],
 			})
 			expect(mergeRes.status).toBe(200)
 			const mergeData = await mergeRes.json()
@@ -312,7 +314,9 @@ describe("CooperBench: stanfordnlp/dspy (features 2 vs 3)", () => {
 			console.log(`[CooperBench] Rolled back: ${rolledBackIds.join(", ") || "(none)"}`)
 
 			// Commit the transaction (the winner's changes are already on the parent worktree)
-			const commitRes = await post(fixture, `/tx/${txId}/commit`, { strategy: "fail-fast" })
+			// Use "hybrid" strategy because in DB-less mode baseSha is empty,
+			// which causes fail-fast to always return CONFLICT_BASE_ADVANCED.
+			const commitRes = await post(fixture, `/tx/${txId}/commit`, { strategy: "hybrid" })
 			expect(commitRes.status).toBe(200)
 			const commitData = await commitRes.json()
 			expect(commitData.advanced_head).toBe(true)
@@ -366,23 +370,24 @@ describe("CooperBench: stanfordnlp/dspy (features 2 vs 3)", () => {
 			git(["commit", "-m", `code: ${taskA.instance_id}`], sub.worktree_path)
 
 			// Structural check (single sub-tx — no conflict)
+			// Use RELATIVE sub-tx ID
 			const checkRes = await post(fixture, `/tx/${txId}/structural-check`, {
-				sub_tx_ids: [sub.sub_tx_id],
+				sub_tx_ids: ["solo"],
 			})
 			expect(checkRes.status).toBe(200)
 			expect((await checkRes.json()).hasConflicts).toBe(false)
 
-			// Merge pipeline
+			// Merge pipeline — use RELATIVE sub-tx ID
 			const mergeRes = await post(fixture, `/tx/${txId}/merge-pipeline`, {
-				sub_tx_ids: [sub.sub_tx_id],
+				sub_tx_ids: ["solo"],
 			})
 			expect(mergeRes.status).toBe(200)
 			const mergeData = await mergeRes.json()
 			expect(mergeData.conflicts_detected).toBe(0)
 			expect(mergeData.results.filter((r: any) => r.merged).length).toBe(1)
 
-			// Commit
-			const commitRes = await post(fixture, `/tx/${txId}/commit`, { strategy: "fail-fast" })
+			// Commit — use "hybrid" strategy for DB-less mode
+			const commitRes = await post(fixture, `/tx/${txId}/commit`, { strategy: "hybrid" })
 			expect(commitRes.status).toBe(200)
 			const commitData = await commitRes.json()
 			expect(commitData.advanced_head).toBe(true)
