@@ -97,6 +97,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.12.0
         version: 1.12.0
+      '@roo-code/types':
+        specifier: workspace:^
+        version: link:../../packages/types
       better-sqlite3:
         specifier: ^11.10.0
         version: 11.10.0

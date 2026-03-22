@@ -51,7 +51,8 @@ function testFilesFromPatch(patch: string): string[] {
 			patch
 				.split("\n")
 				.filter((l) => l.startsWith("diff --git") && l.includes(" b/"))
-				.map((l) => l.split(" b/")[1]),
+				.map((l) => l.split(" b/")[1])
+				.filter((x): x is string => x !== undefined),
 		),
 	]
 }
