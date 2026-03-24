@@ -623,8 +623,8 @@ importers:
         specifier: workspace:^
         version: link:../types
       posthog-node:
-        specifier: ^5.0.0
-        version: 5.1.1
+        specifier: ^5.25.0
+        version: 5.25.0
       zod:
         specifier: ^3.25.61
         version: 3.25.61
@@ -2587,6 +2587,9 @@ packages:
 
   '@polka/url@1.0.0-next.29':
     resolution: {integrity: sha512-wwQAWhWSuHaag8c4q/KN/vCoeOJYshAIvMQwD4GpSb3OiZklFfvAgmj0VCBBImRpuF/aFgIRzllXlVX93Jevww==}
+
+  '@posthog/core@1.23.1':
+    resolution: {integrity: sha512-GViD5mOv/mcbZcyzz3z9CS0R79JzxVaqEz4sP5Dsea178M/j3ZWe6gaHDZB9yuyGfcmIMQ/8K14yv+7QrK4sQQ==}
 
   '@puppeteer/browsers@2.10.5':
     resolution: {integrity: sha512-eifa0o+i8dERnngJwKrfp3dEq7ia5XFyoqB17S4gK8GhsQE4/P8nxOfQSE0zQHxzzLo/cmF+7+ywEQ7wK7Fb+w==}
@@ -8524,9 +8527,9 @@ packages:
       rrweb-snapshot:
         optional: true
 
-  posthog-node@5.1.1:
-    resolution: {integrity: sha512-6VISkNdxO24ehXiDA4dugyCSIV7lpGVaEu5kn/dlAj+SJ1lgcDru9PQ8p/+GSXsXVxohd1t7kHL2JKc9NoGb0w==}
-    engines: {node: '>=20'}
+  posthog-node@5.25.0:
+    resolution: {integrity: sha512-DFE5lZAoD6hk7RATuT8qVQ7KFgFP5YlFTJciMbU2qq6NX0A8eJxiJcmEsMnB3g30jJJ9suiwGIq4I8ESwf9bZg==}
+    engines: {node: ^20.20.0 || >=22.22.0}
 
   preact@10.26.6:
     resolution: {integrity: sha512-5SRRBinwpwkaD+OqlBDeITlRgvd8I8QlxHJw9AxSdMNV6O+LodN9nUyYGpSF7sadHjs6RzeFShMexC6DbtWr9g==}
@@ -12357,6 +12360,10 @@ snapshots:
     optional: true
 
   '@polka/url@1.0.0-next.29': {}
+
+  '@posthog/core@1.23.1':
+    dependencies:
+      cross-spawn: 7.0.6
 
   '@puppeteer/browsers@2.10.5':
     dependencies:
@@ -19130,7 +19137,9 @@ snapshots:
       preact: 10.26.6
       web-vitals: 4.2.4
 
-  posthog-node@5.1.1: {}
+  posthog-node@5.25.0:
+    dependencies:
+      '@posthog/core': 1.23.1
 
   preact@10.26.6: {}
 
