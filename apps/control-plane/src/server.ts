@@ -43,7 +43,21 @@ export async function startServer(config: ServerConfig) {
 	// R31, R32: Server-side allowlist for test file modifications (NOT agent-controlled)
 	app.decorate("testModifyAllowlist", config.testModifyAllowlist || [])
 	// R33: In-memory progress baselines for DB-less mode (testing) - only used if database fails
-	app.decorate("progressBaselines", new Map<string, { passing_count: number; total_count: number; test_command: string; last_checkpoint_count?: number; last_checkpoint_sha?: string }>())
+	app.decorate(
+		"progressBaselines",
+		new Map<
+			string,
+			{
+				passing_count: number
+				total_count: number
+				test_command: string
+				last_checkpoint_count?: number
+				last_checkpoint_sha?: string
+			}
+		>(),
+	)
+	// R30: In-memory file reservations per transaction (tx_id → Map<file_path, claimer_id>)
+	app.decorate("fileReservations", new Map<string, Map<string, string>>())
 
 	// Initialize database (PostgreSQL if URL provided, otherwise SQLite fallback)
 	if (!config.disableDb) {
@@ -98,8 +112,16 @@ declare module "fastify" {
 		// R33: In-memory progress baselines for DB-less mode (testing)
 		progressBaselines?: Map<
 			string,
-			{ passing_count: number; total_count: number; test_command: string; last_checkpoint_count?: number; last_checkpoint_sha?: string }
+			{
+				passing_count: number
+				total_count: number
+				test_command: string
+				last_checkpoint_count?: number
+				last_checkpoint_sha?: string
+			}
 		>
+		// R30: In-memory file reservations per transaction (tx_id → Map<file_path, claimer_id>)
+		fileReservations: Map<string, Map<string, string>>
 	}
 }
 

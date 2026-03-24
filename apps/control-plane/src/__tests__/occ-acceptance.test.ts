@@ -25,6 +25,7 @@ import {
 	mergeSubTransaction,
 	rollbackSubTransaction,
 	runSafetyGate,
+	runSafetyGateClause,
 	writeFileToWorktree,
 	readFileFromWorktree,
 	commitInWorktree,
@@ -646,6 +647,102 @@ export function five() { return 5; }
 			expect(mergeResult.merged).toBe(false)
 			expect(mergeResult.status).toBe(403)
 			expect(mergeResult.error).toContain("SAFETY_GATE")
+		})
+
+		it("should pass safety gate using declarative clause (R8)", async () => {
+			const { tx_id: parentTxId } = await beginTransaction(fixture)
+
+			const agent = await beginSubTransaction(fixture, parentTxId, "agent-clause-pass")
+
+			// Make a safe change
+			writeFileToWorktree(
+				agent.worktree_path,
+				"src/lib.ts",
+				"// Clause test\nexport function add(a: number, b: number) { return a + b }\n",
+			)
+			commitInWorktree(agent.worktree_path, "Clause-safe change")
+
+			// Run safety gate with a clause instead of checks
+			const safetyResult = await runSafetyGateClause(fixture, parentTxId, "agent-clause-pass", {
+				type: "cmd_exits_0",
+				cmd: "node test.js",
+			})
+
+			expect(safetyResult.ok).toBe(true)
+			expect(safetyResult.results).toHaveLength(1)
+			expect(safetyResult.results[0].cmd).toBe("clause:cmd_exits_0")
+		})
+
+		it("should fail safety gate using declarative clause when command fails (R8)", async () => {
+			const { tx_id: parentTxId } = await beginTransaction(fixture)
+
+			const agent = await beginSubTransaction(fixture, parentTxId, "agent-clause-fail")
+
+			// Make an unsafe change that breaks tests
+			writeFileToWorktree(
+				agent.worktree_path,
+				"src/lib.ts",
+				"// Broken!\nexport function add(a: number, b: number) { return a - b }\n",
+			)
+			commitInWorktree(agent.worktree_path, "Clause-unsafe change")
+
+			// Run safety gate with clause - should fail
+			const safetyResult = await runSafetyGateClause(fixture, parentTxId, "agent-clause-fail", {
+				type: "cmd_exits_0",
+				cmd: "node test.js",
+			})
+
+			expect(safetyResult.ok).toBe(false)
+			expect(safetyResult.failedAt).toBe("clause:cmd_exits_0")
+		})
+
+		it("should evaluate compound AND clause (R8)", async () => {
+			const { tx_id: parentTxId } = await beginTransaction(fixture)
+
+			const agent = await beginSubTransaction(fixture, parentTxId, "agent-clause-and")
+
+			writeFileToWorktree(
+				agent.worktree_path,
+				"src/lib.ts",
+				"// AND test\nexport function add(a: number, b: number) { return a + b }\n",
+			)
+			commitInWorktree(agent.worktree_path, "AND clause change")
+
+			// AND clause: test passes AND file exists
+			const safetyResult = await runSafetyGateClause(fixture, parentTxId, "agent-clause-and", {
+				type: "and",
+				clauses: [
+					{ type: "cmd_exits_0", cmd: "node test.js" },
+					{ type: "file_exists", path: "src/lib.ts" },
+				],
+			})
+
+			expect(safetyResult.ok).toBe(true)
+		})
+
+		it("should fail compound AND clause when one branch fails (R8)", async () => {
+			const { tx_id: parentTxId } = await beginTransaction(fixture)
+
+			const agent = await beginSubTransaction(fixture, parentTxId, "agent-clause-and-fail")
+
+			writeFileToWorktree(
+				agent.worktree_path,
+				"src/lib.ts",
+				"// AND fail test\nexport function add(a: number, b: number) { return a + b }\n",
+			)
+			commitInWorktree(agent.worktree_path, "AND clause fail change")
+
+			// AND clause: test passes BUT file does NOT exist
+			const safetyResult = await runSafetyGateClause(fixture, parentTxId, "agent-clause-and-fail", {
+				type: "and",
+				clauses: [
+					{ type: "cmd_exits_0", cmd: "node test.js" },
+					{ type: "file_exists", path: "nonexistent-file.ts" },
+				],
+			})
+
+			expect(safetyResult.ok).toBe(false)
+			expect(safetyResult.failedAt).toBe("clause:and")
 		})
 	})
 

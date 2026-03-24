@@ -589,12 +589,16 @@ export function registerTxRoutes(app: FastifyInstance) {
 						await finalizeTransaction(app.db, txId, "aborted")
 					} catch {}
 				}
+				// R30: Clean up file reservations even on conflict/abort
+				app.fileReservations.delete(txId)
 				return reply.code(409).send({ code: (res as any).conflict.code, details: { ...details } })
 			}
 
 			if (app.db) {
 				await finalizeTransaction(app.db, txId, "committed")
 			}
+			// R30: Clean up file reservations for this transaction
+			app.fileReservations.delete(txId)
 			return reply.send({ merged_sha: (res as any).merged_sha, advanced_head: true })
 		} catch (e) {
 			return reply.code(500).send(errorResponse(e))
@@ -642,6 +646,8 @@ export function registerTxRoutes(app: FastifyInstance) {
 				}
 			}
 
+			// R30: Clean up file reservations for this transaction
+			app.fileReservations.delete(txId)
 			return reply.send({
 				rolled_back_to: body.hash,
 				message: `Rolled back to commit ${body.hash}`,
@@ -908,9 +914,14 @@ export function registerTxRoutes(app: FastifyInstance) {
 	// ============================================================================
 	app.post("/tx/:tx_id/sub-tx/:sub_tx_id/safety-gate", async (req, reply) => {
 		HeadersSchema.parse(req.headers as any)
+		// Accept either shell commands (legacy) or a declarative clause (R8)
 		const body = z
 			.object({
-				checks: z.array(z.string()), // e.g., ["pnpm test", "pnpm lint"]
+				checks: z.array(z.string()).optional(),
+				clause: z.any().optional(), // Clause type validated by evalClause at runtime
+			})
+			.refine((d) => (d.checks && d.checks.length > 0) || d.clause, {
+				message: "Either checks (non-empty array) or clause is required",
 			})
 			.parse((req as any).body || {})
 
@@ -923,6 +934,56 @@ export function registerTxRoutes(app: FastifyInstance) {
 		const git = new Git({ repoRoot: app.repoRoot })
 		const subWt = git.subTxWorktreePath(parentTxId, relativeSubTxId)
 
+		// ---- Clause path (R8): evaluate declarative clause ----
+		if (body.clause) {
+			const { evalClause } = await import("../clause-eval.js")
+			const start = Date.now()
+			const clauseResult = await evalClause(body.clause, subWt)
+			const durationMs = Date.now() - start
+
+			const results = [
+				{
+					cmd: `clause:${body.clause.type}`,
+					exitCode: clauseResult.ok ? 0 : 1,
+					durationMs,
+					stdoutTail: "",
+					stderrTail: clauseResult.reason || "",
+					passed: clauseResult.ok,
+				},
+			]
+
+			if (app.db) {
+				await insertSafetyCheckResults(
+					app.db,
+					globalSubTxId,
+					results.map((r) => ({
+						cmd: r.cmd,
+						exit_code: r.exitCode,
+						duration_ms: r.durationMs,
+						stdout_tail: r.stdoutTail,
+						stderr_tail: r.stderrTail,
+						passed: r.passed,
+					})),
+				)
+				await insertSafetyGate(
+					app.db,
+					globalSubTxId,
+					clauseResult.ok ? { ok: true } : { ok: false, failed_at: `clause:${body.clause.type}` },
+				)
+			}
+
+			if (!clauseResult.ok) {
+				return reply.send({
+					ok: false,
+					results,
+					failedAt: `clause:${body.clause.type}`,
+				})
+			}
+
+			return reply.send({ ok: true, results })
+		}
+
+		// ---- Legacy path: run shell commands ----
 		interface SafetyCheckResult {
 			cmd: string
 			exitCode: number
@@ -937,7 +998,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 		const { promisify } = await import("node:util")
 		const execAsync = promisify(exec)
 
-		for (const cmd of body.checks) {
+		for (const cmd of body.checks!) {
 			const start = Date.now()
 			try {
 				// Execute the command in the sub-transaction worktree
@@ -1761,5 +1822,46 @@ export function registerTxRoutes(app: FastifyInstance) {
 		} catch (e) {
 			return reply.code(500).send(errorResponse(e))
 		}
+	})
+
+	// -----------------------------------------------------------------------
+	// R30: New-file reservation
+	// -----------------------------------------------------------------------
+	app.post("/tx/:tx_id/reserve-file", async (req, reply) => {
+		HeadersSchema.parse(req.headers as any)
+		const body = z
+			.object({
+				file_path: z.string().min(1),
+				claimer_id: z.string().min(1),
+			})
+			.parse((req as any).body || {})
+
+		const txId = (req.params as any).tx_id
+
+		// Get or create the per-transaction reservation map
+		let txReservations = app.fileReservations.get(txId)
+		if (!txReservations) {
+			txReservations = new Map<string, string>()
+			app.fileReservations.set(txId, txReservations)
+		}
+
+		const existingClaimer = txReservations.get(body.file_path)
+
+		if (existingClaimer && existingClaimer !== body.claimer_id) {
+			// Another agent already reserved this path
+			return reply.code(409).send({
+				code: "FILE_ALREADY_RESERVED",
+				file_path: body.file_path,
+				by: existingClaimer,
+			})
+		}
+
+		// First reservation or idempotent re-reservation by same claimer
+		txReservations.set(body.file_path, body.claimer_id)
+		return reply.send({
+			reserved: true,
+			file_path: body.file_path,
+			by: body.claimer_id,
+		})
 	})
 }

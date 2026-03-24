@@ -35,12 +35,7 @@ export async function initGitRepo(dir: string): Promise<void> {
 /**
  * Create a file in the repo and commit it
  */
-export function createAndCommitFile(
-	dir: string,
-	relativePath: string,
-	content: string,
-	commitMessage: string,
-): string {
+export function createAndCommitFile(dir: string, relativePath: string, content: string, commitMessage: string): string {
 	const fullPath = join(dir, relativePath)
 	const parentDir = join(fullPath, "..")
 	if (!existsSync(parentDir)) {
@@ -192,7 +187,12 @@ export async function createOccFixtureWithTests(): Promise<OccFixture> {
 	const fixture = await createOccFixture()
 
 	// Create src/lib.ts
-	createAndCommitFile(fixture.tmpDir, "src/lib.ts", "export function add(a: number, b: number) { return a + b }\n", "Add lib.ts")
+	createAndCommitFile(
+		fixture.tmpDir,
+		"src/lib.ts",
+		"export function add(a: number, b: number) { return a + b }\n",
+		"Add lib.ts",
+	)
 
 	// Create a simple test script that can be run via shell
 	// Using a simple approach: write a test.js that exits 0 on pass, 1 on fail
@@ -369,7 +369,7 @@ export async function createCheckpoint(fixture: OccFixture, txId: string): Promi
 }
 
 /**
- * Helper to run safety gate checks
+ * Helper to run safety gate checks (legacy shell commands)
  */
 export async function runSafetyGate(
 	fixture: OccFixture,
@@ -384,6 +384,26 @@ export async function runSafetyGate(
 	})
 	if (!res.ok) {
 		throw new Error(`Failed to run safety gate: ${await res.text()}`)
+	}
+	return res.json()
+}
+
+/**
+ * Helper to run safety gate with a declarative clause (R8)
+ */
+export async function runSafetyGateClause(
+	fixture: OccFixture,
+	parentTxId: string,
+	subTxId: string,
+	clause: Record<string, unknown>,
+): Promise<{ ok: boolean; failedAt?: string; results: any[] }> {
+	const res = await fetch(`${fixture.baseUrl}/tx/${parentTxId}/sub-tx/${subTxId}/safety-gate`, {
+		method: "POST",
+		headers: fixture.headers,
+		body: JSON.stringify({ clause }),
+	})
+	if (!res.ok) {
+		throw new Error(`Failed to run safety gate (clause): ${await res.text()}`)
 	}
 	return res.json()
 }

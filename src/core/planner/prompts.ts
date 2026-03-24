@@ -45,7 +45,8 @@ You must output valid JSON with this structure:
       ],
       "parallel": true,
       "dependencies": [],
-      "safetyChecks": ["pnpm test", "pnpm tsc --noEmit"]
+      "safetyChecks": ["pnpm test", "pnpm tsc --noEmit"],
+      "safetyClause": null
     }
   ]
 }
@@ -60,6 +61,7 @@ Guidelines:
 - If one task depends on another (e.g., tests need code first), set dependencies: ["st1"]
 - CRITICAL: safetyChecks must be literal executable shell commands (e.g. "pnpm test", "pnpm tsc --noEmit", "pytest -q"). They are run verbatim in the sub-transaction's worktree. Do NOT write descriptions or prose.
 - Use safetyChecks to validate each sub-transaction (tests, type-checking, linting, etc.)
+- Alternative: use "safetyClause" for declarative safety rules (R8). Example: {"type": "and", "clauses": [{"type": "cmd_exits_0", "cmd": "pnpm test"}, {"type": "cmd_exits_0", "cmd": "pnpm tsc --noEmit"}]}. Clause types: cmd_exits_0, test_suite, file_exists, not, and, or. Default to safetyChecks unless clauses are specifically needed.
 - CRITICAL: Do NOT add pytest or test safety checks to subtasks where tests are EXPECTED to fail:
   * Rollback drill steps (create sentinel, make bad change, rollback)
   * "Add tests first" / Boundary 1 steps where tests fail before implementation

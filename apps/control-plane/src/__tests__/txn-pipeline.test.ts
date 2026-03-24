@@ -359,9 +359,7 @@ describe("T5: structural conflict detection and merge ordering", () => {
 // T6: R30 new-file reservation
 // ---------------------------------------------------------------------------
 
-// TODO: T6 tests are skipped because the /tx/:tx_id/reserve-file endpoint
-// (R30 new-file reservation) has not been implemented yet.
-describe.skip("T6: R30 new-file reservation", () => {
+describe("T6: R30 new-file reservation", () => {
 	let fixture: OccFixture
 
 	beforeEach(async () => {
@@ -413,7 +411,7 @@ describe.skip("T6: R30 new-file reservation", () => {
 
 	it("reservations are cleaned up after transaction commit", async () => {
 		// Use a test_command that passes so commit succeeds
-		const { tx_id: txId } = await beginTransaction(fixture, {
+		const { tx_id: txId, worktree_path: wt } = await beginTransaction(fixture, {
 			test_command: "node -e process.exit(0)",
 		})
 
@@ -424,22 +422,23 @@ describe.skip("T6: R30 new-file reservation", () => {
 		})
 		expect(reserveRes.status).toBe(200)
 
+		// Make a real change so commit has something to merge
+		writeFileToWorktree(wt, "src/post-commit.ts", "export const x = 1;\n")
+		commitInWorktree(wt, "add post-commit file")
+
 		// Commit the transaction (cleans up reservations server-side)
-		const commitRes = await post(fixture, `/tx/${txId}/commit`, { strategy: "fail-fast" })
+		// Use "rebase" strategy because without a DB the base SHA isn't tracked,
+		// causing "fail-fast" to always return CONFLICT_BASE_ADVANCED.
+		const commitRes = await post(fixture, `/tx/${txId}/commit`, { strategy: "rebase" })
 		expect([200, 201]).toContain(commitRes.status)
 
 		// After commit, the SAME path in a new transaction should be freely reservable
-		const { tx_id: txId2 } = await beginTransaction(fixture, {
-			test_command: "node -e process.exit(0)",
-		})
+		const { tx_id: txId2 } = await beginTransaction(fixture)
 		const reserveRes2 = await post(fixture, `/tx/${txId2}/reserve-file`, {
 			file_path: "src/post-commit.ts",
 			claimer_id: "agent-c",
 		})
 		expect(reserveRes2.status, "new tx should allow reserving the same path again").toBe(200)
-
-		// Cleanup the second tx
-		await post(fixture, `/tx/${txId2}/commit`, { strategy: "fail-fast" })
 	})
 })
 
