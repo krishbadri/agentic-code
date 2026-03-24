@@ -1,3 +1,5 @@
+import type { Clause } from "./clause.js"
+
 /**
  * Sub-Transaction Types
  *
@@ -120,6 +122,9 @@ export interface SubTransaction {
 
 	/** Commands to run as safety checks before commit (e.g. ["pnpm test", "pnpm lint"]) */
 	safetyChecks?: string[]
+
+	/** Declarative safety clause (R8) — alternative to safetyChecks */
+	safetyClause?: Clause
 
 	/**
 	 * When true, skip safety checks for this sub-transaction.

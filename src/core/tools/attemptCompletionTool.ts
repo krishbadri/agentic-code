@@ -1,7 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk"
 import * as vscode from "vscode"
 
-import { RooCodeEventName, type ClineAskResponse } from "@roo-code/types"
+import { RooCodeEventName } from "@roo-code/types"
+import type { ClineAskResponse } from "../../shared/WebviewMessage"
 import { TelemetryService } from "@roo-code/telemetry"
 
 import { Task } from "../task/Task"
@@ -117,7 +118,10 @@ export async function attemptCompletionTool(
 					await cline.say("completion_result", removeClosingTag("result", result), undefined, false)
 
 					TelemetryService.instance.captureTaskCompleted(cline.taskId)
-					cline.emit(RooCodeEventName.TaskCompleted, cline.taskId, cline.getTokenUsage(), cline.toolUsage)
+					const tokenUsageCmpl0 = cline.getTokenUsage()
+					cline.taskLogger?.logTaskEnd("success", tokenUsageCmpl0 as any, cline.toolUsage as any)
+					cline.taskLogger?.close()
+					cline.emit(RooCodeEventName.TaskCompleted, cline.taskId, tokenUsageCmpl0, cline.toolUsage)
 
 					await cline.ask("command", removeClosingTag("command", command), block.partial).catch(() => {})
 				}
@@ -136,11 +140,55 @@ export async function attemptCompletionTool(
 
 			cline.consecutiveMistakeCount = 0
 
+			// R6: Run liveness gate via Control-Plane final commit endpoint (top-level tasks only).
+			// Subtasks are not final commit points; they are intermediate sub-transactions.
+			if (!cline.parentTask) {
+				const provider = cline.providerRef.deref()
+				const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
+				const txId = provider?.context?.globalState.get<string>("roo.current_tx_id")
+
+				if (cpPort && txId) {
+					try {
+						const livenessRes = await fetch(`http://127.0.0.1:${cpPort}/tx/${txId}/commit`, {
+							method: "POST",
+							headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
+							body: JSON.stringify({}),
+							signal: AbortSignal.timeout(120_000), // tests can be slow
+						})
+
+						if (!livenessRes.ok) {
+							const body = await livenessRes.json().catch(() => ({}))
+							const reason = (body as any).message || `HTTP ${livenessRes.status}`
+							provider?.log(`[attemptCompletionTool] Liveness gate FAILED for tx ${txId}: ${reason}`)
+							cline.consecutiveMistakeCount++
+							cline.recordToolError("attempt_completion")
+							pushToolResult(
+								formatResponse.toolError(
+									`Liveness check failed — task cannot complete yet: ${reason}\n` +
+										"Fix the failing tests or pending required steps, then attempt completion again.",
+								),
+							)
+							return
+						}
+
+						provider?.log(`[attemptCompletionTool] Liveness gate PASSED for tx ${txId}`)
+					} catch (err) {
+						// CP unreachable or timed out — non-fatal, allow completion to proceed.
+						provider?.log(
+							`[attemptCompletionTool] Liveness gate unreachable (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+						)
+					}
+				}
+			}
+
 			// Command execution is permanently disabled in attempt_completion
 			// Users must use execute_command tool separately before attempt_completion
 			await cline.say("completion_result", result, undefined, false)
 			TelemetryService.instance.captureTaskCompleted(cline.taskId)
-			cline.emit(RooCodeEventName.TaskCompleted, cline.taskId, cline.getTokenUsage(), cline.toolUsage)
+			const tokenUsageCmpl1 = cline.getTokenUsage()
+			cline.taskLogger?.logTaskEnd("success", tokenUsageCmpl1 as any, cline.toolUsage as any)
+			cline.taskLogger?.close()
+			cline.emit(RooCodeEventName.TaskCompleted, cline.taskId, tokenUsageCmpl1, cline.toolUsage)
 
 			if (cline.parentTask) {
 				const didApprove = await askFinishSubTaskApproval()

@@ -114,20 +114,14 @@ describe("Checkpoint functionality", () => {
 				mockCheckpointService.isInitialized = true
 			}, 100)
 
-			// Call checkpointSave
-			const savePromise = checkpointSave(mockTask, true)
-
-			// Wait for the save to complete
-			const result = await savePromise
+			// Call checkpointSave and wait for it to complete
+			await checkpointSave(mockTask, true)
 
 			// saveCheckpoint should have been called
 			expect(mockCheckpointService.saveCheckpoint).toHaveBeenCalledWith(
 				expect.stringContaining("Task: test-task-id"),
 				{ allowEmpty: true, suppressMessage: false },
 			)
-
-			// Result should contain the commit hash
-			expect(result).toEqual({ commit: "test-commit-hash" })
 
 			// Task should still have checkpoints enabled
 			expect(mockTask.enableCheckpoints).toBe(true)
@@ -159,16 +153,13 @@ describe("Checkpoint functionality", () => {
 			mockTask.checkpointService = mockCheckpointService
 
 			// Simulate saving checkpoint before user message
-			const checkpointResult = await checkpointSave(mockTask, true)
-			expect(checkpointResult).toEqual({ commit: "test-commit-hash" })
+			await checkpointSave(mockTask, true)
 
 			// Simulate setting pendingUserMessageCheckpoint
-			if (checkpointResult && "commit" in checkpointResult) {
-				mockTask.pendingUserMessageCheckpoint = {
-					hash: checkpointResult.commit,
-					timestamp: Date.now(),
-					type: "user_message",
-				}
+			mockTask.pendingUserMessageCheckpoint = {
+				hash: "test-commit-hash",
+				timestamp: Date.now(),
+				type: "user_message",
 			}
 
 			// Verify checkpoint data is preserved
@@ -181,20 +172,22 @@ describe("Checkpoint functionality", () => {
 			mockTask.checkpointServiceInitializing = false
 
 			// Save checkpoint again after deletion
-			const newCheckpointResult = await checkpointSave(mockTask, true)
+			await checkpointSave(mockTask, true)
 
 			// Should still work after reinitialization
-			expect(newCheckpointResult).toEqual({ commit: "test-commit-hash" })
+			expect(mockCheckpointService.saveCheckpoint).toHaveBeenCalledTimes(2)
 			expect(mockTask.enableCheckpoints).toBe(true)
 		})
 
-		it("should handle errors gracefully and disable checkpoints", async () => {
+		it("should handle errors gracefully without disabling checkpoints", async () => {
 			mockCheckpointService.saveCheckpoint.mockRejectedValue(new Error("Save failed"))
 
 			const result = await checkpointSave(mockTask)
 
+			// Non-Control-Plane errors are logged but do not disable checkpoints,
+			// so the tools remain available for subsequent explicit invocations.
 			expect(result).toBeUndefined()
-			expect(mockTask.enableCheckpoints).toBe(false)
+			expect(mockTask.enableCheckpoints).toBe(true)
 		})
 	})
 

@@ -138,6 +138,11 @@ export function getToolDescriptionsForMode(
 		tools.delete("codebase_search")
 	}
 
+	// Conditionally exclude apply_diff if diff strategy is not available
+	if (!diffStrategy) {
+		tools.delete("apply_diff")
+	}
+
 	// Conditionally exclude update_todo_list if disabled in settings
 	if (settings?.todoListEnabled === false) {
 		tools.delete("update_todo_list")

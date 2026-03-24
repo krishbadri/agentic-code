@@ -32,9 +32,9 @@ if (!["record", "replay"].includes(mode)) {
 }
 
 // Torture repo paths
-const tortureRepo = "C:\\Users\\kpb20\\Downloads\\txn-agent-torture-repo2\\txn-agent-torture-repo"
+const tortureRepo = "C:\\Users\\kpb20\\Downloads\\txn-agent-torture-repo\\txn-agent-torture-repo"
 
-// The P1 prompt from PROMPTS.md - Add SQLite-backed persistence
+// Add SQLite-backed persistence
 const TORTURE_PROMPT = `Add SQLite-backed persistence to this repo while keeping in-memory as the default.
 I should be able to switch via CLI: --store sqlite and env var TXN_TODO_DB for the path.
 

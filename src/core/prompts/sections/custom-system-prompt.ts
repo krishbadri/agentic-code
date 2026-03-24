@@ -1,7 +1,6 @@
 import fs from "fs/promises"
 import path from "path"
 import { Mode } from "../../../shared/modes"
-import { fileExistsAtPath } from "../../../utils/fs"
 
 export type PromptVariables = {
 	workspace?: string
@@ -61,27 +60,4 @@ export async function loadSystemPromptFile(cwd: string, mode: Mode, variables: P
 	}
 	const interpolatedContent = interpolatePromptContent(rawContent, variables)
 	return interpolatedContent
-}
-
-/**
- * Ensures the .roo directory exists, creating it if necessary
- */
-export async function ensureRooDirectory(cwd: string): Promise<void> {
-	const rooDir = path.join(cwd, ".roo")
-
-	// Check if directory already exists
-	if (await fileExistsAtPath(rooDir)) {
-		return
-	}
-
-	// Create the directory
-	try {
-		await fs.mkdir(rooDir, { recursive: true })
-	} catch (err) {
-		// If directory already exists (race condition), ignore the error
-		const errorCode = (err as NodeJS.ErrnoException).code
-		if (errorCode !== "EEXIST") {
-			throw err
-		}
-	}
 }

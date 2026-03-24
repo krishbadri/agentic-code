@@ -18,6 +18,17 @@ vi.mock("vscode", async () => {
 			}),
 			registerWebviewViewProvider: vi.fn(),
 			registerUriHandler: vi.fn(),
+			showInformationMessage: vi.fn(),
+			showErrorMessage: vi.fn(),
+			showWarningMessage: vi.fn(),
+			createStatusBarItem: vi.fn().mockReturnValue({
+				show: vi.fn(),
+				hide: vi.fn(),
+				dispose: vi.fn(),
+				text: "",
+				tooltip: "",
+				command: "",
+			}),
 			tabGroups: {
 				onDidChangeTabs: vi.fn(),
 			},
@@ -27,7 +38,7 @@ vi.mock("vscode", async () => {
 			...(base.workspace ?? {}),
 			registerTextDocumentContentProvider: vi.fn(),
 			getConfiguration: vi.fn().mockReturnValue({
-				get: vi.fn().mockReturnValue([]),
+				get: vi.fn().mockReturnValue(undefined),
 				update: vi.fn(),
 			}),
 			createFileSystemWatcher: vi.fn().mockReturnValue({
@@ -37,6 +48,7 @@ vi.mock("vscode", async () => {
 				dispose: vi.fn(),
 			}),
 			onDidChangeWorkspaceFolders: vi.fn(),
+			workspaceFolders: undefined,
 		},
 		languages: {
 			...(base.languages ?? {}),
@@ -45,6 +57,7 @@ vi.mock("vscode", async () => {
 		commands: {
 			...(base.commands ?? {}),
 			executeCommand: vi.fn(),
+			registerCommand: vi.fn().mockReturnValue({ dispose: vi.fn() }),
 		},
 		env: {
 			...(base.env ?? {}),
@@ -52,6 +65,20 @@ vi.mock("vscode", async () => {
 		},
 		ExtensionMode: {
 			Production: 1,
+		},
+		StatusBarAlignment: {
+			Left: 1,
+			Right: 2,
+		},
+		ConfigurationTarget: {
+			Global: 1,
+			Workspace: 2,
+			WorkspaceFolder: 3,
+		},
+		RelativePattern: vi.fn(),
+		Uri: {
+			file: vi.fn((p: string) => ({ fsPath: p })),
+			...(base.Uri ?? {}),
 		},
 	}
 })
@@ -76,7 +103,9 @@ vi.mock("@roo-code/cloud", () => ({
 		},
 	},
 	BridgeOrchestrator: {
-		disconnect: mockBridgeOrchestratorDisconnect,
+		getInstance: vi.fn().mockReturnValue({
+			disconnect: mockBridgeOrchestratorDisconnect,
+		}),
 	},
 	getRooCodeApiUrl: vi.fn().mockReturnValue("https://app.roocode.com"),
 }))
@@ -114,6 +143,10 @@ vi.mock("../shared/package", () => ({
 
 vi.mock("../shared/language", () => ({
 	formatLanguage: vi.fn().mockReturnValue("en"),
+}))
+
+vi.mock("../shared/globalChannel", () => ({
+	setGlobalChannel: vi.fn(),
 }))
 
 vi.mock("../core/config/ContextProxy", () => ({
@@ -166,8 +199,26 @@ vi.mock("../utils/autoImportSettings", () => ({
 	autoImportSettings: vi.fn().mockResolvedValue(undefined),
 }))
 
+vi.mock("../utils/safeWriteJson", () => ({
+	safeWriteJson: vi.fn().mockResolvedValue(undefined),
+}))
+
+vi.mock("../utils/path", () => ({}))
+
 vi.mock("../extension/api", () => ({
 	API: vi.fn().mockImplementation(() => ({})),
+}))
+
+vi.mock("../core/webview/ClineProvider", () => ({
+	ClineProvider: vi.fn().mockImplementation(() => ({
+		postStateToWebview: vi.fn(),
+		remoteControlEnabled: vi.fn().mockResolvedValue(undefined),
+		initializeCloudProfileSyncWhenReady: vi.fn().mockResolvedValue(undefined),
+		providerSettingsManager: {},
+		contextProxy: {},
+		customModesManager: {},
+		dispose: vi.fn(),
+	})),
 }))
 
 vi.mock("../activate", () => ({
@@ -187,6 +238,11 @@ vi.mock("../i18n", () => ({
 	initializeI18n: vi.fn(),
 }))
 
+vi.mock("fs/promises", () => ({
+	readdir: vi.fn().mockResolvedValue([]),
+	rm: vi.fn().mockResolvedValue(undefined),
+}))
+
 describe("extension.ts", () => {
 	let mockContext: vscode.ExtensionContext
 	let authStateChangedHandler:
@@ -196,6 +252,9 @@ describe("extension.ts", () => {
 	beforeEach(() => {
 		vi.clearAllMocks()
 		mockBridgeOrchestratorDisconnect.mockClear()
+
+		// Reset the cached module so each test gets a fresh activate().
+		vi.resetModules()
 
 		mockContext = {
 			extensionPath: "/test/path",
@@ -210,10 +269,8 @@ describe("extension.ts", () => {
 		authStateChangedHandler = undefined
 	})
 
-	test(
-		"authStateChangedHandler calls BridgeOrchestrator.disconnect when logged-out event fires",
-		async () => {
-		const { CloudService, BridgeOrchestrator } = await import("@roo-code/cloud")
+	test("authStateChangedHandler invokes remoteControlEnabled(false) when logged-out event fires", async () => {
+		const { CloudService } = await import("@roo-code/cloud")
 
 		// Capture the auth state changed handler.
 		vi.mocked(CloudService.createInstance).mockImplementation(async (_context, _logger, handlers) => {
@@ -235,21 +292,22 @@ describe("extension.ts", () => {
 		// Verify handler was registered.
 		expect(authStateChangedHandler).toBeDefined()
 
+		// Get the ClineProvider mock instance to check remoteControlEnabled calls.
+		const { ClineProvider } = await import("../core/webview/ClineProvider")
+		const providerInstance = vi.mocked(ClineProvider).mock.results[0]?.value
+
 		// Trigger logout.
 		await authStateChangedHandler!({
 			state: "logged-out" as AuthState,
 			previousState: "logged-in" as AuthState,
 		})
 
-		// Verify BridgeOrchestrator.disconnect was called
-		expect(mockBridgeOrchestratorDisconnect).toHaveBeenCalled()
-		},
-		30_000,
-	)
+		// The actual authStateChangedHandler calls provider.remoteControlEnabled(false)
+		// when the state is "logged-out".
+		expect(providerInstance.remoteControlEnabled).toHaveBeenCalledWith(false)
+	}, 30_000)
 
-	test(
-		"authStateChangedHandler does not call BridgeOrchestrator.disconnect for other states",
-		async () => {
+	test("authStateChangedHandler does not call remoteControlEnabled for other states", async () => {
 		const { CloudService } = await import("@roo-code/cloud")
 
 		// Capture the auth state changed handler.
@@ -269,15 +327,20 @@ describe("extension.ts", () => {
 		const { activate } = await import("../extension")
 		await activate(mockContext)
 
+		// Get the ClineProvider mock instance.
+		const { ClineProvider } = await import("../core/webview/ClineProvider")
+		const providerInstance = vi.mocked(ClineProvider).mock.results[0]?.value
+
+		// Clear any calls from activation itself.
+		vi.mocked(providerInstance.remoteControlEnabled).mockClear()
+
 		// Trigger login.
 		await authStateChangedHandler!({
 			state: "logged-in" as AuthState,
 			previousState: "logged-out" as AuthState,
 		})
 
-		// Verify BridgeOrchestrator.disconnect was NOT called.
-		expect(mockBridgeOrchestratorDisconnect).not.toHaveBeenCalled()
-		},
-		30_000,
-	)
+		// Verify remoteControlEnabled was NOT called for non-logout states.
+		expect(providerInstance.remoteControlEnabled).not.toHaveBeenCalled()
+	}, 30_000)
 })

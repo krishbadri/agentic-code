@@ -28,7 +28,7 @@ The end result is “**transactions for agents**”:
 
 ### Docs (important)
 
-This repo has extensive specs/reports under the root and `docs/` (e.g. `TRANSACTION_AGENTS_SPEC_COMPLETE.md`, `IDEAL_SYSTEM_SPEC.md`, audits/status reports). These describe rules like R6/R8/R31/R32/R33 referenced by the code.
+Specifications live under `docs/` (e.g. `docs/transaction_agents_spec.md`, `docs/CHECKPOINTING.md`). These describe rules like R6/R8/R31/R32/R33 referenced by the code.
 
 ---
 

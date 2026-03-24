@@ -10,10 +10,12 @@
 		"dev": "tsx --watch src/cli.ts dev",
 		"start": "node dist/src/cli.js start",
 		"build": "tsc -p tsconfig.json",
+		"check-types": "tsc --noEmit",
 		"test": "vitest run",
 		"dev:oneshot": "tsx src/cli.ts dev"
 	},
 	"dependencies": {
+		"@roo-code/types": "workspace:^",
 		"@fastify/compress": "^7.0.0",
 		"@fastify/cors": "^8.0.0",
 		"@fastify/formbody": "^7.0.0",

@@ -126,8 +126,8 @@ describe("attemptCompletionTool", () => {
 			}
 
 			const completedTodos: TodoItem[] = [
-				{ id: "1", content: "First task", status: "completed" },
-				{ id: "2", content: "Second task", status: "completed" },
+				{ id: "1", content: "First task", status: "completed", project: "default" },
+				{ id: "2", content: "Second task", status: "completed", project: "default" },
 			]
 
 			mockTask.todoList = completedTodos
@@ -156,8 +156,8 @@ describe("attemptCompletionTool", () => {
 			}
 
 			const todosWithPending: TodoItem[] = [
-				{ id: "1", content: "First task", status: "completed" },
-				{ id: "2", content: "Second task", status: "pending" },
+				{ id: "1", content: "First task", status: "completed", project: "default" },
+				{ id: "2", content: "Second task", status: "pending", project: "default" },
 			]
 
 			mockTask.todoList = todosWithPending
@@ -199,8 +199,8 @@ describe("attemptCompletionTool", () => {
 			}
 
 			const todosWithInProgress: TodoItem[] = [
-				{ id: "1", content: "First task", status: "completed" },
-				{ id: "2", content: "Second task", status: "in_progress" },
+				{ id: "1", content: "First task", status: "completed", project: "default" },
+				{ id: "2", content: "Second task", status: "in_progress", project: "default" },
 			]
 
 			mockTask.todoList = todosWithInProgress
@@ -242,9 +242,9 @@ describe("attemptCompletionTool", () => {
 			}
 
 			const mixedTodos: TodoItem[] = [
-				{ id: "1", content: "First task", status: "completed" },
-				{ id: "2", content: "Second task", status: "pending" },
-				{ id: "3", content: "Third task", status: "in_progress" },
+				{ id: "1", content: "First task", status: "completed", project: "default" },
+				{ id: "2", content: "Second task", status: "pending", project: "default" },
+				{ id: "3", content: "Third task", status: "in_progress", project: "default" },
 			]
 
 			mockTask.todoList = mixedTodos
@@ -286,8 +286,8 @@ describe("attemptCompletionTool", () => {
 			}
 
 			const todosWithPending: TodoItem[] = [
-				{ id: "1", content: "First task", status: "completed" },
-				{ id: "2", content: "Second task", status: "pending" },
+				{ id: "1", content: "First task", status: "completed", project: "default" },
+				{ id: "2", content: "Second task", status: "pending", project: "default" },
 			]
 
 			mockTask.todoList = todosWithPending
@@ -330,8 +330,8 @@ describe("attemptCompletionTool", () => {
 			}
 
 			const todosWithPending: TodoItem[] = [
-				{ id: "1", content: "First task", status: "completed" },
-				{ id: "2", content: "Second task", status: "pending" },
+				{ id: "1", content: "First task", status: "completed", project: "default" },
+				{ id: "2", content: "Second task", status: "pending", project: "default" },
 			]
 
 			mockTask.todoList = todosWithPending
@@ -374,8 +374,8 @@ describe("attemptCompletionTool", () => {
 			}
 
 			const completedTodos: TodoItem[] = [
-				{ id: "1", content: "First task", status: "completed" },
-				{ id: "2", content: "Second task", status: "completed" },
+				{ id: "1", content: "First task", status: "completed", project: "default" },
+				{ id: "2", content: "Second task", status: "completed", project: "default" },
 			]
 
 			mockTask.todoList = completedTodos

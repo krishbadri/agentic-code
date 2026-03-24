@@ -30,7 +30,7 @@
 
 **R4**: The orchestrator MUST deterministically check Safety and Progress at each commit point.
 
-**R5**: The orchestrator MUST commit only if Progress is satisfied.
+**R5**: The orchestrator MUST commit only if Safety AND Progress are satisfied.
 
 **R6**: The orchestrator MUST check Liveness at the final commit point.
 
@@ -110,9 +110,45 @@
 
 **R32**: Agents MUST NOT introduce new tests unless explicitly developer-provided.
 
-**R33**: The progress metric MUST be: number of passing tests is monotonically non-decreasing.
+**R33**: The progress oracle SHOULD default to: number of passing tests is monotonically non-decreasing. Progress MAY be any clause in the clause grammar; tests are one instance.
 
 **R34**: Termination condition MAY be "all tests pass".
+
+---
+
+### Clause Interface
+
+A **clause** is a boolean predicate that the progress oracle (and optionally safety oracle) evaluates at action-time or commit-time.
+
+#### Clause Grammar
+
+```
+clause      ::= atom | NOT clause | clause AND clause | clause OR clause | FORALL binding clause
+atom        ::= test-result | lint-result | type-check | metric-threshold | custom-predicate
+binding     ::= identifier IN set-expr
+set-expr    ::= file-set | function-set | test-suite | literal-set
+```
+
+Examples:
+
+- `FORALL t IN test-suite: t.passing` — default progress oracle
+- `type-check AND lint-result` — state-safety clause
+- `metric-threshold(coverage, >=, prior)` — coverage non-regression
+
+#### Checker Inputs
+
+| Phase                              | Available Inputs                                                                                                                                                                 |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Action-time** (before tool call) | Tool name, tool arguments, current file contents, touched-file list, pending diff                                                                                                |
+| **Commit-time**                    | Full diff from prior checkpoint, touched files, AST edits (added/removed/changed nodes and functions), test results (pass/fail/counts), tool call metadata (sequence, durations) |
+
+Action-time checks receive the _intended_ operation and current state; commit-time checks receive the _realized_ outcome including test results and structural AST diff.
+
+---
+
+### Structural Conflict Policy
+
+Same-file edits MAY proceed if they touch disjoint AST nodes/functions; otherwise they MUST be treated as a conflict and the later branch MUST be rolled back.
 
 ---
 
@@ -132,44 +168,45 @@
 
 ## Summary Table
 
-| ID | Category | Level | Summary |
-|----|----------|-------|---------|
-| R1 | Boundaries | MUST | Transaction boundaries pre-specified by human/agent |
-| R2 | Boundaries | MUST | Commit points at end of each transaction boundary |
-| R3 | Orchestrator | MUST | Take checkpoint at each commit point |
-| R4 | Orchestrator | MUST | Deterministically check Safety+Progress at commit points |
-| R5 | Orchestrator | MUST | Commit only if Progress satisfied |
-| R6 | Orchestrator | MUST | Check Liveness at final commit point |
-| R7 | Orchestrator | MUST | Rollback if Safety/Progress/Liveness violated |
-| R8 | Safety | MUST | Safety rules define transaction granularity |
-| R9 | Safety | MUST | Split safety into action-safety and state-safety |
-| R10 | Concurrency | MUST | Baseline is Optimistic CC |
-| R11 | Concurrency | MUST | Spawn 1 agent per task |
-| R12 | Concurrency | MUST | Limit fan-out |
-| R13 | Concurrency | MUST | Each agent uses isolated git worktree/branch |
-| R14 | Concurrency | MUST | Each agent applies patch locally |
-| R15 | Concurrency | MUST | Conflicts identified at merge time |
-| R16 | Concurrency | MUST | Detect structural conflicts beyond Git (AST + deps) |
-| R17 | Concurrency | MUST | Abort/rollback conflicting work |
-| R18 | OCC Steps | MUST | Create worktree |
-| R19 | OCC Steps | MUST | Run agent in worktree |
-| R20 | OCC Steps | MUST | Patch locally |
-| R21 | OCC Steps | MUST | Detect structural conflicts when all finish |
-| R22 | OCC Steps | MUST | Merge no-conflict branches first |
-| R23 | OCC Steps | MUST | Order conflicted branches by modifications, merge sequentially |
-| R24 | OCC Steps | MUST | Rollback branch if merge fails |
-| R25 | Git Ops | MUST | Use `git worktree add -B` |
-| R26 | Git Ops | MUST | Use `git apply --reject` |
-| R27 | Git Ops | MUST | Use `git merge --no-ff` |
-| R28 | Git Ops | MUST | Rollback via `git merge --abort` + `worktree remove` + `branch -D` |
-| R29 | Isolation | SHOULD | Support pessimistic hierarchical locking over dependency DAG |
-| R30 | Isolation | MUST | Two agents cannot create same new file |
-| R31 | Progress | MUST | Tests are "given" (developer-provided) |
-| R32 | Progress | MUST | Agents must not introduce new tests unless explicit |
-| R33 | Progress | MUST | # passing tests monotonically non-decreasing |
-| R34 | Progress | MAY | Termination = "all tests pass" |
-| R35 | Actions | MUST | Add/remove/rename files |
-| R36 | Actions | MUST | Modify directories |
-| R37 | Actions | MUST | Run bash with guardrails |
-| R38 | Actions | MUST | Env vars without permanent override |
-| R39 | Actions | MUST | Install dependencies |
+| ID  | Category            | Level    | Summary                                                                                                             |
+| --- | ------------------- | -------- | ------------------------------------------------------------------------------------------------------------------- |
+| R1  | Boundaries          | MUST     | Transaction boundaries pre-specified by human/agent                                                                 |
+| R2  | Boundaries          | MUST     | Commit points at end of each transaction boundary                                                                   |
+| R3  | Orchestrator        | MUST     | Take checkpoint at each commit point                                                                                |
+| R4  | Orchestrator        | MUST     | Deterministically check Safety+Progress at commit points                                                            |
+| R5  | Orchestrator        | MUST     | Commit only if Safety AND Progress satisfied                                                                        |
+| R6  | Orchestrator        | MUST     | Check Liveness at final commit point                                                                                |
+| R7  | Orchestrator        | MUST     | Rollback if Safety/Progress/Liveness violated                                                                       |
+| R8  | Safety              | MUST     | Safety rules define transaction granularity                                                                         |
+| R9  | Safety              | MUST     | Split safety into action-safety and state-safety                                                                    |
+| R10 | Concurrency         | MUST     | Baseline is Optimistic CC                                                                                           |
+| R11 | Concurrency         | MUST     | Spawn 1 agent per task                                                                                              |
+| R12 | Concurrency         | MUST     | Limit fan-out                                                                                                       |
+| R13 | Concurrency         | MUST     | Each agent uses isolated git worktree/branch                                                                        |
+| R14 | Concurrency         | MUST     | Each agent applies patch locally                                                                                    |
+| R15 | Concurrency         | MUST     | Conflicts identified at merge time                                                                                  |
+| R16 | Concurrency         | MUST     | Detect structural conflicts beyond Git (AST + deps)                                                                 |
+| R17 | Concurrency         | MUST     | Abort/rollback conflicting work                                                                                     |
+| R18 | OCC Steps           | MUST     | Create worktree                                                                                                     |
+| R19 | OCC Steps           | MUST     | Run agent in worktree                                                                                               |
+| R20 | OCC Steps           | MUST     | Patch locally                                                                                                       |
+| R21 | OCC Steps           | MUST     | Detect structural conflicts when all finish                                                                         |
+| R22 | OCC Steps           | MUST     | Merge no-conflict branches first                                                                                    |
+| R23 | OCC Steps           | MUST     | Order conflicted branches by modifications, merge sequentially                                                      |
+| R24 | OCC Steps           | MUST     | Rollback branch if merge fails                                                                                      |
+| R25 | Git Ops             | MUST     | Use `git worktree add -B`                                                                                           |
+| R26 | Git Ops             | MUST     | Use `git apply --reject`                                                                                            |
+| R27 | Git Ops             | MUST     | Use `git merge --no-ff`                                                                                             |
+| R28 | Git Ops             | MUST     | Rollback via `git merge --abort` + `worktree remove` + `branch -D`                                                  |
+| R29 | Isolation           | SHOULD   | Support pessimistic hierarchical locking over dependency DAG                                                        |
+| R30 | Isolation           | MUST     | Two agents cannot create same new file                                                                              |
+| —   | Structural Conflict | MAY/MUST | Disjoint AST nodes MAY proceed; overlapping nodes MUST conflict and rollback                                        |
+| R31 | Progress            | MUST     | Tests are "given" (developer-provided)                                                                              |
+| R32 | Progress            | MUST     | Agents must not introduce new tests unless explicit                                                                 |
+| R33 | Progress            | SHOULD   | Default progress oracle: # passing tests monotonically non-decreasing; Progress MAY be any clause in clause grammar |
+| R34 | Progress            | MAY      | Termination = "all tests pass"                                                                                      |
+| R35 | Actions             | MUST     | Add/remove/rename files                                                                                             |
+| R36 | Actions             | MUST     | Modify directories                                                                                                  |
+| R37 | Actions             | MUST     | Run bash with guardrails                                                                                            |
+| R38 | Actions             | MUST     | Env vars without permanent override                                                                                 |
+| R39 | Actions             | MUST     | Install dependencies                                                                                                |

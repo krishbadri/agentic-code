@@ -69,11 +69,19 @@ describe("OCC Acceptance Tests", () => {
 
 			// Step 3: Simulate agents making changes to DIFFERENT files
 			// Agent A modifies src/a.ts
-			writeFileToWorktree(agentA.worktree_path, "src/a.ts", 'export function a() { return "modified by agent A" }\n')
+			writeFileToWorktree(
+				agentA.worktree_path,
+				"src/a.ts",
+				'export function a() { return "modified by agent A" }\n',
+			)
 			commitInWorktree(agentA.worktree_path, "Agent A: modify a.ts")
 
 			// Agent B modifies src/b.ts
-			writeFileToWorktree(agentB.worktree_path, "src/b.ts", 'export function b() { return "modified by agent B" }\n')
+			writeFileToWorktree(
+				agentB.worktree_path,
+				"src/b.ts",
+				'export function b() { return "modified by agent B" }\n',
+			)
 			commitInWorktree(agentB.worktree_path, "Agent B: modify b.ts")
 
 			// Step 4: Merge agent A first (should succeed)
@@ -1287,11 +1295,11 @@ line4
 			const { symlink } = await import("node:fs/promises")
 			const { join } = await import("node:path")
 			const { platform } = await import("node:os")
-			
+
 			// Create a directory and a symlink in it
 			const { mkdir } = await import("node:fs/promises")
 			await mkdir(join(worktree_path, "symlink-dir"), { recursive: true })
-			
+
 			// Try to create symlink - may fail on Windows without admin/dev mode
 			try {
 				await symlink("../../outside", join(worktree_path, "symlink-dir", "link"))
@@ -1614,7 +1622,11 @@ line4
 			const { tx_id, worktree_path } = await beginTransaction(fixture)
 
 			// Break the tests (liveness would fail if checked)
-			writeFileToWorktree(worktree_path, "run-tests.js", `console.log("not ok 1 - test failed"); process.exit(1);`)
+			writeFileToWorktree(
+				worktree_path,
+				"run-tests.js",
+				`console.log("not ok 1 - test failed"); process.exit(1);`,
+			)
 
 			// Intermediate checkpoint should succeed (liveness NOT checked)
 			const cpRes = await fetch(`${fixture.baseUrl}/tx/${tx_id}/checkpoint`, {
@@ -1654,7 +1666,11 @@ line4
 			const goodCheckpoint = cp1Data.commit_sha
 
 			// Break tests (liveness will fail)
-			writeFileToWorktree(worktree_path, "run-tests.js", `console.log("not ok 1 - test failed"); process.exit(1);`)
+			writeFileToWorktree(
+				worktree_path,
+				"run-tests.js",
+				`console.log("not ok 1 - test failed"); process.exit(1);`,
+			)
 
 			// Final commit liveness check should fail
 			const livenessRes = await fetch(`${fixture.baseUrl}/tx/${tx_id}/liveness`, {
@@ -1757,7 +1773,12 @@ line4
 			})
 
 			it("should block writing to test files via /write endpoint", async () => {
-				const { tx_id } = await beginTransaction(fixture)
+				const { tx_id, worktree_path } = await beginTransaction(fixture)
+
+				// Pre-create the test file so the "modification of existing test" guard triggers
+				// (the /write endpoint only blocks modification of EXISTING test files, not creation of new ones)
+				writeFileToWorktree(worktree_path, "test/unit.test.js", "// original test\n")
+				commitInWorktree(worktree_path, "Add test file")
 
 				const res = await fetch(`${fixture.baseUrl}/tx/${tx_id}/write`, {
 					method: "POST",
@@ -1775,7 +1796,11 @@ line4
 			})
 
 			it("should NOT allow bypass via X-Allow-Test-Modify header (security)", async () => {
-				const { tx_id } = await beginTransaction(fixture)
+				const { tx_id, worktree_path } = await beginTransaction(fixture)
+
+				// Pre-create the test file so the "modification of existing test" guard triggers
+				writeFileToWorktree(worktree_path, "src/app.spec.ts", "// original spec\n")
+				commitInWorktree(worktree_path, "Add spec file")
 
 				// Try to bypass with header - MUST FAIL
 				const res = await fetch(`${fixture.baseUrl}/tx/${tx_id}/write`, {
@@ -1798,7 +1823,7 @@ line4
 			})
 
 			it("should block test files with various patterns", async () => {
-				const { tx_id } = await beginTransaction(fixture)
+				const { tx_id, worktree_path } = await beginTransaction(fixture)
 
 				const testPatterns = [
 					"src/__tests__/foo.ts",
@@ -1808,6 +1833,12 @@ line4
 					"app.spec.js",
 					"component.test.tsx",
 				]
+
+				// Pre-create all test files so the "modification of existing test" guard triggers
+				for (const testPath of testPatterns) {
+					writeFileToWorktree(worktree_path, testPath, "// original\n")
+				}
+				commitInWorktree(worktree_path, "Add test files for pattern testing")
 
 				for (const testPath of testPatterns) {
 					const res = await fetch(`${fixture.baseUrl}/tx/${tx_id}/write`, {
@@ -1881,7 +1912,7 @@ line4
 				})
 
 				const data = await res.json()
-				
+
 				// DEBUG: Log response body to see what we got
 				if (res.status !== 403) {
 					console.log("\n=== FAILING TEST DEBUG (redirection) ===")
@@ -1905,7 +1936,7 @@ line4
 					console.log("Full response:", JSON.stringify(data, null, 2))
 					console.log("=== END DEBUG ===\n")
 				}
-				
+
 				expect(res.status).toBe(403)
 				expect(data.code).toBe("TEST_FILE_PROTECTED")
 				expect(data.modified_test_files).toBeDefined()
@@ -1937,10 +1968,7 @@ line4
 					headers: fixture.headers,
 					body: JSON.stringify({
 						cmd: "node",
-						args: [
-							"-e",
-							"require('fs').writeFileSync('test/file.test.ts', 'malicious content')",
-						],
+						args: ["-e", "require('fs').writeFileSync('test/file.test.ts', 'malicious content')"],
 					}),
 				})
 
@@ -1997,7 +2025,7 @@ line4
 				})
 
 				const data = await res.json()
-				
+
 				// DEBUG: Log response body to see what we got
 				if (res.status !== 403) {
 					console.log("\n=== FAILING TEST DEBUG (new untracked) ===")
@@ -2014,7 +2042,7 @@ line4
 					console.log("Full response:", JSON.stringify(data, null, 2))
 					console.log("=== END DEBUG ===\n")
 				}
-				
+
 				expect(res.status).toBe(403)
 				expect(data.code).toBe("TEST_FILE_PROTECTED")
 				expect(data.modified_test_files).toBeDefined()
@@ -2076,7 +2104,11 @@ line4
 			})
 
 			it("should still block non-allowlisted test files", async () => {
-				const { tx_id } = await beginTransaction(fixture)
+				const { tx_id, worktree_path } = await beginTransaction(fixture)
+
+				// Pre-create the test file so the "modification of existing test" guard triggers
+				writeFileToWorktree(worktree_path, "src/__tests__/not-allowed.test.ts", "// original test\n")
+				commitInWorktree(worktree_path, "Add non-allowlisted test file")
 
 				const res = await fetch(`${fixture.baseUrl}/tx/${tx_id}/write`, {
 					method: "POST",

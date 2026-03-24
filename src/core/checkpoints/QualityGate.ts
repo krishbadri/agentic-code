@@ -127,29 +127,49 @@ async function runCommand(command: string, cwd: string, timeoutMs: number): Prom
 // ── Parsers ────────────────────────────────────────────────────────────────
 
 function parseJestJson(stdout: string): { passing: number; failing: number; total: number } | null {
-	try {
-		// Jest --json wraps output in a JSON object
-		const jsonStart = stdout.indexOf("{")
-		if (jsonStart === -1) return null
-		const data = JSON.parse(stdout.slice(jsonStart))
-		if (typeof data.numPassedTests === "number") {
-			return {
-				passing: data.numPassedTests,
-				failing: data.numFailedTests ?? 0,
-				total: data.numTotalTests ?? data.numPassedTests + (data.numFailedTests ?? 0),
+	// Jest --json outputs a JSON object; find the outermost JSON object by scanning
+	// for a `{` that starts an object containing the expected Jest keys.
+	let searchFrom = 0
+	while (searchFrom < stdout.length) {
+		const jsonStart = stdout.indexOf("{", searchFrom)
+		if (jsonStart === -1) break
+		try {
+			const data = JSON.parse(stdout.slice(jsonStart))
+			if (typeof data.numPassedTests === "number") {
+				return {
+					passing: data.numPassedTests,
+					failing: data.numFailedTests ?? 0,
+					total: data.numTotalTests ?? data.numPassedTests + (data.numFailedTests ?? 0),
+				}
 			}
+		} catch {
+			// Not valid JSON at this offset — try the next `{`
 		}
-	} catch {
-		// Not valid JSON
+		searchFrom = jsonStart + 1
 	}
 	return null
 }
 
 function parseVitestJson(stdout: string): { passing: number; failing: number; total: number } | null {
+	// Same robust scan as parseJestJson — don't trust first `{` if debug output precedes JSON
+	let searchFrom = 0
+	while (searchFrom < stdout.length) {
+		const jsonStart = stdout.indexOf("{", searchFrom)
+		if (jsonStart === -1) break
+		try {
+			const data = JSON.parse(stdout.slice(jsonStart))
+			const result = _parseVitestData(data)
+			if (result) return result
+		} catch {
+			// Not valid JSON at this offset
+		}
+		searchFrom = jsonStart + 1
+	}
+	return null
+}
+
+function _parseVitestData(data: any): { passing: number; failing: number; total: number } | null {
 	try {
-		const jsonStart = stdout.indexOf("{")
-		if (jsonStart === -1) return null
-		const data = JSON.parse(stdout.slice(jsonStart))
 		// Vitest JSON reporter: { testResults: [...], numPassedTests, numFailedTests, ... }
 		if (typeof data.numPassedTests === "number") {
 			return {
@@ -181,9 +201,10 @@ function parseVitestJson(stdout: string): { passing: number; failing: number; to
 function parsePytest(stdout: string, stderr: string): { passing: number; failing: number; total: number } | null {
 	const combined = stdout + "\n" + stderr
 	// Match patterns like "5 passed", "3 failed", "1 error"
-	const passedMatch = combined.match(/(\d+)\s+passed/)
-	const failedMatch = combined.match(/(\d+)\s+failed/)
-	const errorMatch = combined.match(/(\d+)\s+error/)
+	// Word boundaries ensure we don't match "5 passed_count" or "3 failed_tests"
+	const passedMatch = combined.match(/\b(\d+)\s+passed\b/)
+	const failedMatch = combined.match(/\b(\d+)\s+failed\b/)
+	const errorMatch = combined.match(/\b(\d+)\s+error\b/)
 
 	if (passedMatch || failedMatch || errorMatch) {
 		const passing = passedMatch ? parseInt(passedMatch[1], 10) : 0
@@ -238,8 +259,8 @@ async function collectScore(project: ProjectInfo, cwd: string): Promise<QualityS
 	if (project.compileCommand) {
 		const result = await runCommand(project.compileCommand, cwd, 30_000)
 		if (result.timedOut) {
-			// Compile timeout → assume clean (don't block on slow compiles)
-			compileClean = true
+			// Compile timeout → treat as broken; a timed-out compile cannot be considered clean
+			compileClean = false
 		} else {
 			compileClean = result.exitCode === 0
 		}
@@ -267,7 +288,7 @@ function isRegression(newScore: QualityScore, prevScore: QualityScore): boolean 
 const stateCache = new Map<string, QualityGateState>()
 
 function getCacheKey(task: Task): string {
-	return task.rootTaskId || (task as any).rootTask?.taskId || task.taskId
+	return task.taskId
 }
 
 function getState(task: Task): QualityGateState {
@@ -305,9 +326,20 @@ export async function evaluateQualityGate(task: Task, checkpointName: string): P
 
 	const state = getState(task)
 
-	// First checkpoint ever → baseline, always save
+	// First checkpoint ever → baseline, always save.
+	// Warn if the baseline itself is already broken — all future regression
+	// checks will be relative to this broken state, meaning a broken baseline
+	// effectively lowers the bar for all subsequent checkpoints.
 	if (state.checkpoints.length === 0) {
-		provider?.log?.(`[QualityGate] First checkpoint — saving as baseline`)
+		if (score.testsFailing > 0 || !score.compileClean) {
+			provider?.log?.(
+				`[QualityGate] ⚠️ WARNING: Baseline checkpoint is BROKEN ` +
+					`(${score.testsFailing} failing, compile ${score.compileClean ? "clean" : "BROKEN"}). ` +
+					`All future regression checks will be relative to this broken state.`,
+			)
+		} else {
+			provider?.log?.(`[QualityGate] First checkpoint — saving as baseline`)
+		}
 		return { action: "save", score }
 	}
 

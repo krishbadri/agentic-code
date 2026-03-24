@@ -108,10 +108,16 @@ describe("Sliding Window", () => {
 
 			// 6 messages excluding first, 0.3 fraction = 1.8 messages to remove
 			// 1.8 rounds down to 1, then to 0 to make it even
+			// But the safety guard forces messagesToRemove = 2 when fracToRemove > 0
+			// and messagesToRemove === 0 and messages.length >= 4
 			const result = truncateConversation(messages, 0.3, taskId)
 
-			expect(result.length).toBe(7) // No messages removed
-			expect(result).toEqual(messages)
+			expect(result.length).toBe(5) // 2 messages removed (safety minimum)
+			expect(result[0]).toEqual(messages[0])
+			expect(result[1]).toEqual(messages[3])
+			expect(result[2]).toEqual(messages[4])
+			expect(result[3]).toEqual(messages[5])
+			expect(result[4]).toEqual(messages[6])
 		})
 
 		it("should handle edge case with fracToRemove = 0", () => {

@@ -39,7 +39,7 @@ export class DiffViewProvider {
 	private taskRef: WeakRef<Task>
 
 	constructor(
-		private cwd: string,
+		public cwd: string,
 		task: Task,
 	) {
 		this.taskRef = new WeakRef(task)

@@ -115,10 +115,19 @@ function isPathProtected(filePath: string, protectedPaths: string[]): { protecte
 
 		// Glob pattern matching
 		if (normalizedPattern.includes("*")) {
-			const regex = new RegExp(
-				"^" + normalizedPattern.replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*") + "$",
-				"i",
-			)
+			// Convert glob to regex: ** matches any path segments, * matches within a segment.
+			// Leading **/ should also match paths with no leading segments (e.g., **/tests/** matches tests/foo).
+			// Use placeholder to avoid ** → .* having its * replaced by the single-* pass.
+			let regexStr = normalizedPattern
+				.replace(/\*\*/g, "\0GLOBSTAR\0")
+				.replace(/\*/g, "[^/]*")
+				.replace(/\0GLOBSTAR\0/g, ".*")
+			// If pattern starts with ".*/" (from leading **/), make the prefix optional
+			// so it matches paths starting directly with the next segment.
+			if (regexStr.startsWith(".*/")) {
+				regexStr = "(.*/)?".concat(regexStr.slice(3))
+			}
+			const regex = new RegExp("^" + regexStr + "$", "i")
 			if (regex.test(normalizedPath)) {
 				return { protected: true, rule: `matches pattern: ${pattern}` }
 			}
@@ -136,10 +145,7 @@ function isPathProtected(filePath: string, protectedPaths: string[]): { protecte
 /**
  * Check if a bash command is dangerous.
  */
-function isBashDangerous(
-	command: string,
-	config: ActionSafetyConfig,
-): { dangerous: boolean; rule?: string } {
+function isBashDangerous(command: string, config: ActionSafetyConfig): { dangerous: boolean; rule?: string } {
 	// Check against dangerous patterns
 	for (const pattern of config.dangerousBashPatterns) {
 		if (pattern.test(command)) {
@@ -263,11 +269,7 @@ export interface ActionSafetyEvent {
 /**
  * Create a structured log event for an action-safety check.
  */
-export function createActionSafetyEvent(
-	check: ActionSafetyCheck,
-	txId?: string,
-	subTxId?: string,
-): ActionSafetyEvent {
+export function createActionSafetyEvent(check: ActionSafetyCheck, txId?: string, subTxId?: string): ActionSafetyEvent {
 	return {
 		type: "action_safety",
 		timestamp: Date.now(),
