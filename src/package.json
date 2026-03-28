@@ -587,7 +587,7 @@
 		"get-folder-size": "^5.0.0",
 		"google-auth-library": "^9.15.1",
 		"gray-matter": "^4.0.3",
-		"i18next": "^25.0.0",
+		"i18next": "^26.0.1",
 		"ignore": "^7.0.3",
 		"isbinaryfile": "^6.0.0",
 		"jwt-decode": "^4.0.0",
