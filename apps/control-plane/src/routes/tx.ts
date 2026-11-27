@@ -409,7 +409,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 		HeadersSchema.parse(req.headers as any)
 		const body = z
 			.object({
-				reason: z.enum(["human", "auto", "manual"]),
+				reason: z.string().min(1).max(64), // e.g. human | auto | manual | plan-group
 				policy_snapshot: z.record(z.any()).optional(),
 				trailers: z.record(z.string()).optional(),
 			})
