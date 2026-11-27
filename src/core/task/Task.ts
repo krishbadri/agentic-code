@@ -131,7 +131,12 @@ import { Gpt5Metadata, ClineMessageWithMetadata } from "./types"
 import { MessageQueueService } from "../message-queue/MessageQueueService"
 
 import { AutoApprovalHandler } from "./AutoApprovalHandler"
-import { getCpPort } from "../control-plane/client"
+import {
+	getCpPort,
+	isControlPlaneUnavailableError,
+	isPlannerModeEnabled,
+	waitForControlPlane,
+} from "../control-plane/client"
 import * as cpTx from "../control-plane/tx"
 
 const MAX_EXPONENTIAL_BACKOFF_SECONDS = 600 // 10 minutes
@@ -2231,9 +2236,7 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 		const exceedsMaxDepth = nestingDepth >= MAX_PLANNER_DEPTH
 
 		// Check if planner mode is enabled (read from configuration)
-		const cfg = vscode.workspace.getConfiguration()
-		let plannerModeEnabled =
-			cfg.get<boolean>("roo.experimental.plannerMode") || cfg.get<boolean>("roo-cline.experimental.plannerMode")
+		let plannerModeEnabled = isPlannerModeEnabled()
 
 		// Allow planner mode for:
 		// 1. Root tasks (not subtasks)
@@ -2262,7 +2265,18 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 				)
 		}
 
+		// Planner mode requires the Control-Plane (worktrees, safety gates, merge pipeline).
+		// If it is unavailable, run the normal single-agent loop with a visible warning.
+		let plannerCpAvailable = false
 		if (plannerMode && task && !isSimpleRequest) {
+			plannerCpAvailable = !!(await waitForControlPlane(this.providerRef.deref()?.context))
+			if (!plannerCpAvailable) {
+				this.providerRef.deref()?.log(`[Task#startTask] Control-Plane unavailable; skipping planner mode`)
+				await this.say("text", "⚠ Control-Plane unavailable; executing as single agent.")
+			}
+		}
+
+		if (plannerMode && task && !isSimpleRequest && plannerCpAvailable) {
 			try {
 				const { PlannerAgent, shouldOpenCircuitBreaker } = await import("../planner/PlannerAgent")
 				const { PlanExecutor } = await import("../planner/PlanExecutor")
@@ -2388,47 +2402,68 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 				// Cancel all spawned child tasks to prevent them from continuing to make API calls
 				await this.cancelAllChildTasks()
 
-				// Clean up worktrees and parent transaction
-				const provider = this.providerRef.deref()
-				const parentTxId = provider?.context?.globalState.get<string>("roo.current_tx_id")
-				if (parentTxId && this.plan) {
-					try {
-						const { PlanExecutor } = await import("../planner/PlanExecutor")
-						const executor = new PlanExecutor(this)
-
-						// Rollback all sub-transaction worktrees to prevent orphaned worktrees
-						await executor.rollbackAllSubTransactions(this.plan, parentTxId)
-
-						// Clean up parent transaction
-						await (executor as any).cleanupParentTransaction(parentTxId)
-					} catch (cleanupError) {
-						const cleanupErrorMessage =
-							cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
-						provider?.log(`[Task#startTask] Error during planner cleanup: ${cleanupErrorMessage}`)
-						// Continue - don't block fallthrough to normal execution
+				// The Control-Plane went away mid-plan: roll back what we can and fall
+				// through to normal single-agent execution (the planner never writes to the
+				// conversation history, so the normal loop starts clean).
+				if (isControlPlaneUnavailableError(error)) {
+					const cpProvider = this.providerRef.deref()
+					const cpParentTxId = cpProvider?.context?.globalState.get<string>("roo.current_tx_id")
+					if (cpParentTxId && this.plan) {
+						try {
+							const { PlanExecutor } = await import("../planner/PlanExecutor")
+							await new PlanExecutor(this).rollbackAllSubTransactions(this.plan, cpParentTxId)
+						} catch {
+							// CP is unreachable; nothing more we can do
+						}
 					}
-				} else if (parentTxId) {
-					// No plan but we have a parent transaction - just clean it up
-					try {
-						const { PlanExecutor } = await import("../planner/PlanExecutor")
-						const executor = new PlanExecutor(this)
-						await (executor as any).cleanupParentTransaction(parentTxId)
-					} catch (cleanupError) {
-						// Ignore cleanup errors
+					this.plan = undefined
+					await this.say(
+						"text",
+						`⚠ Control-Plane unavailable during planning (${errorMessage}); executing as single agent.`,
+					)
+				} else {
+					// Clean up worktrees and parent transaction
+					const provider = this.providerRef.deref()
+					const parentTxId = provider?.context?.globalState.get<string>("roo.current_tx_id")
+					if (parentTxId && this.plan) {
+						try {
+							const { PlanExecutor } = await import("../planner/PlanExecutor")
+							const executor = new PlanExecutor(this)
+
+							// Rollback all sub-transaction worktrees to prevent orphaned worktrees
+							await executor.rollbackAllSubTransactions(this.plan, parentTxId)
+
+							// Clean up parent transaction
+							await (executor as any).cleanupParentTransaction(parentTxId)
+						} catch (cleanupError) {
+							const cleanupErrorMessage =
+								cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+							provider?.log(`[Task#startTask] Error during planner cleanup: ${cleanupErrorMessage}`)
+							// Continue - don't block fallthrough to normal execution
+						}
+					} else if (parentTxId) {
+						// No plan but we have a parent transaction - just clean it up
+						try {
+							const { PlanExecutor } = await import("../planner/PlanExecutor")
+							const executor = new PlanExecutor(this)
+							await (executor as any).cleanupParentTransaction(parentTxId)
+						} catch (cleanupError) {
+							// Ignore cleanup errors
+						}
 					}
+					// Do NOT fall through to normal execution — the LLM already
+					// generated a plan JSON which is in the conversation. If normal
+					// mode runs, the LLM sees the plan and immediately calls
+					// attempt_completion, producing a "Task Completed" with zero
+					// actual work.  Instead, report the failure and stop.
+					await this.say(
+						"text",
+						`⚠ Planner mode failed: ${errorMessage}\n\nCheck the Roo Code output panel for details. ` +
+							`Common causes:\n- Control-Plane not running (check roo.cpPort)\n- CP port stale (reload window)\n- Sub-transaction creation failed`,
+					)
+					this.finishedSuccessfully = true // stop the main loop
+					return
 				}
-				// Do NOT fall through to normal execution — the LLM already
-				// generated a plan JSON which is in the conversation. If normal
-				// mode runs, the LLM sees the plan and immediately calls
-				// attempt_completion, producing a "Task Completed" with zero
-				// actual work.  Instead, report the failure and stop.
-				await this.say(
-					"text",
-					`⚠ Planner mode failed: ${errorMessage}\n\nCheck the Roo Code output panel for details. ` +
-						`Common causes:\n- Control-Plane not running (check roo.cpPort)\n- CP port stale (reload window)\n- Sub-transaction creation failed`,
-				)
-				this.finishedSuccessfully = true // stop the main loop
-				return
 			}
 		}
 

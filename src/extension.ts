@@ -15,7 +15,8 @@ if (chatApiEarly && typeof chatApiEarly.registerChatParticipant === "function") 
 import * as dotenvx from "@dotenvx/dotenvx"
 import * as path from "path"
 import * as fs from "fs/promises"
-import { spawn } from "child_process"
+import { spawn, spawnSync } from "child_process"
+import { existsSync } from "fs"
 import * as readline from "readline"
 import * as net from "net"
 import { setGlobalChannel } from "./shared/globalChannel"
@@ -63,6 +64,12 @@ import { migrateSettings } from "./utils/migrateSettings"
 import { autoImportSettings } from "./utils/autoImportSettings"
 import { API } from "./extension/api"
 import { safeWriteJson } from "./utils/safeWriteJson"
+import {
+	isCpHealthy,
+	isTransactionalModeEnabled,
+	setControlPlaneReady,
+	getControlPlaneReady,
+} from "./core/control-plane/client"
 
 import {
 	handleUri,
@@ -87,20 +94,39 @@ let outputChannel: vscode.OutputChannel
 let cpProcess: import("child_process").ChildProcess | undefined
 
 /**
- * Verify that a Control-Plane port is actually responding
+ * Verify that a Control-Plane port is actually responding with a compatible API (>= 2).
  */
 async function verifyControlPlanePort(port: number, timeoutMs = 2000): Promise<boolean> {
-	const controller = new AbortController()
-	const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
-	try {
-		if (typeof (globalThis as any).fetch !== "function") return false
-		const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal })
-		return res.ok
-	} catch {
-		return false
-	} finally {
-		clearTimeout(timeoutId)
+	return isCpHealthy(port, timeoutMs)
+}
+
+/**
+ * Resolves once the auto-started Control-Plane is ready (port) or has failed (undefined).
+ * Tasks await this via `waitForControlPlane()` before deciding whether to run transactionally.
+ */
+export function controlPlaneReady(): Promise<number | undefined> | undefined {
+	return getControlPlaneReady()
+}
+
+/** Last reason the Control-Plane could not be started (for the single warning). */
+let cpStartFailureReason: string | undefined
+
+/**
+ * Locate the repo root that contains apps/control-plane. Prefers the explicit
+ * `roo.controlPlane.rootPath` setting, then falls back to the extension's own
+ * checkout (dev host: <repo>/src -> <repo>).
+ */
+function resolveControlPlaneRoot(
+	configured: string | undefined,
+	extensionPath: string | undefined,
+): string | undefined {
+	const candidates = [configured, extensionPath && path.resolve(extensionPath, ".."), extensionPath].filter(
+		(c): c is string => !!c,
+	)
+	for (const c of candidates) {
+		if (existsSync(path.join(c, "apps", "control-plane", "package.json"))) return c
 	}
+	return undefined
 }
 
 async function isPortInUse(port: number, host = "127.0.0.1", timeoutMs = 500): Promise<boolean> {
@@ -140,14 +166,16 @@ async function startControlPlane(workspaceRoot: string, disableDb: boolean = fal
 		return false
 	}
 
-	/** Simple helper – true if command runs successfully */
+	/** True if `<exe> --version` runs and exits 0. */
 	const commandExists = (exe: string): boolean => {
 		try {
-			const r = spawn(exe, ["--version"], { shell: true, stdio: "ignore" })
-			r.on("error", () => {})
-			// best-effort – immediately kill
-			r.kill()
-			return true
+			const r = spawnSync(exe, ["--version"], {
+				shell: true,
+				stdio: "ignore",
+				windowsHide: true,
+				timeout: 15_000,
+			})
+			return r.status === 0
 		} catch {
 			return false
 		}
@@ -155,11 +183,13 @@ async function startControlPlane(workspaceRoot: string, disableDb: boolean = fal
 
 	// Pre-flight: pnpm and git must be available
 	if (!commandExists("pnpm")) {
-		vscode.window.showErrorMessage("'pnpm' not found in PATH – install PNPM and reload VS Code.")
+		cpStartFailureReason = "'pnpm' not found in PATH"
+		log(cpStartFailureReason)
 		return undefined
 	}
 	if (!commandExists("git")) {
-		vscode.window.showErrorMessage("'git' not found in PATH – install Git and reload VS Code.")
+		cpStartFailureReason = "'git' not found in PATH"
+		log(cpStartFailureReason)
 		return undefined
 	}
 
@@ -189,10 +219,8 @@ async function startControlPlane(workspaceRoot: string, disableDb: boolean = fal
 		if (!isHealthy) {
 			const inUse = await isPortInUse(overridePort)
 			if (inUse) {
-				vscode.window.showErrorMessage(
-					`Control-Plane port override ${overridePort} is already in use by another process. Free the port or change roo.cpPortOverride.`,
-				)
-				log(`override port ${overridePort} is in use by another process`)
+				cpStartFailureReason = `port override ${overridePort} is in use by another process (not a compatible Control-Plane)`
+				log(cpStartFailureReason)
 				return undefined
 			}
 		}
@@ -200,11 +228,14 @@ async function startControlPlane(workspaceRoot: string, disableDb: boolean = fal
 		return overridePort
 	}
 
-	const cpRoot = cfg.get<string>("roo.controlPlane.rootPath", "")
+	const cpRoot = resolveControlPlaneRoot(
+		cfg.get<string>("roo.controlPlane.rootPath", ""),
+		extensionContext?.extensionPath,
+	)
 	if (!cpRoot) {
-		vscode.window.showErrorMessage(
-			"Set 'roo.controlPlane.rootPath' to your Roo-Code repo (folder containing apps/control-plane)",
-		)
+		cpStartFailureReason =
+			"could not find apps/control-plane; set 'roo.controlPlane.rootPath' to the Roo-Code repo root"
+		log(cpStartFailureReason)
 		return undefined
 	}
 
@@ -455,42 +486,49 @@ export async function activate(context: vscode.ExtensionContext) {
 		await registerCommandMap({ context, outputChannel, provider }, getUiCommands)
 	}
 
-	// Experimental: transactional control-plane auto-start
-	;(async () => {
-		const cfg = vscode.workspace.getConfiguration()
-		const enabled =
-			cfg.get<boolean>("roo.experimental.transactionalMode") ||
-			cfg.get<boolean>("roo-cline.experimental.transactionalMode")
-		if (!enabled) return
-		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
-		if (!workspaceRoot) return
-		// Database is now enabled by default (uses SQLite if CP_DATABASE_URL not set)
-		// Only disable if explicitly requested
-		const disableDb = false
-		const portStored = await context.globalState.get<number>("roo.cpPort")
-		if (!portStored) {
+	// One-time migration: the global `roo.current_tx_id` is no longer used (each task owns
+	// its transaction). A stale value from an older build must not leak into new tasks.
+	if (context.globalState.get<string>("roo.current_tx_id")) {
+		await context.globalState.update("roo.current_tx_id", undefined)
+	}
+
+	// Transactional control-plane auto-start (on by default). Tasks await this promise
+	// via waitForControlPlane(); if it resolves undefined they run single-agent.
+	setControlPlaneReady(
+		(async (): Promise<number | undefined> => {
+			if (!isTransactionalModeEnabled()) return undefined
+			const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+			if (!workspaceRoot) return undefined
+			// Database is enabled by default (uses SQLite if CP_DATABASE_URL not set)
+			const disableDb = false
+			const portStored = context.globalState.get<number>("roo.cpPort")
+			if (portStored && (await verifyControlPlanePort(portStored))) {
+				outputChannel.appendLine(`[ControlPlane] using existing port ${portStored}`)
+				return portStored
+			}
+			if (portStored) {
+				outputChannel.appendLine(`[ControlPlane] stored port ${portStored} not healthy; clearing`)
+				await context.globalState.update("roo.cpPort", undefined)
+			}
 			const port = await startControlPlane(workspaceRoot, disableDb)
 			if (port) {
 				outputChannel.appendLine(`[ControlPlane] started on port ${port}`)
-			} else {
-				outputChannel.appendLine(`[ControlPlane] failed to start`)
+				return port
 			}
-		} else {
-			const isHealthy = await verifyControlPlanePort(portStored)
-			if (!isHealthy) {
-				outputChannel.appendLine(`[ControlPlane] stored port ${portStored} not healthy; clearing`)
-				await context.globalState.update("roo.cpPort", undefined)
-				const port = await startControlPlane(workspaceRoot, disableDb)
-				if (port) {
-					outputChannel.appendLine(`[ControlPlane] started on port ${port}`)
-				} else {
-					outputChannel.appendLine(`[ControlPlane] failed to start`)
-				}
-			} else {
-				outputChannel.appendLine(`[ControlPlane] using existing port ${portStored}`)
-			}
-		}
-	})().catch((e) => outputChannel.appendLine(`[ControlPlane] auto-start error: ${e}`))
+			outputChannel.appendLine(`[ControlPlane] failed to start`)
+			vscode.window.showWarningMessage(
+				`Roo Control-Plane unavailable${cpStartFailureReason ? ` (${cpStartFailureReason})` : ""}; ` +
+					"tasks will run as a single agent without transactions.",
+			)
+			return undefined
+		})().catch((e) => {
+			outputChannel.appendLine(`[ControlPlane] auto-start error: ${e}`)
+			vscode.window.showWarningMessage(
+				"Roo Control-Plane failed to start; tasks will run as a single agent without transactions.",
+			)
+			return undefined
+		}),
+	)
 
 	// Internal command for getting current tx id (placeholder)
 	context.subscriptions.push(

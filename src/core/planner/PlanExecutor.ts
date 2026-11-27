@@ -5,6 +5,9 @@ import delay from "delay"
 import * as vscode from "vscode"
 import * as path from "path"
 
+import { ControlPlaneUnavailableError, cpErrorMessage, waitForControlPlane } from "../control-plane/client"
+import * as cpTx from "../control-plane/tx"
+
 export class PlanExecutor {
 	private parentBaseCommit: string | undefined
 	private parentTxId: string | undefined
@@ -35,16 +38,9 @@ export class PlanExecutor {
 		// 1. Create Control-Plane transaction for parent
 		// CRITICAL: Control-Plane is REQUIRED for planner mode
 		// Without it, we cannot provide safety checks, rollback, or audit trail
+		// Throws ControlPlaneUnavailableError if the CP is unreachable (Task falls back to
+		// single-agent execution); other errors stop the task.
 		const parentTxId = await this.beginParentTransaction()
-		if (!parentTxId) {
-			// P0 FIX: Fail fast - do NOT fall back to unsafe sequential execution
-			const errorMessage =
-				"Planner execution requires Control-Plane. " +
-				"Falling back to unsafe sequential mode is disabled. " +
-				"Please ensure Control-Plane is running (check 'roo.cpPort' in VS Code settings)."
-			provider.log(`[PlanExecutor] CRITICAL: ${errorMessage}`)
-			throw new Error(errorMessage)
-		}
 
 		// P1 FIX: Persist the plan for auditability
 		// Plans must survive restarts and be queryable
@@ -440,94 +436,33 @@ export class PlanExecutor {
 	}
 
 	/**
-	 * Sequential execution is DISABLED for planner mode.
-	 *
-	 * Design constraints (non-negotiable):
-	 * - Do not silently degrade to unsafe execution
-	 * - Fail fast is always preferred over best-effort
-	 * - Safety + rollback + auditability are invariants
-	 *
-	 * This method exists only for documentation purposes and always throws.
-	 * @deprecated Sequential fallback is disabled - use Control-Plane
-	 */
-	private async executePlanSequential(_plan: Plan): Promise<ExecutionResult> {
-		// P0 FIX: This method should NEVER be called
-		// It violates core safety guarantees:
-		// 1. No safety checks are executed
-		// 2. No rollback mechanism exists
-		// 3. No audit trail is produced
-		throw new Error(
-			"CRITICAL: Sequential fallback for planner mode is disabled. " +
-				"Planner execution requires Control-Plane for: " +
-				"(1) safety checks, (2) rollback, (3) audit trail. " +
-				"This is a design invariant - do not remove this check.",
-		)
-	}
-
-	/**
 	 * Begin a parent transaction in Control-Plane
 	 */
-	private async beginParentTransaction(): Promise<string | undefined> {
+	private async beginParentTransaction(): Promise<string> {
 		const provider = this.parentTask.providerRef.deref()
 
-		// Debug: check context availability
-		console.log(`[PlanExecutor#beginParentTransaction] Provider available: ${!!provider}`)
-		console.log(`[PlanExecutor#beginParentTransaction] Context available: ${!!provider?.context}`)
-		console.log(`[PlanExecutor#beginParentTransaction] GlobalState available: ${!!provider?.context?.globalState}`)
-
-		// Wait for cpPort to be set (handles race with extension activation)
-		// This gives the extension IIFE up to 5 seconds to complete
-		let cpPort: number | undefined
-		for (let i = 0; i < 10; i++) {
-			cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
-			console.log(`[PlanExecutor#beginParentTransaction] Attempt ${i + 1}: cpPort = ${cpPort}`)
-			if (cpPort) break
-			await new Promise((r) => setTimeout(r, 500))
-			provider?.log(`[PlanExecutor] Waiting for Control-Plane port (attempt ${i + 1}/10)...`)
-		}
-
+		const cpPort = await waitForControlPlane(provider?.context)
 		if (!cpPort) {
-			provider?.log(`[PlanExecutor] Control-Plane port not found after waiting`)
-			return undefined
+			throw new ControlPlaneUnavailableError("Planner execution requires the Control-Plane, which is unavailable")
 		}
 
-		try {
-			// Use HEAD as base instead of a specific branch name
-			// This works regardless of whether the repo uses 'main' or 'master'
-			const res = await fetch(`http://127.0.0.1:${cpPort}/tx/begin`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"x-actor-id": "human",
-				},
-				body: JSON.stringify({
-					isolation: "hybrid",
-					base: "HEAD",
-				}),
-			})
-
-			if (!res.ok) {
-				throw new Error(`Failed to begin transaction: ${res.status}`)
-			}
-
-			const data = await res.json()
-			const txId = data.tx_id
-			const baseCommit = data.base_commit
-
-			// Store transaction ID in global state
-			await provider?.context?.globalState.update("roo.current_tx_id", txId)
-			this.parentTask.worktreePath = data.worktree_path
-
-			// Store base commit and tx ID for cleanup/merge on failure or completion
-			this.parentBaseCommit = baseCommit
-			this.parentTxId = txId
-
-			return txId
-		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : String(error)
-			provider?.log(`[PlanExecutor] Failed to begin parent transaction: ${errorMessage}`)
-			return undefined
+		// Use HEAD as base instead of a specific branch name
+		// This works regardless of whether the repo uses 'main' or 'master'
+		const res = await cpTx.begin(cpPort, { isolation: "hybrid", base: "HEAD" })
+		if (!res.ok) {
+			throw new Error(`Failed to begin transaction: ${cpErrorMessage(res)}`)
 		}
+
+		const txId = res.data.tx_id
+		// Store transaction ID in global state
+		await provider?.context?.globalState.update("roo.current_tx_id", txId)
+		this.parentTask.worktreePath = res.data.worktree_path
+
+		// Store base commit and tx ID for cleanup/merge on failure or completion
+		this.parentBaseCommit = res.data.base_commit
+		this.parentTxId = txId
+
+		return txId
 	}
 
 	/**
