@@ -7,6 +7,10 @@ import { startServer } from "../server.js"
 async function initRepo(tmp: string) {
 	await fs.mkdir(tmp, { recursive: true })
 	await (await import("node:child_process")).execFileSync("git", ["init"], { cwd: tmp })
+	await (await import("node:child_process")).execFileSync("git", ["config", "user.name", "cp-test"], { cwd: tmp })
+	await (
+		await import("node:child_process")
+	).execFileSync("git", ["config", "user.email", "cp-test@example.invalid"], { cwd: tmp })
 	await fs.writeFile(path.join(tmp, "README.md"), "hello\n")
 	await (await import("node:child_process")).execFileSync("git", ["add", "."], { cwd: tmp })
 	await (await import("node:child_process")).execFileSync("git", ["commit", "-m", "init"], { cwd: tmp })
