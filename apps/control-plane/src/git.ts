@@ -110,8 +110,9 @@ export class Git {
 			throw new CPError("DENIED", "Absolute path not allowed", { path: rel })
 		}
 
-		// Check for .. segments
-		if (rel.includes("..")) {
+		// Check for .. segments (a whole path segment, not any ".." substring:
+		// "a..b.ts" is a legal file name)
+		if (rel.split(/[\\/]/).includes("..")) {
 			throw new CPError("DENIED", "Path traversal (..) not allowed", { path: rel })
 		}
 
@@ -188,9 +189,66 @@ export class Git {
 	 * corrupt subsequent test runs.
 	 */
 	public async resetHard(tx_id: string, targetRef: string): Promise<void> {
-		const wt = this.worktreePath(tx_id)
-		await this.git(["clean", "-fd"], wt)
-		await this.git(["reset", "--hard", targetRef], wt)
+		await this.snapshotAndReset(this.worktreePath(tx_id), targetRef, `reset tx:${tx_id}`)
+	}
+
+	/**
+	 * Roll a worktree back to `targetRef` WITHOUT losing the discarded work:
+	 * everything (tracked changes + untracked, non-ignored files) is first
+	 * committed to a dangling commit referenced by refs/cp/backup/<label>/<ts>,
+	 * then the worktree is reset and cleaned. Ignored files (node_modules, .env,
+	 * build output) are intentionally left in place.
+	 *
+	 * Returns the backup ref (or undefined if there was nothing to back up) and
+	 * the size of what was rolled back.
+	 */
+	public async snapshotAndReset(
+		worktreePath: string,
+		targetRef: string,
+		label: string,
+	): Promise<{ backup_ref?: string; bytes_rolled_back: number; files_affected: number }> {
+		const target = await this.verifyCommit(targetRef, worktreePath)
+		let backup_ref: string | undefined
+		let bytes = 0
+		let files = 0
+		try {
+			// Stage everything into a temporary index so the real index is untouched
+			const tmpIndex = path.join(
+				os.tmpdir(),
+				`cp-index-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+			)
+			const env = { ...process.env, GIT_INDEX_FILE: tmpIndex }
+			const binary = await resolveGitBinary()
+			const run = (args: string[]) =>
+				pexec(binary, args, { cwd: worktreePath, windowsHide: true, env, maxBuffer: 64 * 1024 * 1024 })
+			try {
+				await run(["read-tree", "HEAD"])
+				await run(["add", "-A"])
+				const { stdout: tree } = await run(["write-tree"])
+				const { stdout: diffStat } = await run(["diff", "--cached", "--numstat", target])
+				const { stdout: diffBin } = await run(["diff", "--cached", "--binary", target])
+				files = diffStat.split("\n").filter(Boolean).length
+				bytes = Buffer.byteLength(diffBin, "utf8")
+				const head = await this.revParse("HEAD", worktreePath)
+				const headTree = (await this.git(["rev-parse", `${head}^{tree}`], worktreePath)).stdout.trim()
+				if (tree.trim() !== headTree || head !== target) {
+					const { stdout: commit } = await this.git(
+						["commit-tree", tree.trim(), "-p", head, "-m", `cp backup: ${label}`],
+						worktreePath,
+					)
+					const safeLabel = label.replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 80)
+					backup_ref = `refs/cp/backup/${safeLabel}/${Date.now()}`
+					await this.git(["update-ref", backup_ref, commit.trim()], worktreePath)
+				}
+			} finally {
+				await fs.rm(tmpIndex, { force: true }).catch(() => {})
+			}
+		} catch {
+			// Backup is best effort; the reset below must still happen
+		}
+		await this.git(["reset", "--hard", target], worktreePath)
+		await this.git(["clean", "-fd"], worktreePath)
+		return { backup_ref, bytes_rolled_back: bytes, files_affected: files }
 	}
 
 	public async beginTx(tx_id: string, base: string) {
@@ -364,6 +422,9 @@ export class Git {
 
 	public async readFile(tx_id: string, filePath: string) {
 		const wt = this.worktreePath(tx_id)
+		// SECURITY: same containment rules as writes
+		this.assertSafeRelPath(filePath, wt)
+		await this.checkSymlinkPath(filePath, wt)
 		const fs = await import("node:fs/promises")
 		const full = path.join(wt, filePath)
 		const buf = await fs.readFile(full)
@@ -384,40 +445,273 @@ export class Git {
 		return { sha, tag }
 	}
 
-	public async commitToMain(tx_id: string, baseSha: string, strategy: "fail-fast" | "rebase" | "hybrid") {
-		const mainHead = await this.revParse("main")
-		if (strategy === "fail-fast" && baseSha !== mainHead) {
-			return { conflict: { code: "CONFLICT_BASE_ADVANCED", details: { main_head: mainHead } } }
-		}
-		if (strategy !== "fail-fast" && baseSha !== mainHead) {
-			// attempt rebase
-			await this.git(["-C", this.worktreePath(tx_id), "fetch", "--all"]) // safe default
+	/**
+	 * Size of everything in `wt` that differs from `base`: tracked changes
+	 * (committed or not) plus untracked, non-ignored files.
+	 */
+	public async diffSize(wt: string, base: string): Promise<{ bytes: number; files: number }> {
+		const binary = await resolveGitBinary()
+		const { stdout: diff } = await pexec(binary, ["diff", "--binary", base], {
+			cwd: wt,
+			windowsHide: true,
+			maxBuffer: 256 * 1024 * 1024,
+		})
+		const { stdout: names } = await this.git(["diff", "--name-only", base], wt)
+		const { stdout: untracked } = await this.git(["ls-files", "--others", "--exclude-standard"], wt)
+		let bytes = Buffer.byteLength(diff, "utf8")
+		const untrackedFiles = untracked.split("\n").filter(Boolean)
+		for (const f of untrackedFiles) {
 			try {
-				await this.git(["-C", this.worktreePath(tx_id), "rebase", "main"])
-			} catch (e) {
-				// Collect conflicted files
-				const { stdout } = await this.git([
-					"-C",
-					this.worktreePath(tx_id),
-					"diff",
-					"--name-only",
-					"--diff-filter=U",
-				])
-				const conflicts = stdout
-					.split("\n")
-					.map((s) => s.trim())
-					.filter(Boolean)
-				return { conflict: { code: "REBASE_CONFLICT", details: { conflicts } } }
+				bytes += (await fs.stat(path.join(wt, f))).size
+			} catch {
+				/* vanished */
 			}
 		}
-		await this.git(["checkout", "main"]) // ensure fast-forward
-		await this.git(["merge", "--ff-only", `tx/${tx_id}`])
-		const newSha = await this.revParse("HEAD")
-		const tag = `cp/${new Date().toISOString().replace(/[-:T]/g, "").slice(0, 15)}-${newSha.slice(0, 7)}`
-		await this.git(["tag", tag, newSha])
-		await this.git(["worktree", "remove", this.worktreePath(tx_id), "--force"])
-		await this.git(["branch", "-D", `tx/${tx_id}`])
-		return { merged_sha: newSha }
+		return { bytes, files: names.split("\n").filter(Boolean).length + untrackedFiles.length }
+	}
+
+	/** Current branch name of `cwd` (repo root by default), or null when detached. */
+	public async currentBranch(cwd?: string): Promise<string | null> {
+		try {
+			const { stdout } = await this.git(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd)
+			return stdout.trim() || null
+		} catch {
+			return null
+		}
+	}
+
+	public async branchExists(name: string): Promise<boolean> {
+		try {
+			await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${name}`])
+			return true
+		} catch {
+			return false
+		}
+	}
+
+	public async mergeBase(a: string, b: string, cwd?: string): Promise<string> {
+		const { stdout } = await this.git(["merge-base", a, b], cwd)
+		return stdout.trim()
+	}
+
+	/** true iff `ancestor` is an ancestor of (or equal to) `descendant`. */
+	public async isAncestor(ancestor: string, descendant: string, cwd?: string): Promise<boolean> {
+		try {
+			await this.git(["merge-base", "--is-ancestor", ancestor, descendant], cwd)
+			return true
+		} catch {
+			return false
+		}
+	}
+
+	/** Verify that `ref` names a commit; returns its full sha. */
+	public async verifyCommit(ref: string, cwd?: string): Promise<string> {
+		try {
+			const { stdout } = await this.git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], cwd)
+			return stdout.trim()
+		} catch {
+			throw new CPError("VALIDATION_ERROR", `Not a commit: ${ref}`, { ref })
+		}
+	}
+
+	/**
+	 * Make sure the control-plane's own directory (.cp/: worktrees, SQLite db) is
+	 * never picked up by `git status` / `git add -A` in the user's repository.
+	 */
+	public async ensureCpExcluded(): Promise<void> {
+		try {
+			const { stdout } = await this.git(["rev-parse", "--git-common-dir"])
+			const commonDir = path.resolve(this.cfg.repoRoot, stdout.trim())
+			const excludePath = path.join(commonDir, "info", "exclude")
+			let current = ""
+			try {
+				current = await fs.readFile(excludePath, "utf8")
+			} catch {
+				/* missing */
+			}
+			if (!current.split(/\r?\n/).some((l) => l.trim() === "/.cp/" || l.trim() === ".cp/")) {
+				await fs.mkdir(path.dirname(excludePath), { recursive: true })
+				const sep = current.length === 0 || current.endsWith("\n") ? "" : "\n"
+				await fs.writeFile(excludePath, `${current}${sep}/.cp/\n`, "utf8")
+			}
+		} catch {
+			/* best effort */
+		}
+	}
+
+	/** Paths with uncommitted changes in the user's working tree (excluding .cp/). */
+	public async dirtyPaths(): Promise<string[]> {
+		const { stdout } = await this.git(["status", "--porcelain=v1", "-uall"])
+		return stdout
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => {
+				const p = l.slice(3)
+				const arrow = p.indexOf(" -> ")
+				return (arrow >= 0 ? p.slice(arrow + 4) : p).replace(/^"|"$/g, "").replace(/\\/g, "/")
+			})
+			.filter((p) => !p.startsWith(".cp/"))
+	}
+
+	/**
+	 * Remove every sub-transaction worktree/branch belonging to `parentTxId`.
+	 * Returns the relative sub-tx ids that were cleaned up.
+	 */
+	public async cleanupAllSubTxs(parentTxId: string): Promise<string[]> {
+		const dir = path.join(this.cfg.repoRoot, ".cp", "worktrees")
+		const prefix = `tx_${parentTxId}_sub_`
+		const removed: string[] = []
+		let entries: string[] = []
+		try {
+			entries = await fs.readdir(dir)
+		} catch {
+			/* none */
+		}
+		for (const name of entries) {
+			if (name.startsWith(prefix)) {
+				const rel = name.slice(prefix.length)
+				await this.cleanupSubTx(parentTxId, rel)
+				removed.push(rel)
+			}
+		}
+		// Branches whose worktree is already gone
+		try {
+			const { stdout } = await this.git(["branch", "--list", `tx-${parentTxId}-sub-*`])
+			for (const b of stdout
+				.split("\n")
+				.map((s) => s.trim().replace(/^[*+]\s*/, ""))
+				.filter(Boolean)) {
+				try {
+					await this.git(["branch", "-D", b])
+				} catch {
+					/* ignore */
+				}
+			}
+		} catch {
+			/* ignore */
+		}
+		return removed
+	}
+
+	/** Remove a parent transaction's worktree and branch (idempotent). */
+	public async removeTx(tx_id: string): Promise<void> {
+		const wt = this.worktreePath(tx_id)
+		try {
+			await this.git(["worktree", "remove", wt, "--force"])
+		} catch {
+			await fs.rm(wt, { recursive: true, force: true }).catch(() => {})
+		}
+		try {
+			await this.git(["worktree", "prune"])
+		} catch {
+			/* ignore */
+		}
+		try {
+			await this.git(["branch", "-D", `tx/${tx_id}`])
+		} catch {
+			/* already gone */
+		}
+	}
+
+	/**
+	 * Publish a transaction onto `targetBranch`.
+	 *
+	 * - fail-fast: refuse if the target branch moved since the tx began.
+	 * - rebase / hybrid: rebase the tx onto the target; on conflict, abort the
+	 *   rebase (leaving the worktree clean) and report the conflicted files.
+	 * - Never checks out another branch in the user's repository. If the target
+	 *   branch is checked out there, fast-forward it in place (refusing when the
+	 *   user has uncommitted changes to files the tx touches); otherwise move the
+	 *   ref with a compare-and-swap update-ref.
+	 */
+	public async commitToMain(
+		tx_id: string,
+		baseSha: string,
+		strategy: "fail-fast" | "rebase" | "hybrid",
+		targetBranch = "main",
+	): Promise<
+		| { merged_sha: string; target_branch: string }
+		| {
+				conflict: {
+					code: "CONFLICT_BASE_ADVANCED" | "REBASE_CONFLICT" | "WORKSPACE_DIRTY"
+					details: Record<string, unknown>
+				}
+		  }
+	> {
+		const wt = this.worktreePath(tx_id)
+		const targetHead = await this.revParse(`refs/heads/${targetBranch}`)
+
+		if (baseSha && baseSha !== targetHead && !(await this.isAncestor(targetHead, "HEAD", wt))) {
+			if (strategy === "fail-fast") {
+				return {
+					conflict: {
+						code: "CONFLICT_BASE_ADVANCED",
+						details: { target_branch: targetBranch, target_head: targetHead, base_commit: baseSha },
+					},
+				}
+			}
+			try {
+				await this.git(["rebase", targetHead], wt)
+			} catch {
+				let conflicts: string[] = []
+				try {
+					const { stdout } = await this.git(["diff", "--name-only", "--diff-filter=U"], wt)
+					conflicts = stdout
+						.split("\n")
+						.map((s) => s.trim())
+						.filter(Boolean)
+				} catch {
+					/* ignore */
+				}
+				try {
+					await this.git(["rebase", "--abort"], wt)
+				} catch {
+					/* no rebase in progress */
+				}
+				return { conflict: { code: "REBASE_CONFLICT", details: { conflicts, target_branch: targetBranch } } }
+			}
+		}
+
+		const newHead = await this.revParse("HEAD", wt)
+		const checkedOut = await this.currentBranch()
+
+		if (checkedOut === targetBranch) {
+			// Refuse to clobber the user's uncommitted edits to files this tx changes.
+			const { stdout } = await this.git(["diff", "--name-only", targetHead, newHead])
+			const changed = new Set(
+				stdout
+					.split("\n")
+					.map((s) => s.trim())
+					.filter(Boolean),
+			)
+			const dirty = (await this.dirtyPaths()).filter((p) => changed.has(p))
+			if (dirty.length > 0) {
+				return { conflict: { code: "WORKSPACE_DIRTY", details: { files: dirty, target_branch: targetBranch } } }
+			}
+			try {
+				await this.git(["merge", "--ff-only", newHead])
+			} catch (e) {
+				return {
+					conflict: {
+						code: "WORKSPACE_DIRTY",
+						details: { files: [], target_branch: targetBranch, error: String(e) },
+					},
+				}
+			}
+		} else {
+			// Compare-and-swap: fails if the branch moved concurrently.
+			await this.git(["update-ref", `refs/heads/${targetBranch}`, newHead, targetHead])
+		}
+
+		const tag = `cp/${new Date().toISOString().replace(/[-:T]/g, "").slice(0, 15)}-${newHead.slice(0, 7)}`
+		try {
+			await this.git(["tag", tag, newHead])
+		} catch {
+			/* tag collision is harmless */
+		}
+		await this.cleanupAllSubTxs(tx_id)
+		await this.removeTx(tx_id)
+		return { merged_sha: newHead, target_branch: targetBranch }
 	}
 
 	public async showFileAt(sha: string, relPath: string) {
@@ -831,7 +1125,8 @@ export class Git {
 
 			for (const branch of subTxBranches) {
 				// Parse transaction ID from branch name: tx-<parentTxId>-sub-<subTxId>
-				const match = branch.match(/^tx-([^-]+)-sub-/)
+				// tx ids are UUIDs (contain '-'), so match lazily up to the first "-sub-"
+				const match = branch.match(/^tx-(.+?)-sub-/)
 				if (match && match[1]) {
 					const txId = match[1]
 					if (!activeTxIds.has(txId)) {

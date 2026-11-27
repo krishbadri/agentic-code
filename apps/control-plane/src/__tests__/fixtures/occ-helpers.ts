@@ -9,7 +9,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync 
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { execFileSync, execFile } from "node:child_process"
-import { startServer } from "../../server.js"
+import { startServer, type ServerConfig } from "../../server.js"
 
 export interface OccFixture {
 	tmpDir: string
@@ -52,15 +52,23 @@ export function createAndCommitFile(dir: string, relativePath: string, content: 
 /**
  * Create the standard OCC test fixture
  */
-export async function createOccFixture(): Promise<OccFixture> {
+export interface OccFixtureOptions {
+	/** Use a real SQLite database (in <tmpDir>/.cp) instead of DB-less mode. */
+	db?: boolean
+	/** Extra server config (test command, allowlists, ...). */
+	config?: Partial<Omit<ServerConfig, "repoRoot" | "port">>
+}
+
+export async function createOccFixture(opts: OccFixtureOptions = {}): Promise<OccFixture> {
 	const tmpDir = mkdtempSync(join(tmpdir(), "occ-test-"))
 	await initGitRepo(tmpDir)
 
 	const app = await startServer({
 		repoRoot: tmpDir,
 		port: 0, // Let OS choose a free port
-		disableDb: true,
+		disableDb: !opts.db,
 		disableMcp: true,
+		...(opts.config ?? {}),
 	})
 
 	const address = app.server.address()

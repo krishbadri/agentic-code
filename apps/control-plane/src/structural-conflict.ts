@@ -14,9 +14,26 @@ import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { readFile } from "node:fs/promises"
 import { join, dirname, resolve } from "node:path"
-import * as ts from "typescript"
+import ts from "typescript"
 
 const pexec = promisify(execFile)
+
+/**
+ * Immutable description of a sub-transaction's changes, computed from shas so it
+ * stays valid after the sub-tx worktree is removed (e.g. once merged).
+ */
+export interface SubTxSnapshot {
+	/** Relative sub-tx id */
+	rel: string
+	/** merge-base of the sub-tx head and the parent head at snapshot time */
+	base: string
+	/** sub-tx head commit */
+	head: string
+	files: string[]
+	/** files newly added by the sub-tx */
+	added: string[]
+	linesChanged: number
+}
 
 export interface TouchedFiles {
 	subTxId: string

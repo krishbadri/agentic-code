@@ -56,7 +56,20 @@ async function main() {
 		const disableDb = !!args.disableDb
 		const disableMcp = !!args.disableMcp
 		const db = disableDb ? undefined : (args.db as string) || process.env.CP_DATABASE_URL
-		await startServer({ repoRoot: repo, port, databaseUrl: db, disableDb, disableMcp })
+		const testCommand = (args["test-command"] as string) || process.env.CP_TEST_COMMAND || undefined
+		const testTimeoutRaw = (args["test-timeout-ms"] as string) || process.env.CP_TEST_TIMEOUT_MS
+		const testTimeoutMs = testTimeoutRaw ? Number(testTimeoutRaw) : undefined
+		const unknownActionPolicy = process.env.CP_UNKNOWN_ACTION_POLICY === "allow" ? "allow" : "deny"
+		await startServer({
+			repoRoot: repo,
+			port,
+			databaseUrl: db,
+			disableDb,
+			disableMcp,
+			testCommand,
+			testTimeoutMs: Number.isFinite(testTimeoutMs) ? testTimeoutMs : undefined,
+			unknownActionPolicy,
+		})
 		// Output the actual port for child-process callers
 		console.log(JSON.stringify({ port }))
 		return

@@ -8,10 +8,8 @@
  * 3. System is in a consistent state
  */
 
-import { execFile } from "node:child_process"
-import { promisify } from "node:util"
-
-const pexec = promisify(execFile)
+import { runCommand } from "./exec.js"
+import { parseTestOutput } from "./progress-gate.js"
 
 export interface LivenessCheck {
 	passed: boolean
@@ -21,6 +19,8 @@ export interface LivenessCheck {
 		testCommand?: string
 		testExitCode?: number
 		testOutput?: string
+		failingCount?: number
+		format?: string
 		pendingSteps?: string[]
 		error?: string
 	}
@@ -30,12 +30,15 @@ export interface LivenessConfig {
 	testCommand?: string // Command to run tests (e.g., "pnpm test")
 	requiredSteps?: string[] // Steps that must be completed
 	completedSteps?: string[] // Steps that have been completed
+	timeoutMs?: number
 }
 
 /**
  * Run the liveness check at final commit point.
  *
- * This is called ONLY at the final commit point (not intermediate checkpoints).
+ * Tests pass iff the command exits 0, does not time out, and — when the output
+ * format is recognised — reports zero failing tests (some runners exit 0 even
+ * with failures, e.g. misconfigured scripts that swallow the exit code).
  */
 export async function checkLiveness(worktreePath: string, config: LivenessConfig): Promise<LivenessCheck> {
 	const result: LivenessCheck = {
@@ -46,36 +49,35 @@ export async function checkLiveness(worktreePath: string, config: LivenessConfig
 	}
 
 	// Check 1: All given tests pass
-	if (config.testCommand) {
-		try {
-			const parts = config.testCommand.split(/\s+/)
-			const program = parts[0]
-			if (!program) {
-				result.testsPass = false
-				result.passed = false
-				result.details.error = "Test command is empty"
-				return result
-			}
-			const args = parts.slice(1)
-
-			const { stdout, stderr } = await pexec(program, args, {
-				cwd: worktreePath,
-				windowsHide: true,
-				timeout: 120000, // 2 min timeout for tests
-				env: { ...process.env, CI: "true", FORCE_COLOR: "0" },
-			})
-
-			result.details.testCommand = config.testCommand
-			result.details.testExitCode = 0
-			result.details.testOutput = (stdout + "\n" + stderr).slice(-2048)
-		} catch (e: any) {
+	if (config.testCommand !== undefined) {
+		if (!config.testCommand.trim()) {
 			result.testsPass = false
 			result.passed = false
-			result.details.testCommand = config.testCommand
-			result.details.testExitCode = e.code ?? 1
-			result.details.testOutput = ((e.stdout || "") + "\n" + (e.stderr || e.message || "")).slice(-2048)
-			result.details.error = `Tests failed with exit code ${result.details.testExitCode}`
+			result.details.error = "Test command is empty"
+			return result
 		}
+		const r = await runCommand(worktreePath, config.testCommand, { timeoutMs: config.timeoutMs ?? 300_000 })
+		const combined = `${r.stdout}\n${r.stderr}`
+		const counts = parseTestOutput(combined)
+		result.details.testCommand = config.testCommand
+		result.details.testExitCode = r.exitCode
+		result.details.testOutput = combined.slice(-2048)
+		result.details.failingCount = counts.failingCount
+		result.details.format = counts.format
+		if (r.spawnError) {
+			result.testsPass = false
+			result.details.error = `Test command could not be started: ${r.spawnError}`
+		} else if (r.timedOut) {
+			result.testsPass = false
+			result.details.error = `Tests timed out after ${config.timeoutMs ?? 300_000}ms`
+		} else if (r.exitCode !== 0) {
+			result.testsPass = false
+			result.details.error = `Tests failed with exit code ${r.exitCode}`
+		} else if (counts.format !== "unknown" && counts.failingCount > 0) {
+			result.testsPass = false
+			result.details.error = `Tests reported ${counts.failingCount} failure(s) despite exit code 0`
+		}
+		if (!result.testsPass) result.passed = false
 	}
 
 	// Check 2: No pending required steps

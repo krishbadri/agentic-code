@@ -126,7 +126,21 @@ function runPytest(
 
 // ── test suite ─────────────────────────────────────────────────────────────
 
-describe("CooperBench: stanfordnlp/dspy (features 2 vs 3)", () => {
+/**
+ * Network + Python required: clones a GitHub repo and runs pytest.
+ * Opt in with CP_COOPERBENCH=1 (and have `python` with pip on PATH).
+ */
+const COOPERBENCH_ENABLED = (() => {
+	if (!process.env.CP_COOPERBENCH) return false
+	try {
+		execFileSync("python", ["--version"], { windowsHide: true, stdio: "ignore" })
+		return true
+	} catch {
+		return false
+	}
+})()
+
+describe.skipIf(!COOPERBENCH_ENABLED)("CooperBench: stanfordnlp/dspy (features 2 vs 3)", () => {
 	let fixture: TestFixture
 	let baselineSha: string // SHA of the test-patched baseline on main
 	const taskA: CooperBenchTask = datasetJson.tasks[0] as CooperBenchTask
@@ -141,14 +155,16 @@ describe("CooperBench: stanfordnlp/dspy (features 2 vs 3)", () => {
 			const repoDir = mkdtempSync(join(tmpdir(), "cooperbench-"))
 			console.log(`[CooperBench] Cloning ${datasetJson.repo} → ${repoDir}`)
 
-			execFileSync("git", ["clone", "--depth=500", `https://github.com/${datasetJson.repo}.git`, "."], {
+			// Fetch exactly the base commit (a depth-limited clone may not contain it)
+			git(["init"], repoDir)
+			git(["remote", "add", "origin", `https://github.com/${datasetJson.repo}.git`], repoDir)
+			execFileSync("git", ["fetch", "--depth=1", "origin", datasetJson.base_commit], {
 				cwd: repoDir,
 				windowsHide: true,
 				timeout: CLONE_TIMEOUT,
 				maxBuffer: 50 * 1024 * 1024,
 			})
-
-			git(["checkout", datasetJson.base_commit], repoDir)
+			git(["checkout", "FETCH_HEAD"], repoDir)
 			git(["config", "user.name", "CooperBench Test"], repoDir)
 			git(["config", "user.email", "test@cooperbench.dev"], repoDir)
 			git(["checkout", "-B", "main"], repoDir)
