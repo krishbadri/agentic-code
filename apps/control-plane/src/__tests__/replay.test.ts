@@ -123,5 +123,8 @@ describe("health", () => {
 		expect(h.capabilities).toContain("strict-structural")
 		expect(h.test_command_configured).toBe(true)
 		expect(h.db).toBe("none")
+		// Clients verify this before using the server (one Control-Plane per repository).
+		expect(h.repo_root).toBe(f.tmpDir)
+		expect(h.pid).toBe(process.pid)
 	})
 })

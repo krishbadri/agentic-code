@@ -249,10 +249,10 @@ export class API extends EventEmitter<RooCodeEvents> implements RooCodeAPI {
 		// VS Code globalState can be async in ways that make immediate reads return stale data
 		// Retry with small delays to ensure persistence
 		for (let attempt = 0; attempt < 5; attempt++) {
-			await this.context.globalState.update("roo.cpPort", port)
+			await this.context.workspaceState.update("roo.cpPort", port)
 			// Small delay to let the write persist
 			await new Promise((resolve) => setTimeout(resolve, 100))
-			const storedPort = this.context.globalState.get<number>("roo.cpPort")
+			const storedPort = this.context.workspaceState.get<number>("roo.cpPort")
 			console.log(`[API#setCpPort] Attempt ${attempt + 1}: Set port to ${port}, read back: ${storedPort}`)
 			if (storedPort === port) {
 				return

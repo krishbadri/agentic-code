@@ -217,6 +217,20 @@ export function parseTestOutput(rawOutput: string): ParsedCounts {
 }
 
 /**
+ * True when the runner started fine but found nothing to run: an empty suite, not a
+ * failing one. Runners report this with a non-zero exit code (pytest: 5, jest/vitest: 1),
+ * which would otherwise block every commit in a repository that has no tests yet.
+ */
+export function noTestsCollected(rawOutput: string, exitCode: number | null | undefined): boolean {
+	const out = rawOutput.replace(/\x1b\[[0-9;]*m/g, "")
+	// pytest: exit 5 == "no tests collected"
+	if (exitCode === 5 && /\bno tests ran\b|\bcollected 0 items\b/i.test(out)) return true
+	// jest: "No tests found, exiting with code 1"; vitest: "No test files found, exiting with code 1"
+	if (exitCode === 1 && /\bNo tests found, exiting with code 1\b|\bNo test files found\b/i.test(out)) return true
+	return false
+}
+
+/**
  * The passing count the gate compares. For unrecognised output we cannot count
  * tests, so we fall back to the exit code (exit 0 ⇒ 1 "pass", else 0) — but
  * only when the baseline was also unrecognised; if the baseline was parseable

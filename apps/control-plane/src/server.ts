@@ -43,6 +43,8 @@ export type ProgressBaselineState = {
 	last_checkpoint_sha?: string
 	format?: import("./progress-gate.js").TestOutputFormat
 	exit_code?: number
+	/** The suite was already red at the transaction's base commit. */
+	failing_at_base?: boolean
 }
 
 export type TxMeta = {

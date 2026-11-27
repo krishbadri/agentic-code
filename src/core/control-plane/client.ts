@@ -1,4 +1,6 @@
 import * as vscode from "vscode"
+import * as fs from "fs"
+import * as path from "path"
 
 /**
  * Shared Control-Plane (CP) client.
@@ -121,7 +123,8 @@ export function getConfiguredTestCommand(cfg?: ConfigLike): string | undefined {
 
 // ── Port / readiness ────────────────────────────────────────────────────────
 
-type ContextLike = { globalState?: { get<T>(key: string): T | undefined } } | undefined
+type StateLike = { get<T>(key: string): T | undefined }
+type ContextLike = { workspaceState?: StateLike; globalState?: StateLike } | undefined
 
 export function getCpPort(context: ContextLike): number | undefined {
 	const override = (() => {
@@ -132,7 +135,9 @@ export function getCpPort(context: ContextLike): number | undefined {
 		}
 	})()
 	if (typeof override === "number" && override > 0) return override
-	const port = context?.globalState?.get<number>("roo.cpPort")
+	// One Control-Plane per repository: the port is stored per workspace. (globalState is
+	// only a legacy fallback; activation clears it and /health is checked against the repo.)
+	const port = context?.workspaceState?.get<number>("roo.cpPort") ?? context?.globalState?.get<number>("roo.cpPort")
 	return typeof port === "number" && port > 0 ? port : undefined
 }
 
@@ -252,17 +257,57 @@ export function cpErrorMessage(res: CpResponse<any>): string {
 	return [code, message].filter(Boolean).join(": ") || `HTTP ${res.status}`
 }
 
-/**
- * True when `/health` answers 2xx and reports `api >= CP_MIN_API_VERSION`.
- */
-export async function isCpHealthy(port: number, timeoutMs = 2_000): Promise<boolean> {
+/** The repository the current window works on (first workspace folder), if any. */
+export function currentWorkspaceRoot(): string | undefined {
 	try {
-		const res = await cpRequest<{ status?: string; api?: number }>(port, "GET", "/health", undefined, {
-			timeoutMs,
-		})
+		return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || undefined
+	} catch {
+		return undefined
+	}
+}
+
+/** Canonical form of a directory path for equality checks (symlinks, 8.3 names, case, slashes). */
+export function canonicalDir(dir: string): string {
+	let out = path.resolve(dir)
+	try {
+		out = fs.realpathSync.native(out)
+	} catch {
+		// keep the resolved path
+	}
+	out = out.replace(/[\\/]+$/, "")
+	return process.platform === "win32" ? out.toLowerCase() : out
+}
+
+/**
+ * True when `/health` answers 2xx, reports `api >= CP_MIN_API_VERSION`, AND the server
+ * manages the repository this window is working on. A Control-Plane bound to another
+ * repository (second window, stale port) must never be used: the task's transaction
+ * would be created in — and committed to — the wrong repository.
+ *
+ * `expectedRepoRoot` defaults to the first workspace folder; pass `null` to skip the check.
+ */
+export async function isCpHealthy(
+	port: number,
+	timeoutMs = 2_000,
+	expectedRepoRoot: string | null | undefined = currentWorkspaceRoot(),
+): Promise<boolean> {
+	try {
+		const res = await cpRequest<{ status?: string; api?: number; repo_root?: string }>(
+			port,
+			"GET",
+			"/health",
+			undefined,
+			{ timeoutMs },
+		)
 		if (!res.ok) return false
 		const api = Number(res.data?.api ?? 0)
-		return api >= CP_MIN_API_VERSION
+		if (api < CP_MIN_API_VERSION) return false
+		if (expectedRepoRoot) {
+			const actual = res.data?.repo_root
+			if (typeof actual !== "string" || !actual) return false
+			if (canonicalDir(actual) !== canonicalDir(expectedRepoRoot)) return false
+		}
+		return true
 	} catch {
 		return false
 	}

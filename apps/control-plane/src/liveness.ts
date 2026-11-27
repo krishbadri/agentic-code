@@ -9,7 +9,7 @@
  */
 
 import { runCommand } from "./exec.js"
-import { parseTestOutput } from "./progress-gate.js"
+import { noTestsCollected, parseTestOutput } from "./progress-gate.js"
 
 export interface LivenessCheck {
 	passed: boolean
@@ -23,6 +23,7 @@ export interface LivenessCheck {
 		format?: string
 		pendingSteps?: string[]
 		error?: string
+		note?: string
 	}
 }
 
@@ -70,6 +71,9 @@ export async function checkLiveness(worktreePath: string, config: LivenessConfig
 		} else if (r.timedOut) {
 			result.testsPass = false
 			result.details.error = `Tests timed out after ${config.timeoutMs ?? 300_000}ms`
+		} else if (noTestsCollected(combined, r.exitCode)) {
+			// An empty suite is vacuously green: there is no given test that fails.
+			result.details.note = "No tests were collected; liveness passes vacuously"
 		} else if (r.exitCode !== 0) {
 			result.testsPass = false
 			result.details.error = `Tests failed with exit code ${r.exitCode}`

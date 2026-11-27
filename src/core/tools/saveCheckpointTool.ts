@@ -79,7 +79,6 @@ export async function saveCheckpointTool(
 			return
 		}
 
-		const { getWorkspacePath } = await import("../../utils/path")
 		let hash: string | undefined
 
 		if (task.worktreeTxId) {
@@ -118,24 +117,11 @@ export async function saveCheckpointTool(
 						? String(result)
 						: undefined
 
-			// Also create a workspace git commit to capture files written directly to workspace
-			try {
-				const workspaceDir = task.cwd || getWorkspacePath()
-				if (workspaceDir) {
-					const simpleGit = (await import("simple-git")).default
-					const git = simpleGit(workspaceDir, { binary: "git" })
-					await git.add(["-A"])
-					const wsResult = await git.commit(`Checkpoint: ${name}`, { "--allow-empty": null })
-					if (wsResult.commit) {
-						hash = wsResult.commit
-					}
-				}
-			} catch (wsErr: unknown) {
-				const provider = task.providerRef.deref()
-				provider?.log?.(
-					`[saveCheckpointTool] Workspace commit failed (non-fatal): ${wsErr instanceof Error ? wsErr.message : wsErr}`,
-				)
-			}
+			// Deliberately NO commit in the user's repository here. The shadow checkpoint
+			// already captures the workspace files, and its hash is the one
+			// rollback_to_checkpoint can restore. (A `git add -A && git commit` in the
+			// workspace would sweep the user's unrelated uncommitted changes onto their
+			// branch and return a hash the shadow service cannot restore.)
 		}
 
 		if (!hash) {

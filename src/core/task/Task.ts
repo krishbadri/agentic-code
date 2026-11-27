@@ -143,6 +143,7 @@ import {
 	waitForControlPlane,
 } from "../control-plane/client"
 import { clearQualityGateState, detectProjectCommands } from "../checkpoints/QualityGate"
+import { canRunHeadlessSubAgents, decideHeadlessAsk, type HeadlessApprovalSettings } from "./headlessApproval"
 import * as cpTx from "../control-plane/tx"
 
 /** Result of committing a task's Control-Plane transaction. */
@@ -277,7 +278,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	abandoned = false
 	abortReason?: ClineApiReqCancelReason
 	/** Track if task aborted due to blocked Task#ask in e2e mode (for parent task propagation) */
-	e2eBlockedAskAbort?: { type: string }
+	e2eBlockedAskAbort?: { type: string; reason?: string }
+
+	/** A planner sub-agent: runs in the background in its own sub-transaction, without a UI. */
+	get isHeadlessSubAgent(): boolean {
+		return !!this.parentTask && !!this.subTransactionId
+	}
 	isInitialized = false
 	isPaused: boolean = false
 	pausedModeSlug: string = defaultModeSlug
@@ -1040,6 +1046,27 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		// E2E mode: Prevent ALL blocking Task#ask calls
 		const isE2EMode = !!(process.env.TEST_TORTURE_REPO || process.env.TEST_TORTURE_REPO_WORKSPACE)
+
+		// Planner sub-agents run in the background (several in parallel) and the chat view
+		// only answers the task on top of the stack, so their asks are decided here, from the
+		// user's auto-approval settings. See headlessApproval.ts.
+		if (this.isHeadlessSubAgent && !isE2EMode && isBlocking && !isMessageQueued) {
+			const provider = this.providerRef.deref()
+			const state = await provider?.getState()
+			const decision = decideHeadlessAsk(type, text, isProtected, (state ?? {}) as HeadlessApprovalSettings)
+			if (decision.kind === "approve") {
+				this.handleWebviewAskResponse("yesButtonClicked")
+			} else if (decision.kind === "respond") {
+				this.setMessageResponse(decision.text)
+			} else {
+				const errorMessage = `Sub-agent blocked: ${decision.reason}`
+				provider?.log(`[Task#ask] ${errorMessage} - Task: ${this.taskId} (${this.subTransactionId})`)
+				this.e2eBlockedAskAbort = { type, reason: decision.reason }
+				await this.abortTask()
+				throw new Error(errorMessage)
+			}
+		}
+
 		if (isE2EMode && isBlocking && !isMessageQueued) {
 			const provider = this.providerRef.deref()
 			const state = await provider?.getState()
@@ -2334,7 +2361,24 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 			}
 		}
 
+		// Sub-agents cannot prompt the user. If the auto-approval settings would not let them
+		// read and edit files, run as a single (interactive) agent instead of failing the plan.
+		let plannerApprovalsOk = true
 		if (plannerMode && task && !isSimpleRequest && plannerCpAvailable) {
+			const isE2EMode = !!(process.env.TEST_TORTURE_REPO || process.env.TEST_TORTURE_REPO_WORKSPACE)
+			if (!isE2EMode) {
+				const state = await this.providerRef.deref()?.getState()
+				const check = canRunHeadlessSubAgents((state ?? {}) as HeadlessApprovalSettings)
+				if (!check.ok) {
+					plannerApprovalsOk = false
+					this.providerRef
+						.deref()
+						?.log(`[Task#startTask] Skipping planner mode: ${check.reason} (sub-agents cannot prompt)`)
+				}
+			}
+		}
+
+		if (plannerMode && task && !isSimpleRequest && plannerCpAvailable && plannerApprovalsOk) {
 			try {
 				const { PlannerAgent, shouldOpenCircuitBreaker } = await import("../planner/PlannerAgent")
 				const { PlanExecutor } = await import("../planner/PlanExecutor")
@@ -3080,10 +3124,18 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 	 * - Missing tags: <read_file><path>...</path> → adds </read_file> and <args> wrapper
 	 * - Malformed structure: fixes missing args, file wrappers, etc.
 	 */
+	private streamingToolCallRepairer?: (chunk: string) => { repaired: boolean; text: string; repairs: string[] }
+
+	/**
+	 * Repair one streamed chunk. Only text that precedes the first valid tool call of the
+	 * message is repaired: the contents of a valid tool call (the <command> parameter, file
+	 * content being written, ...) must reach the parser verbatim.
+	 */
 	private repairToolCalls(text: string): string {
 		// Use dynamic import to avoid circular dependencies and ensure proper module loading
-		const { repairToolCalls: repair } = require("../assistant-message/toolCallRepairer")
-		const result = repair(text)
+		const { createStreamingToolCallRepairer } = require("../assistant-message/toolCallRepairer")
+		this.streamingToolCallRepairer ??= createStreamingToolCallRepairer()
+		const result = this.streamingToolCallRepairer!(text)
 
 		// Log repairs for debugging
 		if (result.repaired && result.repairs.length > 0) {
@@ -3387,7 +3439,11 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 					success,
 					worktreePath: child.worktreePath,
 					checkpointHash: child.checkpointService?.baseHash,
-					error: !success ? "Task failed or was aborted" : undefined,
+					error: !success
+						? child.e2eBlockedAskAbort?.reason
+							? `Sub-agent blocked: ${child.e2eBlockedAskAbort.reason}`
+							: "Task failed or was aborted"
+						: undefined,
 				})
 			}),
 		)
@@ -3484,6 +3540,16 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 			}
 
 			this.adoptTaskTransaction(res.data.tx_id, res.data.worktree_path, res.data.base_commit)
+			const baseline = (res.data as any).progress_baseline
+			if (baseline?.failingAtBase) {
+				// Liveness requires a green suite at commit: say so now, not at the end.
+				await this.say(
+					"text",
+					`⚠ The test command (\`${testCommand}\`) is already failing before any change. ` +
+						"This task's changes can only be committed once the tests pass; fix them as part of the task, " +
+						"or set 'roo.controlPlane.testCommand' to the right command.",
+				)
+			}
 			provider.log(
 				`[Task#ensureTaskTransaction] Began transaction ${res.data.tx_id} at ${res.data.base_commit} ` +
 					`(worktree ${res.data.worktree_path}, test_command=${testCommand ?? "none"})`,
@@ -3899,6 +3965,7 @@ Only AFTER you have a valid file path from the discovery tool results should you
 				this.presentAssistantMessageLocked = false
 				this.presentAssistantMessageHasPendingUpdates = false
 				this.assistantMessageParser.reset()
+				this.streamingToolCallRepairer = undefined
 
 				await this.diffViewProvider.reset()
 
@@ -4377,6 +4444,7 @@ Only AFTER you have a valid file path from the discovery tool results should you
 
 				// Reset parser after each complete conversation round
 				this.assistantMessageParser.reset()
+				this.streamingToolCallRepairer = undefined
 
 				// Now add to apiConversationHistory.
 				// Need to save assistant responses to file before proceeding to
@@ -4454,6 +4522,7 @@ Only AFTER you have a valid file path from the discovery tool results should you
 
 								// Reset parser and reparse the repaired text
 								this.assistantMessageParser.reset()
+								this.streamingToolCallRepairer = undefined
 								this.assistantMessageContent = this.assistantMessageParser.processChunk(
 									repairResult.text,
 								)

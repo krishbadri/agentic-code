@@ -100,13 +100,16 @@ import * as cpTx from "../../control-plane/tx"
 
 const COMPLEX_TASK = "Implement a new authentication module in src/auth.ts and add routes in src/routes.ts"
 
-function makeProvider() {
+/** Auto-approval settings under which planner sub-agents (which cannot prompt) can work. */
+const SUB_AGENT_APPROVALS = { autoApprovalEnabled: true, alwaysAllowReadOnly: true, alwaysAllowWrite: true }
+
+function makeProvider(state: Record<string, unknown> = SUB_AGENT_APPROVALS) {
 	return {
 		context: {
 			globalStorageUri: { fsPath: "/tmp/roo-test-storage" },
 			globalState: { get: vi.fn(), update: vi.fn().mockResolvedValue(undefined) },
 		},
-		getState: vi.fn().mockResolvedValue({ mode: "code" }),
+		getState: vi.fn().mockResolvedValue({ mode: "code", ...state }),
 		log: vi.fn(),
 		postStateToWebview: vi.fn().mockResolvedValue(undefined),
 		postMessageToWebview: vi.fn().mockResolvedValue(undefined),
@@ -183,6 +186,24 @@ describe("Task planner fallback (EXT-1)", () => {
 		expect(loop).toHaveBeenCalledTimes(1)
 		expect(task.finishedSuccessfully).toBeFalsy()
 		expect(saidTexts(say).some((t) => t.includes("executing as single agent"))).toBe(true)
+	})
+
+	it("skips the planner when auto-approval would not let sub-agents read and write", async () => {
+		// Sub-agents run in the background and cannot prompt: without auto-approve the task
+		// runs as one interactive agent (still inside its transaction).
+		cpState.port = 4000
+		for (const state of [{}, { ...SUB_AGENT_APPROVALS, alwaysAllowWrite: false }]) {
+			planner.generatePlan.mockClear()
+			const { task, loop, provider } = makeTask(makeProvider(state))
+			await (task as any).startTask(COMPLEX_TASK)
+
+			expect(planner.generatePlan).not.toHaveBeenCalled()
+			expect(loop).toHaveBeenCalledTimes(1)
+			expect(task.txId).toBe("tx-1")
+			expect(provider.log.mock.calls.some((c: unknown[]) => String(c[0]).includes("Skipping planner mode"))).toBe(
+				true,
+			)
+		}
 	})
 
 	it("any other planner error stops the task", async () => {

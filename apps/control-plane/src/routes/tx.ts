@@ -97,6 +97,10 @@ export function registerTxRoutes(app: FastifyInstance) {
 				"rollback-backup-refs",
 			],
 			db: !app.db ? "none" : app.databaseUrl?.startsWith("postgresql://") ? "postgres" : "sqlite",
+			// The repository this server manages. Clients MUST check it: a Control-Plane
+			// bound to another repository would put their transaction in the wrong repo.
+			repo_root: app.repoRoot,
+			pid: process.pid,
 			test_command_configured: !!app.cpConfig.testCommand,
 		})
 	})
@@ -161,7 +165,14 @@ export function registerTxRoutes(app: FastifyInstance) {
 
 			let repo_id = "default"
 			let progressBaseline:
-				| { passingCount: number; totalCount: number; format?: string; warning?: string }
+				| {
+						passingCount: number
+						totalCount: number
+						format?: string
+						exitCode?: number
+						failingAtBase?: boolean
+						warning?: string
+				  }
 				| undefined
 
 			if (app.db) {
@@ -206,13 +217,26 @@ export function registerTxRoutes(app: FastifyInstance) {
 				}
 				const { effectivePassing } = await import("../progress-gate.js")
 				const basePassing = effectivePassing(result)
+				const { noTestsCollected } = await import("../progress-gate.js")
+				const baseRed =
+					result.exitCode !== 0 && !noTestsCollected(result.stdout + "\n" + result.stderr, result.exitCode)
 				progressBaseline = {
 					passingCount: basePassing,
 					totalCount: result.totalCount,
 					format: result.format,
-					...(result.format === "unknown"
-						? { warning: "Test output format not recognised; progress is judged by exit code only" }
-						: {}),
+					exitCode: result.exitCode,
+					// The final commit requires a green suite (liveness). Tell the client up
+					// front when the suite is already red, so it is not discovered at commit.
+					failingAtBase: baseRed,
+					...(baseRed
+						? {
+								warning:
+									"The test suite is already failing at the base commit; the final commit " +
+									"will be refused until the tests pass",
+							}
+						: result.format === "unknown"
+							? { warning: "Test output format not recognised; progress is judged by exit code only" }
+							: {}),
 				}
 
 				if (app.db) {
@@ -227,6 +251,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 					last_checkpoint_count: basePassing,
 					format: result.format,
 					exit_code: result.exitCode,
+					failing_at_base: baseRed,
 				})
 			}
 
@@ -703,7 +728,12 @@ export function registerTxRoutes(app: FastifyInstance) {
 
 					return reply.code(403).send({
 						code: "LIVENESS_FAILED",
-						message: `Liveness check failed at final commit: ${check.details.error || "Tests failed or pending steps"}`,
+						message:
+							`Liveness check failed at final commit: ${check.details.error || "Tests failed or pending steps"}` +
+							(app.progressBaselines?.get(txId)?.failing_at_base
+								? " (the test suite was already failing when this transaction began)"
+								: ""),
+						baseline_was_failing: !!app.progressBaselines?.get(txId)?.failing_at_base,
 						passed: false,
 						testsPass: check.testsPass,
 						noPendingSteps: check.noPendingSteps,

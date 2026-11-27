@@ -303,3 +303,44 @@ describe("DB mode (SQLite): ids, history and metrics", () => {
 		expect(commit.data.liveness.passed).toBe(true)
 	})
 })
+
+describe("liveness against the state of the suite at begin", () => {
+	let f: OccFixture
+	beforeEach(async () => {
+		f = await createOccFixture()
+	})
+	afterEach(() => f.cleanup())
+
+	it("T8k: a suite that is already red is reported at begin and named in the commit refusal", async () => {
+		createAndCommitFile(f.tmpDir, "t.js", 'console.log("not ok 1 - broken"); process.exit(1)', "red suite")
+		const tx = (await begin(f, { test_command: "node t.js" })) as any
+		expect(tx.progress_baseline.failingAtBase).toBe(true)
+		expect(tx.progress_baseline.warning).toMatch(/already failing/)
+
+		writeFileToWorktree(tx.worktree_path, "note.txt", "unrelated change")
+		const r = await call(f, "POST", `/tx/${tx.tx_id}/commit`, {})
+		expect(r.status).toBe(403)
+		expect(r.data.code).toBe("LIVENESS_FAILED")
+		expect(r.data.baseline_was_failing).toBe(true)
+		expect(r.data.message).toMatch(/already failing when this transaction began/)
+		// still strict: nothing reached the target branch
+		expect(existsSync(join(f.tmpDir, "note.txt"))).toBe(false)
+	})
+
+	it("T8l: a runner that finds no tests does not block the commit", async () => {
+		createAndCommitFile(
+			f.tmpDir,
+			"t.js",
+			'console.log("collected 0 items"); console.log("==== no tests ran in 0.01s ===="); process.exit(5)',
+			"empty suite",
+		)
+		const tx = (await begin(f, { test_command: "node t.js" })) as any
+		expect(tx.progress_baseline.failingAtBase).toBe(false)
+
+		writeFileToWorktree(tx.worktree_path, "note.txt", "a change")
+		const r = await call(f, "POST", `/tx/${tx.tx_id}/commit`, {})
+		expect(r.status, JSON.stringify(r.data)).toBe(200)
+		expect(r.data.liveness).toMatchObject({ ran: true, passed: true })
+		expect(readFileSync(join(f.tmpDir, "note.txt"), "utf8")).toBe("a change")
+	})
+})

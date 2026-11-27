@@ -183,6 +183,31 @@ describe("isCpHealthy / waitForControlPlane", () => {
 		expect(await isCpHealthy(1)).toBe(false)
 	})
 
+	it("rejects a Control-Plane that manages a different repository", async () => {
+		const health = (repo_root?: string) =>
+			new Response(JSON.stringify({ status: "ok", api: 2, repo_root }), { status: 200 })
+		const here = process.cwd()
+		fetchMock.mockResolvedValueOnce(health(here))
+		expect(await isCpHealthy(1, 2_000, here)).toBe(true)
+		// trailing separator / case differences are the same directory
+		fetchMock.mockResolvedValueOnce(health(here + require("path").sep))
+		expect(await isCpHealthy(1, 2_000, here)).toBe(true)
+		fetchMock.mockResolvedValueOnce(health(require("path").join(here, "..")))
+		expect(await isCpHealthy(1, 2_000, here)).toBe(false)
+		// a server that does not say which repo it manages cannot be trusted with one
+		fetchMock.mockResolvedValueOnce(health(undefined))
+		expect(await isCpHealthy(1, 2_000, here)).toBe(false)
+		// explicit opt-out
+		fetchMock.mockResolvedValueOnce(health(undefined))
+		expect(await isCpHealthy(1, 2_000, null)).toBe(true)
+	})
+
+	it("getCpPort prefers the per-workspace port", () => {
+		expect(getCpPort({ workspaceState: { get: () => 1111 } as any, globalState: { get: () => 4321 } as any })).toBe(
+			1111,
+		)
+	})
+
 	it("getCpPort reads roo.cpPort from global state", () => {
 		expect(getCpPort({ globalState: { get: () => 4321 } as any })).toBe(4321)
 		expect(getCpPort({ globalState: { get: () => undefined } as any })).toBeUndefined()

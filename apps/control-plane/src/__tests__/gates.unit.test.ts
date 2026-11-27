@@ -7,7 +7,8 @@ import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { checkActionSafety, normalizeTargetPath } from "../action-safety.js"
-import { parseTestOutput, effectivePassing } from "../progress-gate.js"
+import { parseTestOutput, effectivePassing, noTestsCollected } from "../progress-gate.js"
+import { checkLiveness } from "../liveness.js"
 import { splitArgv, splitCommands } from "../shell-lex.js"
 import { isTestFile } from "../test-files.js"
 import { planMergeOrder } from "../merge-planner.js"
@@ -242,6 +243,29 @@ describe("progress-gate parser", () => {
 		expect(effectivePassing({ ...r, exitCode: 1 })).toBe(0)
 		// baseline was parseable, current is not: the suite broke
 		expect(effectivePassing({ ...r, exitCode: 0 }, "tap")).toBe(0)
+	})
+})
+
+describe("empty test suites", () => {
+	it("recognises runners that found nothing to run", () => {
+		expect(noTestsCollected("collected 0 items\n\n==== no tests ran in 0.01s ====", 5)).toBe(true)
+		expect(noTestsCollected("No tests found, exiting with code 1\nRun with `--passWithNoTests`", 1)).toBe(true)
+		expect(noTestsCollected("No test files found, exiting with code 1", 1)).toBe(true)
+		// real failures and unrelated non-zero exits are not "empty"
+		expect(noTestsCollected("==== 1 failed, 2 passed in 0.1s ====", 1)).toBe(false)
+		expect(noTestsCollected("no tests ran", 2)).toBe(false)
+		expect(noTestsCollected("", 5)).toBe(false)
+	})
+
+	it("liveness passes vacuously for an empty suite but still fails real failures", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "cp-live-"))
+		writeFileSync(join(dir, "empty.js"), 'console.log("==== no tests ran in 0.01s ===="); process.exit(5)\n')
+		writeFileSync(join(dir, "red.js"), 'console.log("==== 1 failed in 0.01s ===="); process.exit(1)\n')
+		const empty = await checkLiveness(dir, { testCommand: "node empty.js" })
+		expect(empty.passed).toBe(true)
+		expect(empty.details.note).toMatch(/No tests were collected/)
+		const red = await checkLiveness(dir, { testCommand: "node red.js" })
+		expect(red.passed).toBe(false)
 	})
 })
 
