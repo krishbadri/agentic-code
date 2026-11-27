@@ -1103,9 +1103,11 @@ export function registerTxRoutes(app: FastifyInstance) {
 				detectDependentFileConflicts,
 				partitionByConflicts,
 				orderByModifications,
+				refineSameFileConflicts,
 			} = await import("../structural-conflict.js")
 
 			const touchedFilesMap = new Map<string, { subTxId: string; files: string[]; linesChanged: number }>()
+			const subTxContexts = new Map<string, { worktreePath: string; baseRef: string }>()
 
 			for (const subTxId of body.sub_tx_ids) {
 				const subWt = git.subTxWorktreePath(parentTxId, subTxId)
@@ -1116,10 +1118,12 @@ export function registerTxRoutes(app: FastifyInstance) {
 					files: touched.files,
 					linesChanged: touched.linesChanged,
 				})
+				subTxContexts.set(subTxId, { worktreePath: subWt, baseRef })
 			}
 
 			// Step 2: Detect structural conflicts (same-file and dependent-file)
-			const sameFileConflicts = detectConflicts(touchedFilesMap)
+			const rawSameFileConflicts = detectConflicts(touchedFilesMap)
+			const sameFileConflicts = await refineSameFileConflicts(rawSameFileConflicts, parentWt, subTxContexts)
 			const dependentFileConflicts = await detectDependentFileConflicts(parentWt, touchedFilesMap)
 			const allConflicts = [...sameFileConflicts, ...dependentFileConflicts]
 
@@ -1247,11 +1251,11 @@ export function registerTxRoutes(app: FastifyInstance) {
 		const parentWt = git.worktreePath(parentTxId)
 
 		try {
-			const { getTouchedFiles, detectConflicts, detectDependentFileConflicts } = await import(
-				"../structural-conflict.js"
-			)
+			const { getTouchedFiles, detectConflicts, detectDependentFileConflicts, refineSameFileConflicts } =
+				await import("../structural-conflict.js")
 
 			const touchedFilesMap = new Map<string, { subTxId: string; files: string[]; linesChanged: number }>()
+			const subTxContexts = new Map<string, { worktreePath: string; baseRef: string }>()
 
 			for (const subTxId of body.sub_tx_ids) {
 				const subWt = git.subTxWorktreePath(parentTxId, subTxId)
@@ -1262,9 +1266,11 @@ export function registerTxRoutes(app: FastifyInstance) {
 					files: touched.files,
 					linesChanged: touched.linesChanged,
 				})
+				subTxContexts.set(subTxId, { worktreePath: subWt, baseRef })
 			}
 
-			const sameFileConflicts = detectConflicts(touchedFilesMap)
+			const rawSameFileConflicts = detectConflicts(touchedFilesMap)
+			const sameFileConflicts = await refineSameFileConflicts(rawSameFileConflicts, parentWt, subTxContexts)
 			const dependentFileConflicts = await detectDependentFileConflicts(parentWt, touchedFilesMap)
 
 			return reply.send({

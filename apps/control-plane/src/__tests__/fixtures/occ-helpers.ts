@@ -291,6 +291,25 @@ export const result = useFoo(bar.value);
 }
 
 /**
+ * Create a fixture with a TS file containing two distinct top-level functions
+ * and a non-TS config file, for AST-aware conflict refinement testing.
+ */
+export async function createOccFixtureWithMultiFunctionFile(): Promise<OccFixture> {
+	const fixture = await createOccFixture()
+
+	createAndCommitFile(
+		fixture.tmpDir,
+		"src/utils.ts",
+		`export function alpha() {\n  return "alpha"\n}\n\nexport function beta() {\n  return "beta"\n}\n`,
+		"Add src/utils.ts with alpha and beta functions",
+	)
+
+	createAndCommitFile(fixture.tmpDir, "data/config.json", '{"key": "original"}\n', "Add data/config.json")
+
+	return fixture
+}
+
+/**
  * Helper to begin a parent transaction
  */
 export async function beginTransaction(

@@ -6,12 +6,15 @@
  * - Dependent-file overlap: subTx touch files in the same import graph
  *
  * Uses import graph analysis to detect dependency conflicts.
+ * AST-aware refinement (TS/TSX only) downgrades same-file conflicts
+ * when both edits map to disjoint ownable top-level declarations.
  */
 
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { readFile } from "node:fs/promises"
 import { join, dirname, resolve } from "node:path"
+import * as ts from "typescript"
 
 const pexec = promisify(execFile)
 
@@ -305,4 +308,223 @@ export function partitionByConflicts(
 	const conflicting = subTxIds.filter((id) => conflictingSet.has(id))
 
 	return { noConflict, conflicting }
+}
+
+// ---------------------------------------------------------------------------
+// AST-aware same-file conflict refinement (TypeScript/TSX only)
+// ---------------------------------------------------------------------------
+
+interface TopLevelNode {
+	index: number
+	startLine: number // 1-based, inclusive
+	endLine: number // 1-based, inclusive
+	ownable: boolean
+}
+
+export interface DiffHunk {
+	oldStart: number // 1-based line in base file
+	oldCount: number // 0 for pure additions
+}
+
+/**
+ * Classify whether a top-level statement is an "ownable" declaration
+ * (safe to attribute edits to) or an unownable region (imports, bare
+ * exports, side-effect expressions) that must remain conservative.
+ */
+function isOwnableKind(kind: ts.SyntaxKind): boolean {
+	switch (kind) {
+		case ts.SyntaxKind.FunctionDeclaration:
+		case ts.SyntaxKind.ClassDeclaration:
+		case ts.SyntaxKind.InterfaceDeclaration:
+		case ts.SyntaxKind.TypeAliasDeclaration:
+		case ts.SyntaxKind.EnumDeclaration:
+		case ts.SyntaxKind.VariableStatement:
+			return true
+		default:
+			return false
+	}
+}
+
+/**
+ * Parse a TypeScript/TSX file and return its top-level statement ranges.
+ * Returns null on parse failure (caller should treat as conservative).
+ */
+export function getTopLevelNodes(content: string, fileName = "file.ts"): TopLevelNode[] | null {
+	try {
+		const scriptKind = fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+		const sourceFile = ts.createSourceFile(fileName, content, ts.ScriptTarget.Latest, true, scriptKind)
+
+		const nodes: TopLevelNode[] = []
+		let index = 0
+
+		for (const stmt of sourceFile.statements) {
+			const startPos = stmt.getStart(sourceFile)
+			const endPos = stmt.getEnd()
+			const startLine = sourceFile.getLineAndCharacterOfPosition(startPos).line + 1
+			const endLine = sourceFile.getLineAndCharacterOfPosition(Math.max(startPos, endPos - 1)).line + 1
+
+			nodes.push({
+				index,
+				startLine,
+				endLine,
+				ownable: isOwnableKind(stmt.kind),
+			})
+			index++
+		}
+
+		return nodes
+	} catch {
+		return null
+	}
+}
+
+/**
+ * Parse unified-diff hunk headers (@@ -old,count +new,count @@).
+ */
+export function parseDiffHunks(diffOutput: string): DiffHunk[] {
+	const hunks: DiffHunk[] = []
+	const hunkRegex = /^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@/gm
+
+	let match
+	while ((match = hunkRegex.exec(diffOutput)) !== null) {
+		const oldStart = parseInt(match[1]!, 10)
+		const oldCount = match[2] !== undefined ? parseInt(match[2], 10) : 1
+		hunks.push({ oldStart, oldCount })
+	}
+
+	return hunks
+}
+
+/**
+ * Run `git diff --unified=0` for a single file between baseRef and HEAD.
+ */
+async function getDiffHunksForFile(worktreePath: string, baseRef: string, filePath: string): Promise<DiffHunk[]> {
+	try {
+		const { stdout } = await pexec("git", ["diff", "--unified=0", baseRef, "HEAD", "--", filePath], {
+			cwd: worktreePath,
+			windowsHide: true,
+		})
+		return parseDiffHunks(stdout)
+	} catch {
+		return []
+	}
+}
+
+/**
+ * Map diff hunks to the set of ownable top-level node indices they fall within.
+ * Returns null if any hunk cannot be cleanly attributed to exactly one ownable node.
+ */
+export function findAffectedNodeIndices(hunks: DiffHunk[], nodes: TopLevelNode[]): Set<number> | null {
+	const ownableNodes = nodes.filter((n) => n.ownable)
+	const indices = new Set<number>()
+
+	for (const hunk of hunks) {
+		const hunkStart = hunk.oldStart
+		const hunkEnd = hunk.oldCount > 0 ? hunk.oldStart + hunk.oldCount - 1 : hunk.oldStart
+
+		// Find the single ownable node that fully contains this hunk range
+		let found = false
+		for (const node of ownableNodes) {
+			if (hunkStart >= node.startLine && hunkEnd <= node.endLine) {
+				indices.add(node.index)
+				found = true
+				break
+			}
+		}
+
+		if (!found) {
+			// Hunk is outside any ownable node, spans multiple nodes, or in unowned region
+			return null
+		}
+	}
+
+	return indices
+}
+
+/**
+ * Determine whether two sets of diff hunks touch entirely disjoint
+ * ownable top-level declarations in the base file.
+ */
+export function areChangesDisjoint(
+	baseContent: string,
+	fileName: string,
+	hunksA: DiffHunk[],
+	hunksB: DiffHunk[],
+): boolean {
+	if (hunksA.length === 0 || hunksB.length === 0) return false
+
+	const nodes = getTopLevelNodes(baseContent, fileName)
+	if (!nodes || nodes.length === 0) return false
+
+	const indicesA = findAffectedNodeIndices(hunksA, nodes)
+	if (!indicesA || indicesA.size === 0) return false
+
+	const indicesB = findAffectedNodeIndices(hunksB, nodes)
+	if (!indicesB || indicesB.size === 0) return false
+
+	for (const i of indicesA) {
+		if (indicesB.has(i)) return false
+	}
+	return true
+}
+
+/**
+ * Post-process same-file conflicts: remove false positives where both
+ * sub-txs' changes map to disjoint ownable top-level TS/TSX declarations.
+ *
+ * Conservative: keeps the conflict when uncertain (non-TS, parse failure,
+ * imports/exports/side-effects, ambiguous ownership).
+ */
+export async function refineSameFileConflicts(
+	conflicts: ConflictResult[],
+	parentWorktreePath: string,
+	subTxContexts: Map<string, { worktreePath: string; baseRef: string }>,
+): Promise<ConflictResult[]> {
+	const refined: ConflictResult[] = []
+
+	for (const conflict of conflicts) {
+		if (conflict.conflictType !== "same-file" || !conflict.conflictingFiles || !conflict.conflictingSubTxs) {
+			refined.push(conflict)
+			continue
+		}
+
+		const [subAId, subBId] = conflict.conflictingSubTxs
+		const ctxA = subTxContexts.get(subAId)
+		const ctxB = subTxContexts.get(subBId)
+
+		if (!ctxA || !ctxB) {
+			refined.push(conflict)
+			continue
+		}
+
+		let allDisjoint = true
+		for (const file of conflict.conflictingFiles) {
+			// Only refine TypeScript files
+			if (!/\.tsx?$/.test(file)) {
+				allDisjoint = false
+				break
+			}
+
+			try {
+				const baseContent = await readFile(join(parentWorktreePath, file), "utf8")
+				const hunksA = await getDiffHunksForFile(ctxA.worktreePath, ctxA.baseRef, file)
+				const hunksB = await getDiffHunksForFile(ctxB.worktreePath, ctxB.baseRef, file)
+
+				if (!areChangesDisjoint(baseContent, file, hunksA, hunksB)) {
+					allDisjoint = false
+					break
+				}
+			} catch {
+				allDisjoint = false
+				break
+			}
+		}
+
+		if (!allDisjoint) {
+			refined.push(conflict)
+		}
+		// Disjoint: drop the false-positive conflict
+	}
+
+	return refined
 }

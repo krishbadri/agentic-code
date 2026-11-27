@@ -13,6 +13,7 @@
  *   T4  Liveness gate    — LIVENESS_FAILED blocks final commit when tests fail
  *   T5  Struct conflict  — same-file conflict detected; merge ordered by changes
  *   T6  R30 reservation  — duplicate new-file creation blocked with 409
+ *   T7  AST refinement   — disjoint top-level TS edits bypass same-file conflict
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest"
@@ -21,6 +22,7 @@ import {
 	createOccFixture,
 	createOccFixtureWithSharedFile,
 	createOccFixtureWithProgressTests,
+	createOccFixtureWithMultiFunctionFile,
 	beginTransaction,
 	beginSubTransaction,
 	rollbackSubTransaction,
@@ -439,6 +441,111 @@ describe("T6: R30 new-file reservation", () => {
 			claimer_id: "agent-c",
 		})
 		expect(reserveRes2.status, "new tx should allow reserving the same path again").toBe(200)
+	})
+})
+
+// ---------------------------------------------------------------------------
+// T7: AST-aware same-file conflict refinement
+// ---------------------------------------------------------------------------
+
+describe("T7: AST-aware same-file conflict refinement", () => {
+	let fixture: OccFixture
+
+	beforeEach(async () => {
+		fixture = await createOccFixtureWithMultiFunctionFile()
+	})
+	afterEach(() => fixture.cleanup())
+
+	it("T7a: disjoint function edits in same TS file are NOT flagged as conflicts", async () => {
+		const { tx_id: txId } = await beginTransaction(fixture)
+
+		const { worktree_path: wtA } = await beginSubTransaction(fixture, txId, "agent-a")
+		const { worktree_path: wtB } = await beginSubTransaction(fixture, txId, "agent-b")
+
+		// Agent A modifies only alpha(), leaving beta() byte-identical to base
+		writeFileToWorktree(
+			wtA,
+			"src/utils.ts",
+			`export function alpha() {\n  return "modified by agent A"\n}\n\nexport function beta() {\n  return "beta"\n}\n`,
+		)
+		commitInWorktree(wtA, "feat: agent-a modifies alpha")
+
+		// Agent B modifies only beta(), leaving alpha() byte-identical to base
+		writeFileToWorktree(
+			wtB,
+			"src/utils.ts",
+			`export function alpha() {\n  return "alpha"\n}\n\nexport function beta() {\n  return "modified by agent B"\n}\n`,
+		)
+		commitInWorktree(wtB, "feat: agent-b modifies beta")
+
+		// structural-check should NOT report same-file conflict (disjoint ownable nodes)
+		const checkRes = await post(fixture, `/tx/${txId}/structural-check`, {
+			sub_tx_ids: ["agent-a", "agent-b"],
+		})
+		expect(checkRes.status).toBe(200)
+		const checkBody = await checkRes.json()
+		expect(checkBody.sameFileConflicts.length, "disjoint function edits must not be flagged").toBe(0)
+
+		// merge-pipeline should merge both successfully
+		const pipelineRes = await post(fixture, `/tx/${txId}/merge-pipeline`, {
+			sub_tx_ids: ["agent-a", "agent-b"],
+		})
+		expect(pipelineRes.status).toBe(200)
+		const pipelineBody = await pipelineRes.json()
+		expect(pipelineBody.merged, "both sub-txs should merge").toBe(2)
+		expect(pipelineBody.rolled_back, "no rollbacks expected").toBe(0)
+	})
+
+	it("T7b: same-function edits in same TS file ARE still flagged as conflicts", async () => {
+		const { tx_id: txId } = await beginTransaction(fixture)
+
+		const { worktree_path: wtA } = await beginSubTransaction(fixture, txId, "agent-a")
+		const { worktree_path: wtB } = await beginSubTransaction(fixture, txId, "agent-b")
+
+		// Both agents modify alpha()
+		writeFileToWorktree(
+			wtA,
+			"src/utils.ts",
+			`export function alpha() {\n  return "agent A version"\n}\n\nexport function beta() {\n  return "beta"\n}\n`,
+		)
+		commitInWorktree(wtA, "feat: agent-a modifies alpha")
+
+		writeFileToWorktree(
+			wtB,
+			"src/utils.ts",
+			`export function alpha() {\n  return "agent B version"\n}\n\nexport function beta() {\n  return "beta"\n}\n`,
+		)
+		commitInWorktree(wtB, "feat: agent-b also modifies alpha")
+
+		const checkRes = await post(fixture, `/tx/${txId}/structural-check`, {
+			sub_tx_ids: ["agent-a", "agent-b"],
+		})
+		expect(checkRes.status).toBe(200)
+		const checkBody = await checkRes.json()
+		expect(checkBody.hasConflicts, "same-function conflict must remain").toBe(true)
+		expect(checkBody.sameFileConflicts.length).toBeGreaterThan(0)
+	})
+
+	it("T7c: non-TS same-file overlap is conservatively flagged as conflict", async () => {
+		const { tx_id: txId } = await beginTransaction(fixture)
+
+		const { worktree_path: wtA } = await beginSubTransaction(fixture, txId, "agent-a")
+		const { worktree_path: wtB } = await beginSubTransaction(fixture, txId, "agent-b")
+
+		// Both agents modify a JSON config file — no AST refinement possible
+		writeFileToWorktree(wtA, "data/config.json", '{"key": "agent A value"}\n')
+		commitInWorktree(wtA, "feat: agent-a modifies config")
+
+		writeFileToWorktree(wtB, "data/config.json", '{"key": "agent B value"}\n')
+		commitInWorktree(wtB, "feat: agent-b modifies config")
+
+		const checkRes = await post(fixture, `/tx/${txId}/structural-check`, {
+			sub_tx_ids: ["agent-a", "agent-b"],
+		})
+		expect(checkRes.status).toBe(200)
+		const checkBody = await checkRes.json()
+		expect(checkBody.hasConflicts, "non-TS same-file must still conflict").toBe(true)
+		expect(checkBody.sameFileConflicts.length).toBeGreaterThan(0)
 	})
 })
 
