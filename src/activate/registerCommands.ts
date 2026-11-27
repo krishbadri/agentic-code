@@ -18,6 +18,8 @@ import { MdmService } from "../services/mdm/MdmService"
 import { t } from "../i18n"
 import { checkpointSaveManual } from "../core/checkpoints"
 import { rollbackToCheckpointManual } from "../core/checkpoints"
+import { cpErrorMessage, getCpPort, isTransactionalModeEnabled } from "../core/control-plane/client"
+import * as cpTx from "../core/control-plane/tx"
 
 /**
  * Helper to get the visible ClineProvider instance or log if not found.
@@ -248,12 +250,10 @@ const getCommandsMap = ({ context, outputChannel, provider }: RegisterCommandOpt
 
 			const provider = task.providerRef.deref()
 			const globalStorageDir = provider?.context?.globalStorageUri?.fsPath
-			const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
+			const cpPort = getCpPort(provider?.context)
 			const txId = provider?.context?.globalState.get<string>("roo.current_tx_id")
 			const cfg = vscode.workspace.getConfiguration()
-			const txMode =
-				cfg.get<boolean>("roo.experimental.transactionalMode") ||
-				cfg.get<boolean>("roo-cline.experimental.transactionalMode")
+			const txMode = isTransactionalModeEnabled(cfg as any)
 
 			// Determine which Git repo to query: transaction branch, shadow repo, or workspace repo
 			let gitRepoDir: string | undefined
@@ -367,7 +367,7 @@ const getCommandsMap = ({ context, outputChannel, provider }: RegisterCommandOpt
 		if (!task) return
 
 		const provider = task.providerRef.deref()
-		const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
+		const cpPort = getCpPort(provider?.context)
 		const txId = await provider?.context?.globalState.get<string>("roo.current_tx_id")
 		const lastError = await provider?.context?.globalState.get<string>("roo.lastError")
 
@@ -383,8 +383,9 @@ const getCommandsMap = ({ context, outputChannel, provider }: RegisterCommandOpt
 				params.set("message", lastError)
 			}
 
-			const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${txId}/suggest-rollback?${params}`)
-			const data = await res.json()
+			const res = await cpTx.suggestRollback(cpPort, txId, params)
+			if (!res.ok) throw new Error(cpErrorMessage(res))
+			const data = res.data
 
 			if (data.suggested) {
 				const choice = await vscode.window.showInformationMessage(

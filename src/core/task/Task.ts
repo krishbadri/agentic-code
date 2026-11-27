@@ -131,6 +131,8 @@ import { Gpt5Metadata, ClineMessageWithMetadata } from "./types"
 import { MessageQueueService } from "../message-queue/MessageQueueService"
 
 import { AutoApprovalHandler } from "./AutoApprovalHandler"
+import { getCpPort } from "../control-plane/client"
+import * as cpTx from "../control-plane/tx"
 
 const MAX_EXPONENTIAL_BACKOFF_SECONDS = 600 // 10 minutes
 const DEFAULT_USAGE_COLLECTION_TIMEOUT_MS = 5000 // 5 seconds
@@ -5165,24 +5167,17 @@ The tools are available and working. Use them now.`,
 		const provider = this.providerRef.deref()
 		if (!provider) return
 
-		const cpPort = provider.context?.globalState.get<number>("roo.cpPort")
+		const cpPort = getCpPort(provider.context)
 		const txId = provider.context?.globalState.get<string>("roo.current_tx_id")
 
 		if (!cpPort || !txId) return
 
 		try {
-			await fetch(`http://127.0.0.1:${cpPort}/tx/${txId}/tool-call`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"X-Actor-Id": "human",
-				},
-				body: JSON.stringify({
-					sub_tx_id: this.subTransactionId,
-					tool_name: toolName,
-					args_json: input,
-					checkpoint_before: checkpointBefore,
-				}),
+			await cpTx.toolCall(cpPort, txId, {
+				sub_tx_id: this.subTransactionId,
+				tool_name: toolName,
+				args_json: input,
+				checkpoint_before: checkpointBefore,
 			})
 		} catch {
 			// Ignore network errors - persistence is best-effort
@@ -5241,25 +5236,18 @@ The tools are available and working. Use them now.`,
 		const provider = this.providerRef.deref()
 		if (!provider) return
 
-		const cpPort = provider.context?.globalState.get<number>("roo.cpPort")
+		const cpPort = getCpPort(provider.context)
 		const txId = provider.context?.globalState.get<string>("roo.current_tx_id")
 
 		if (!cpPort || !txId) return
 
 		try {
-			await fetch(`http://127.0.0.1:${cpPort}/tx/${txId}/model-call`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"X-Actor-Id": "human",
-				},
-				body: JSON.stringify({
-					sub_tx_id: this.subTransactionId,
-					model_id: modelId,
-					prompt_hash: promptHash,
-					message_count: messageCount,
-					duration_ms: durationMs,
-				}),
+			await cpTx.modelCall(cpPort, txId, {
+				sub_tx_id: this.subTransactionId,
+				model_id: modelId,
+				prompt_hash: promptHash,
+				message_count: messageCount,
+				duration_ms: durationMs,
 			})
 		} catch {
 			// Ignore network errors - persistence is best-effort

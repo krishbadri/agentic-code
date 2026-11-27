@@ -14,6 +14,8 @@ import { DIFF_VIEW_URI_SCHEME } from "../../integrations/editor/DiffViewProvider
 
 import { CheckpointServiceOptions, RepoPerTaskCheckpointService } from "../../services/checkpoints"
 import { SubTransactionManager } from "./SubTransactionManager"
+import { cpBaseUrl, cpErrorMessage, getCpPort, isTransactionalModeEnabled } from "../control-plane/client"
+import * as cpTx from "../control-plane/tx"
 
 export async function getCheckpointService(
 	task: Task,
@@ -59,11 +61,8 @@ export async function getCheckpointService(
 		}
 
 		// CHECK: Is transactional mode enabled?
-		const cfg = vscode.workspace.getConfiguration()
-		const txMode =
-			cfg.get<boolean>("roo.experimental.transactionalMode") ||
-			cfg.get<boolean>("roo-cline.experimental.transactionalMode")
-		const cpPort = provider?.context.globalState?.get<number>("roo.cpPort")
+		const txMode = isTransactionalModeEnabled()
+		const cpPort = getCpPort(provider?.context)
 
 		// If transactional mode is enabled and Control-Plane is running, use ControlPlaneCheckpointService
 		if (txMode && cpPort) {
@@ -76,7 +75,7 @@ export async function getCheckpointService(
 					log("[Task#getCheckpointService] No transaction ID, creating new one")
 					// Will be set later when transaction begins
 				}
-				const baseUrl = `http://127.0.0.1:${cpPort}`
+				const baseUrl = cpBaseUrl(cpPort)
 				const cpService = new ControlPlaneCheckpointService(baseUrl, txId || "pending", log)
 				task.checkpointService = cpService as any
 				log("[Task#getCheckpointService] Control-Plane service initialized")
@@ -267,7 +266,7 @@ export async function rollbackToCheckpointManual(task: Task, commitHash: string)
 		throw new Error("Provider context not available")
 	}
 
-	const cpPort = provider.context.globalState.get<number>("roo.cpPort")
+	const cpPort = getCpPort(provider.context)
 	const txId = provider.context.globalState.get<string>("roo.current_tx_id")
 
 	// Try Control-Plane rollback if available
@@ -276,15 +275,9 @@ export async function rollbackToCheckpointManual(task: Task, commitHash: string)
 	// continue to Path 3 to sync the workspace when CP is active.
 	if (cpPort && txId) {
 		try {
-			const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${txId}/rollback`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
-				body: JSON.stringify({ hash: commitHash }),
-				signal: AbortSignal.timeout(15_000),
-			})
+			const res = await cpTx.rollback(cpPort, txId, commitHash)
 			if (!res.ok) {
-				const errorText = await res.text()
-				throw new Error(errorText || `HTTP ${res.status}`)
+				throw new Error(cpErrorMessage(res))
 			}
 			provider?.log?.(
 				`[ControlPlaneRollback] Rolled back CP worktree to ${commitHash}. Will sync workspace via direct git.`,
