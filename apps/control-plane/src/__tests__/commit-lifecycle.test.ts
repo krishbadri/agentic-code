@@ -288,4 +288,18 @@ describe("DB mode (SQLite): ids, history and metrics", () => {
 		expect(st.data.isolation).toBe("fail-fast")
 		expect(st.data.target_branch).toBe("main")
 	})
+
+	it("progress gate works on SQLite (regression: GREATEST() is not a SQLite function)", async () => {
+		createAndCommitFile(f.tmpDir, "run-tests.js", 'console.log("ok 1 - a"); process.exit(0)\n', "runner")
+		const tx = await begin(f, { test_command: "node run-tests.js" })
+		const cp1 = await call(f, "POST", `/tx/${tx.tx_id}/checkpoint`, { reason: "auto" })
+		expect(cp1.status, JSON.stringify(cp1.data)).toBe(201)
+		writeFileToWorktree(tx.worktree_path, "run-tests.js", 'console.log("not ok 1 - a"); process.exit(1)\n')
+		const cp2 = await call(f, "POST", `/tx/${tx.tx_id}/checkpoint`, { reason: "auto" })
+		expect(cp2.status).toBe(403)
+		expect(cp2.data.code).toBe("PROGRESS_VIOLATION")
+		const commit = await call(f, "POST", `/tx/${tx.tx_id}/commit`, {})
+		expect(commit.status, JSON.stringify(commit.data)).toBe(200)
+		expect(commit.data.liveness.passed).toBe(true)
+	})
 })

@@ -1,143 +1,106 @@
-# Spec Compliance Audit: Transaction Agents Spec vs Roo-Code Implementation
+# Spec Compliance Audit: Transaction Agents Spec vs. Implementation
 
-**Date**: 2026-03-02
-**Branch**: `feat/post-edit-quality-gate`
-**Spec**: `docs/transaction_agents_spec.md` v1.0
+**Date**: 2026-11-27
+**Branch**: `fix/make-it-work`
+**Spec**: `docs/transaction_agents_spec.md` (including "Implementation Decisions (2026-11)")
 
----
+This document replaces the 2026-03 audit. That audit described code that existed only in an
+uncommitted working tree (dropped stash `a2b872d48`, preserved as `rescue/stash-0320`). Every
+row below cites:
 
-## Methodology
+1. the **runtime call site**, i.e. code reachable from a normal extension task, not only from CP
+   routes or tests;
+2. the **test** that demonstrates the behaviour.
 
-Every requirement R1–R39, the Clause Interface, and the Structural Conflict Policy were traced to actual code. Each was verified for:
+**Test evidence** (run on this branch):
 
-1. Code existence
-2. Reachability from normal execution
-3. Correct behavior per spec text
+| Suite                | Result                            |
+| -------------------- | --------------------------------- |
+| `apps/control-plane` | 257 passed, 7 skipped             |
+| `src/`               | 3943 passed, 0 failed, 75 skipped |
 
----
+- The 7 skipped CP tests are CooperBench, which needs network access and Python; enable with `CP_COOPERBENCH=1`.
+- `src/core/control-plane/__tests__/cp-contract.integration.spec.ts` drives a real CP server through the extension's own client.
 
-## Results: R1–R9 (Orchestrator + Safety)
+**Verdict scale:**
 
-| ID     | Requirement                                         | Verdict  | Evidence                                                                                                                                                                                                                                                   |
-| ------ | --------------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **R1** | Transaction boundaries MUST be pre-specified        | **PASS** | PlannerAgent generates `Plan` with `SubTransaction[]` before execution. Non-planner tasks get implicit single sub-tx in `initiateTaskLoop()`.                                                                                                              |
-| **R2** | Commit points at end of each boundary               | **PASS** | PlanExecutor: `waitForChildren → runSafetyChecks → mergeWorktrees` per group. Non-planner: `runPostEditQualityGate()` after each file mutation.                                                                                                            |
-| **R3** | Checkpoint at each commit point                     | **PASS** | Pre-edit: `checkpointSaveAndMark()`. Post-edit (R3 FIX): `task.checkpointSave(true)` when quality gate passes. Sub-tx: `endCommit = HEAD` captured.                                                                                                        |
-| **R4** | Check Safety AND Progress at each commit point      | **PASS** | Both checked in `SubTransactionManager.commitSubTransaction()`. With `roo.experimental.txStrictMode=true` (default), progress gate blocks commit when CP unreachable. `safetyClause` or `safetyChecks` required to enable safety gate.                     |
-| **R5** | Commit only if Safety ∧ Progress satisfied          | **PASS** | Conjunction correct when both active. Strict mode (default true) fails closed when CP unreachable — fail-open only in explicit degraded mode.                                                                                                              |
-| **R6** | Liveness at final commit point                      | **PASS** | `attemptCompletionTool.ts:144-214` calls CP `/tx/:tx_id/commit`. With strict mode (default), CP-unreachable blocks completion with error. Degraded mode requires explicit opt-out via `roo.experimental.txStrictMode=false`.                               |
-| **R7** | Rollback on Safety/Progress/Liveness violation      | **PASS** | Safety: `abortSubTransaction()` in SubTransactionManager. Progress: same path. Liveness: `rollbackToCheckpointManual()` in attemptCompletionTool. PlanExecutor: `rollbackFailedSubTransactions()`.                                                         |
-| **R8** | Safety rules MUST be declarative                    | **PASS** | `Clause` type + `ClauseResult` in `packages/types/src/clause.ts`. Recursive evaluator in `apps/control-plane/src/clause-eval.ts`. `/safety-gate` accepts `{ clause: Clause }` or legacy `{ checks: string[] }`. `SubTransaction.safetyClause` field added. |
-| **R9** | Action-safety before tools, state-safety at commits | **PASS** | Action-safety: `checkActionSafety()` in presentAssistantMessage.ts before every mutating tool. State-safety: QualityGate at commit points + CP `/safety-gate`.                                                                                             |
+- **PASS**: implemented, reachable from the runtime, and covered by a test.
+- **PARTIAL**: implemented with a stated limitation.
+- **N/A**: optional (MAY) or not applicable.
 
-### R4/R5/R6 Note: strict mode (default) fails closed
+**Not verified:** there has been no interactive VS Code (F5) end-to-end run. The interactive UX (worktree paths showing in editors while a transaction is open) is untested by automation.
 
-With `roo.experimental.txStrictMode=true` (default), progress and liveness gates fail **closed** when CP is unreachable — commit/completion is blocked. Set to `false` for degraded mode (allows with warning). This prevents silent pass-through when CP is down.
+## Gating defaults
 
----
+| Setting                              | Default | Effect                                           |
+| ------------------------------------ | ------- | ------------------------------------------------ |
+| `roo.experimental.transactionalMode` | `true`  | The CP auto-starts (`src/extension.ts`).         |
+| `roo.experimental.plannerMode`       | `true`  | Multi-agent planning for non-trivial root tasks. |
 
-## Results: R10–R24 (OCC / Concurrent Agents)
+- **CP unavailable at task start:** the task runs single-agent with a warning (`Task.ensureTaskTransaction`).
+- **CP lost while a transaction is open:** mutating tools and the final commit fail closed.
 
-| ID      | Requirement                                    | Verdict     | Evidence                                                                                                                                                                                                                                                                                                               |
-| ------- | ---------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **R10** | Concurrency baseline MUST be OCC               | **PASS**    | PlanExecutor: work in isolated worktrees, detect conflicts at merge.                                                                                                                                                                                                                                                   |
-| **R11** | One agent per task                             | **PASS**    | `spawnChildTasks()` creates one Task per SubTransaction.                                                                                                                                                                                                                                                               |
-| **R12** | Limit fan-out                                  | **PASS**    | `MAX_SUB_TRANSACTIONS = 10` enforced in PlanExecutor + planner prompt.                                                                                                                                                                                                                                                 |
-| **R13** | Isolated worktree/branch per agent             | **PASS**    | `git worktree add -B` per sub-tx via CP `/sub-tx/begin`. Child `cwd` set to worktree path.                                                                                                                                                                                                                             |
-| **R14** | Apply patch locally in worktree                | **PASS**    | `child.skipTransactionalWrites = true`, `cwd = worktreePath`. All writes local to worktree.                                                                                                                                                                                                                            |
-| **R15** | Conflicts identified at merge time             | **PASS**    | `git merge --no-ff` in `mergeSubTx()`. Merge failure detected and surfaced.                                                                                                                                                                                                                                            |
-| **R16** | Structural conflicts beyond Git                | **PARTIAL** | Same-file overlap + import-graph overlap implemented in `structural-conflict.ts`. PlanExecutor now calls `POST /tx/:tx_id/structural-check` before merging (via `checkStructuralConflicts()`). Gap: no AST node-level analysis — all same-file overlap = conflict regardless of whether edited functions are disjoint. |
-| **R17** | Abort/rollback conflicting work                | **PASS**    | `git merge --abort` + `worktree remove --force` + `branch -D` on any merge conflict.                                                                                                                                                                                                                                   |
-| **R18** | Create worktree per agent                      | **PASS**    | Same as R13.                                                                                                                                                                                                                                                                                                           |
-| **R19** | Run agent in worktree                          | **PASS**    | `workspacePath: worktreePath` passed to `createTask()`.                                                                                                                                                                                                                                                                |
-| **R20** | Apply patches locally                          | **PASS**    | Same as R14.                                                                                                                                                                                                                                                                                                           |
-| **R21** | Detect structural conflicts when agents finish | **PASS**    | `checkStructuralConflicts()` in PlanExecutor calls CP `/structural-check` before any merge. Conflicting sub-txs rolled back before `mergeWorktrees()` runs.                                                                                                                                                            |
-| **R22** | Merge no-conflict branches first               | **PARTIAL** | `partitionByConflicts()` in `/merge-pipeline` implements this correctly. PlanExecutor uses individual merges (no full merge-pipeline call) — merge ordering not applied to remaining non-conflicting branches. Acceptable interim state while full merge algorithm is pending.                                         |
-| **R23** | Order conflicted branches by modifications     | **PARTIAL** | `orderByModifications()` in structural-conflict.ts works. Not called by PlanExecutor (same reason as R22 — full merge-pipeline not yet used).                                                                                                                                                                          |
-| **R24** | Rollback on merge failure                      | **PASS**    | Both individual merge path (PlanExecutor) and merge-pipeline path handle rollback correctly.                                                                                                                                                                                                                           |
+## R1–R9: transactions, gates, rollback
 
-### R16/R21/R22/R23 Status: structural pre-check wired, merge ordering pending
+| ID                           | Verdict | Runtime call site                                                                                                                                                                                                                                                                                         | Evidence                                                                                                            |
+| ---------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| R1 boundaries                | PASS    | `Task.ensureTaskTransaction` (`src/core/task/Task.ts`) begins one tx per top-level task; the planner's sub-txs come from `PlanExecutor` via `cpTx.subTxBegin`.                                                                                                                                            | `Task.transaction.spec.ts` (distinct txIds per task); contract spec                                                 |
+| R2 commit point              | PASS    | Final commit: `Task.commitTaskTransaction`, called from `attemptCompletionTool` and the planner success path. Per-edit checkpoints: `presentAssistantMessage` post-edit gate. Per group: `PlanExecutor` → `checkpoint {reason: "plan-group"}`.                                                            | `attemptCompletionTool.spec.ts`, `PlanExecutor.spec.ts`                                                             |
+| R3 checkpoint                | PASS    | Each mutating tool is followed by a CP `/checkpoint`, which commits in the tx worktree. The post-edit hash is recorded.                                                                                                                                                                                   | `QualityGate.spec.ts`, `checkpoint.test.ts`, contract spec                                                          |
+| R4 safety ∧ progress checked | PASS    | Progress: `/checkpoint` runs the tx test command, plus the compile command if one is set. Safety: `PlanExecutor` runs `/safety-gate` with the planner's checks or clause; if neither is given, it uses a default clause from `detectProjectCommands`.                                                     | `txn-pipeline` T3, `occ-acceptance` Scenario 4, `commit-lifecycle` (SQLite progress gate)                           |
+| R5 commit only if both       | PASS    | `/merge-pipeline` rolls back a sub-tx whose gate is missing or failed (`SAFETY_GATE_FAILED`). `/checkpoint` 403s and resets on regression.                                                                                                                                                                | `strict-merge` "safety gate enforcement"                                                                            |
+| R6 liveness at final commit  | PASS    | `/commit` re-runs the tests (exit code and parsed failures) and returns 403 `LIVENESS_FAILED` with a reset. The extension sends a valid body and fails closed on 409/412/5xx or network errors.                                                                                                           | `commit-lifecycle` (liveness with exit 0 but reported failures), `txn-pipeline` T4, `attemptCompletionTool.spec.ts` |
+| R7 rollback on violation     | PASS    | Progress and liveness violations reset to the last good checkpoint (else the tx base) and save a backup ref. Failed sub-txs are rolled back by `PlanExecutor` (explicit id list) and by `/merge-pipeline`.                                                                                                | `commit-lifecycle` rollback tests, `strict-merge`, `PlanExecutor.spec.ts`                                           |
+| R8 safety rules              | PARTIAL | Declarative clauses (`cmd_exits_0`, `test_suite`, `file_exists`, `not/and/or`) have a strict schema. Granularity is the sub-tx / edit boundary. FORALL and metric atoms are expressed as commands (see spec decisions).                                                                                   | `gates.unit.test.ts` (clauses), `strict-merge` (malformed → 400)                                                    |
+| R9 action-safety             | PASS    | `presentAssistantMessage` calls `checkActionSafety` before every mutating tool (`write_to_file`, `apply_diff`, `insert_content`, `search_and_replace`, `execute_command`, `generate_image`). It posts to `/tx/:id/action-safety` and fails closed when the CP is unreachable. Unknown actions are denied. | `actionSafety.spec.ts`, `gates.unit.test.ts` (~60 cases incl. every 2026-11 audit probe), contract spec             |
 
-PlanExecutor now calls `POST /tx/:tx_id/structural-check` (via `checkStructuralConflicts()`) before merging. Conflicting sub-transactions are rolled back before any merge attempt. Individual merges via `POST /tx/:tx_id/sub-tx/:sub_tx_id/merge` are preserved — no full merge-pipeline call yet (intentional: full merge ordering algorithm is pending future work).
+## R10–R30: concurrency (OCC)
 
-Remaining gap (R22/R23): `/merge-pipeline`'s no-conflict-first ordering and modification-based priority are still unreachable from PlanExecutor. This is acceptable interim state — structural conflicts are pre-detected and rolled back, preventing bad merges, but merge ordering is not optimized.
+| ID                               | Verdict | Runtime call site                                                                                                                                                                                       | Evidence                                                           |
+| -------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| R10 OCC                          | PASS    | `PlanExecutor`: one worktree per sub-tx, then `/merge-pipeline`.                                                                                                                                        | `PlanExecutor.spec.ts`, contract spec                              |
+| R11 one agent per task           | PASS    | `Task.spawnChildTasks`                                                                                                                                                                                  | `Task.transaction.spec.ts`                                         |
+| R12 limit fan-out                | PASS    | `PlanExecutor` concurrency cap                                                                                                                                                                          | `PlanExecutor.spec.ts`                                             |
+| R13/R18 isolated worktree        | PASS    | Each sub-tx gets its own worktree. If worktree creation fails, the sub-tx is marked failed and never spawned (`spawnChildTasks` throws without a worktree).                                             | `Task.transaction.spec.ts`, `PlanExecutor.spec.ts`                 |
+| R14/R19/R20 local patching       | PASS    | The task's cwd is its worktree, and writes go directly to the filesystem there.                                                                                                                         | `DiffViewProvider.transactional.spec.ts`                           |
+| R15 detect at merge              | PASS    | `git.mergeSubTx`                                                                                                                                                                                        | `occ-acceptance` Scenario 2                                        |
+| R16 structural conflicts         | PASS    | `analyzeStructuralConflicts` runs inside `/merge-pipeline` and `/sub-tx/:id/merge`. Same-file and dependent-file conflicts are detected (directed import reachability; relative imports in JS/TS only). | `strict-merge` T9a/T9b, `txn-pipeline` T5/T7, `gates.unit.test.ts` |
+| R17 abort/rollback conflicting   | PASS    | A later structurally conflicting sub-tx is rolled back even when git could merge it.                                                                                                                    | `strict-merge` T9a (git-clean README edit rolled back), T9e, T9g   |
+| R21 detect when agents finish    | PASS    | `/merge-pipeline` after `waitForChildren`                                                                                                                                                               | contract spec                                                      |
+| R22 no-conflict first            | PASS    | `planMergeOrder`                                                                                                                                                                                        | `gates.unit.test.ts`, `occ-acceptance` Scenario 3                  |
+| R23 order by modifications       | PASS    | `planMergeOrder`: lines changed descending, id as tie-break.                                                                                                                                            | `occ-acceptance` tie-breaker test, `strict-merge` T9c              |
+| R24 rollback failed merge        | PASS    | `merge --abort` + reset + cleanup                                                                                                                                                                       | `occ-acceptance` R28 test                                          |
+| R25 `worktree add -B`            | PASS    | `git.beginSubTx`                                                                                                                                                                                        | `git.adapter.spec.ts`                                              |
+| R26 `apply --reject`             | PASS    | `git.applyPatch`. Note: the extension now writes files directly rather than via `/apply`.                                                                                                               | `occ-acceptance` R26 tests                                         |
+| R27 `merge --no-ff`              | PASS    | `git.mergeSubTx`                                                                                                                                                                                        | `occ-acceptance`                                                   |
+| R28 abort + remove + `branch -D` | PASS    | `git.cleanupSubTx` / `rollbackSubTx`                                                                                                                                                                    | `txn-pipeline` T2                                                  |
+| R29 pessimistic locking          | N/A     | Optional alternative; not implemented.                                                                                                                                                                  | —                                                                  |
+| R30 no duplicate new files       | PASS    | `writeToFileTool` → `reserveNewFile` against the parent tx before creating a file. `/merge-pipeline` enforces it (`R30_FILE_RESERVED`).                                                                 | `writeToFileTool.spec.ts`, `strict-merge` T9f, `txn-pipeline` T6   |
 
----
+## R31–R39: correctness, progress, action surface
 
-## Results: R25–R28 (Git Operations)
+| ID                                 | Verdict    | Runtime call site                                                                                                                                                                                                                                          | Evidence                                                                   |
+| ---------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| R31/R32 tests are given            | PASS       | Action-safety blocks writes, creation and deletion of test files for every write tool. `/shell/exec` blocks parsed test-file writes before running and reverts any after. `/write` refuses new test files. The only override is the server-side allowlist. | `gates.unit.test.ts`, `strict-merge`, `occ-acceptance` Scenario 10         |
+| R33 progress monotonic             | PASS       | `/checkpoint` with order-independent parsers (Jest, Vitest, pytest, mocha, node:test, TAP, go) and an exit-code fallback.                                                                                                                                  | `gates.unit.test.ts` (parser table), `txn-pipeline` T3, `commit-lifecycle` |
+| R34 termination = all tests pass   | PASS (MAY) | Liveness at `/commit`                                                                                                                                                                                                                                      | `txn-pipeline` T4                                                          |
+| R35/R36 files and dirs             | PASS       | `write_to_file`, `execute_command`                                                                                                                                                                                                                         | —                                                                          |
+| R37 bash with guardrails           | PASS       | All commands, including planner children's, go through `/shell/exec`, which runs action-safety on every parsed simple command (nested shells too). Upstream approval prompts still apply.                                                                  | `executeCommandTool.cp.spec.ts`, `strict-merge` shell tests                |
+| R38 env without permanent override | PARTIAL    | `/shell/exec` env is per call and not persisted. Nothing stops a command from editing shell rc files outside the worktree, except containment rules for paths that action-safety can parse.                                                                | —                                                                          |
+| R39 install deps                   | PASS       | `execute_command`                                                                                                                                                                                                                                          | —                                                                          |
 
-| ID      | Requirement                       | Verdict     | Evidence                                                                                                                                           |
-| ------- | --------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **R25** | `git worktree add -B`             | **PARTIAL** | `beginSubTx()` correctly uses `worktree add -B`. `beginTx()` uses 2-step `git branch` + `git worktree add` (functionally equivalent but not `-B`). |
-| **R26** | `git apply --reject` with .rej    | **PASS**    | `applyPatch()`: `git apply --reject`, .rej file detection, path validation, rollback on partial apply.                                             |
-| **R27** | `git merge --no-ff`               | **PARTIAL** | `mergeSubTx()` correctly uses `--no-ff`. `commitToMain()` uses `--ff-only` (intentional for clean main history but deviates from spec literal).    |
-| **R28** | Rollback: abort + remove + delete | **PASS**    | `abortMerge()`: `git merge --abort`. `cleanupSubTx()`: `worktree remove --force` + `branch -D`. Three-tier rollback verified.                      |
+## Policies
 
----
+| Policy                                             | Verdict | Evidence                                                                                                                                                                                             |
+| -------------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Clause interface                                   | PARTIAL | Six node types (see R8). `gates.unit.test.ts`.                                                                                                                                                       |
+| Structural policy (disjoint AST nodes MAY proceed) | PASS    | Implemented in the merge-base-aware refinement (`txn-pipeline` T7a–T7f). Limited to JS/TS top-level declarations; any uncertainty keeps the conflict.                                                |
+| Rollback semantics                                 | PASS    | Tracked and untracked files are restored, with a backup ref; ignored files are kept; tx processes are killed (`commit-lifecycle` rollback tests). External side effects are not undone (documented). |
+| Replay                                             | PARTIAL | File-level only; commands and model calls are refused (`replay.test.ts`).                                                                                                                            |
 
-## Results: R29–R34 (Isolation, Correctness, Progress)
+## Known limitations
 
-| ID      | Requirement                    | Level  | Verdict  | Evidence                                                                                                                                                                                                                                                                                  |
-| ------- | ------------------------------ | ------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **R29** | Pessimistic locking            | SHOULD | **FAIL** | Not implemented. No locking interface exists.                                                                                                                                                                                                                                             |
-| **R30** | No duplicate new files         | MUST   | **PASS** | `POST /tx/:tx_id/reserve-file` endpoint in CP (Node.js Map — no race). `writeToFileTool.ts` calls reservation before creating any new file in a sub-task. 409 response blocks creation with error directing agent to choose a different path. Reservations cleaned up on commit/rollback. |
-| **R31** | Tests are "given"              | MUST   | **PASS** | `isTestFile()` + write/apply route guards in tx.ts. Test files protected from modification.                                                                                                                                                                                               |
-| **R32** | No new tests by agents         | MUST   | **PASS** | `/apply` blocks all test patches. `writeToFileTool.ts`: `isTestFile()` guard blocks agents (`cline.parentTask`) from creating new test files (`!fileExists`). Existing test file modification is R31's domain (also PASS).                                                                |
-| **R33** | Progress: monotonic test count | SHOULD | **PASS** | `progress-gate.ts`: `isProgressValid(baseline, current)` enforces `current >= baseline`. Multi-framework parser. Rollback on violation.                                                                                                                                                   |
-| **R34** | Termination = all tests pass   | MAY    | **PASS** | Not required. Liveness check effectively covers this when test_command configured.                                                                                                                                                                                                        |
-
----
-
-## Results: R35–R39 (Agent Action Surface)
-
-| ID      | Requirement                         | Verdict     | Evidence                                                                                 |
-| ------- | ----------------------------------- | ----------- | ---------------------------------------------------------------------------------------- |
-| **R35** | Files: add/remove/rename            | **PASS**    | `write_to_file`, `execute_command` (rm, mv).                                             |
-| **R36** | Directories                         | **PASS**    | `execute_command` (mkdir, rmdir, mv).                                                    |
-| **R37** | Bash with guardrails                | **PASS**    | `execute_command` + action-safety blocks dangerous patterns.                             |
-| **R38** | Env vars without permanent override | **PARTIAL** | Env accessible via bash. No mechanism prevents permanent modification of shell profiles. |
-| **R39** | Install dependencies                | **PASS**    | npm/pnpm/yarn whitelisted in bash prefixes.                                              |
-
----
-
-## Results: Clause Interface
-
-| Aspect                                     | Verdict     | Evidence                                                                                                                                                                                                              |
-| ------------------------------------------ | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| BNF grammar (`FORALL`, `AND`, `NOT`, etc.) | **PASS**    | `Clause` discriminated union in `packages/types/src/clause.ts`: `cmd_exits_0`, `test_suite`, `file_exists`, `not`, `and`, `or`. JSON-only (no text parser — sufficient for machine-generated rules).                  |
-| Clause evaluator                           | **PASS**    | `evalClause()` in `apps/control-plane/src/clause-eval.ts`. Recursive, handles all clause types. `/safety-gate` routes to evaluator when `clause` field present; falls back to legacy shell-command loop for `checks`. |
-| Action-time checker inputs                 | **PARTIAL** | Receives tool name + args. Missing: current file contents, touched-file list, pending diff.                                                                                                                           |
-| Commit-time checker inputs                 | **PARTIAL** | Receives test results. Missing: AST edits, tool call metadata (sequence, durations).                                                                                                                                  |
-
----
-
-## Results: Structural Conflict Policy
-
-| Aspect                          | Verdict  | Evidence                                                                               |
-| ------------------------------- | -------- | -------------------------------------------------------------------------------------- |
-| Same-file overlap detection     | **PASS** | `detectConflicts()` in structural-conflict.ts.                                         |
-| Import-graph overlap detection  | **PASS** | `detectDependentFileConflicts()` with regex-based import parsing + transitive closure. |
-| Disjoint AST nodes MAY proceed  | **FAIL** | Not implemented. All same-file overlap = conflict. No AST parsing library used.        |
-| Overlapping nodes MUST conflict | **PASS** | Conservative: all same-file = conflict (superset of spec requirement).                 |
-| PlanExecutor integration        | **FAIL** | PlanExecutor does not call structural check endpoints.                                 |
-
----
-
-## Overall Summary
-
-### By verdict count (39 requirements + 2 special sections)
-
-| Verdict     | Count | Requirements                                                                                                                                          |
-| ----------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **PASS**    | 31    | R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, R13, R14, R15, R17, R18, R19, R20, R21, R24, R26, R28, R30, R31, R32, R33, R34, R35, R36, R37, R39 |
-| **PARTIAL** | 6     | R16, R22, R23, R25, R27, R38                                                                                                                          |
-| **FAIL**    | 2     | R29 (SHOULD), AST-level conflict                                                                                                                      |
-
-### MUST-level failures
-
-All MUST-level requirements now **PASS**. R29 (pessimistic locking) is SHOULD-level. AST-level conflict detection is cosmetic (conservative file-level detection is a superset).
-
-### Remaining items
-
-1. **No merge ordering** (R22/R23): Structural conflicts are pre-checked and conflicting sub-txs rolled back, but no modification-based ordering applied to remaining merges.
-2. **No AST-level conflict resolution**: Conservative file-level detection works but doesn't allow disjoint same-file edits.
+- **No live VS Code run.** There has been no interactive VS Code (F5) end-to-end run against a real model. The extension's CP traffic is covered by the live contract spec, and task logic by unit tests.
+- **Shell analysis is best-effort.** It parses POSIX sh, PowerShell and cmd syntax; a sufficiently obfuscated command can still evade it. The post-exec test-file revert and worktree isolation are the backstop.
+- **Narrow conflict analysis.** Dependent-file analysis follows only relative JS/TS imports; other languages fall back to same-file detection.
+- **Workspace commit outside transactions.** The non-transactional `save_checkpoint` path still makes a git commit in the user's workspace (pre-existing behaviour).

@@ -91,6 +91,8 @@ export class SqlitePool implements DbPool {
 		sql = sql.replace(/\bUUID\b/gi, "TEXT")
 		// Replace BOOLEAN with INTEGER (SQLite uses INTEGER for booleans)
 		sql = sql.replace(/\bBOOLEAN\b/gi, "INTEGER")
+		// GREATEST/LEAST don't exist in SQLite; multi-argument MAX/MIN are the scalar equivalents
+		sql = sql.replace(/\bGREATEST\s*\(/gi, "MAX(").replace(/\bLEAST\s*\(/gi, "MIN(")
 		// Strip PostgreSQL casts (e.g. COUNT(*)::int, ...::float) — SQLite rejects them
 		sql = sql.replace(/::(int|integer|bigint|float|real|double precision|numeric|text)\b/gi, "")
 
