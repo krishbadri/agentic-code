@@ -200,6 +200,11 @@
 				"category": "Roo"
 			},
 			{
+				"command": "roo.discardTransaction",
+				"title": "Discard Transaction",
+				"category": "Roo"
+			},
+			{
 				"command": "roo-cline.rollbackCheckpoint",
 				"title": "Rollback to Checkpoint",
 				"category": "Roo",
@@ -396,6 +401,21 @@
 					"default": "",
 					"description": "Absolute path to the Agentic-Code monorepo root that contains apps/control-plane. Used to launch the Control-Plane."
 				},
+				"roo.controlPlane.testCommand": {
+					"type": "string",
+					"default": "",
+					"description": "Test command the Control-Plane runs for the progress and liveness gates. Empty = auto-detect from package.json / pytest markers."
+				},
+				"roo.commit.strategy": {
+					"type": "string",
+					"enum": [
+						"rebase",
+						"fail-fast",
+						"hybrid"
+					],
+					"default": "rebase",
+					"description": "How a task's transaction is committed to the workspace branch."
+				},
 				"roo.cpPortOverride": {
 					"type": "number",
 					"default": 0,
@@ -403,12 +423,12 @@
 				},
 				"roo.experimental.transactionalMode": {
 					"type": "boolean",
-					"default": false,
-					"description": "Enable Control-Plane transactional mode (routes edits/terminal/checkpoints through local daemon)."
+					"default": true,
+					"description": "Run each task as a Control-Plane transaction in an isolated git worktree; the workspace changes only when the transaction commits. If the Control-Plane is unavailable, tasks run as a single agent with a warning."
 				},
 				"roo-cline.experimental.transactionalMode": {
 					"type": "boolean",
-					"default": false,
+					"default": true,
 					"description": "Alias of roo.experimental.transactionalMode for compatibility."
 				},
 				"roo.experimental.plannerMode": {

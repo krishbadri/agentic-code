@@ -1,4 +1,5 @@
 import { TodoItem } from "@roo-code/types"
+import { TelemetryService } from "@roo-code/telemetry"
 
 import { AttemptCompletionToolUse } from "../../../shared/tools"
 
@@ -407,6 +408,92 @@ describe("attemptCompletionTool", () => {
 			expect(mockPushToolResult).not.toHaveBeenCalledWith(
 				expect.stringContaining("Cannot complete task while there are incomplete todos"),
 			)
+		})
+	})
+
+	describe("transaction commit gate (fail-closed)", () => {
+		beforeEach(() => {
+			if (!TelemetryService.hasInstance()) TelemetryService.createInstance([])
+		})
+
+		const block: AttemptCompletionToolUse = {
+			type: "tool_use",
+			name: "attempt_completion",
+			params: { result: "done" },
+			partial: false,
+		}
+
+		function txTask(outcome: any, extra: Record<string, unknown> = {}) {
+			return {
+				...mockTask,
+				txId: "tx-1",
+				fileMutationOccurred: true,
+				clineMessages: [],
+				commitTaskTransaction: vi.fn().mockResolvedValue(outcome),
+				ensureTaskTransaction: vi.fn().mockResolvedValue(undefined),
+				say: vi.fn().mockResolvedValue(undefined),
+				ask: vi.fn().mockResolvedValue({ response: "yesButtonClicked" }),
+				emit: vi.fn(),
+				getTokenUsage: vi.fn().mockReturnValue({}),
+				toolUsage: {},
+				providerRef: { deref: () => ({ log: vi.fn(), finishSubTask: vi.fn() }) },
+				...extra,
+			} as any
+		}
+
+		const run = (task: any) =>
+			attemptCompletionTool(
+				task,
+				block,
+				mockAskApproval,
+				mockHandleError,
+				mockPushToolResult,
+				mockRemoveClosingTag,
+				mockToolDescription,
+				mockAskFinishSubTaskApproval,
+			)
+
+		it("completes when the commit succeeds", async () => {
+			const task = txTask({ kind: "committed", mergedSha: "abc" })
+			await run(task)
+			expect(task.commitTaskTransaction).toHaveBeenCalledTimes(1)
+			expect(task.say).toHaveBeenCalledWith("completion_result", "done", undefined, false)
+			expect(task.finishedSuccessfully).toBe(true)
+		})
+
+		it.each([
+			[
+				{ kind: "liveness", rollbackTo: "deadbeef00", message: "LIVENESS_FAILED: 2 failing" },
+				/Liveness check failed/,
+			],
+			[{ kind: "conflict", code: "WORKSPACE_DIRTY", message: "dirty", files: ["a.ts"] }, /WORKSPACE_DIRTY/],
+			[{ kind: "error", message: "Control-Plane unreachable" }, /fail-closed/],
+		])("blocks completion on %o", async (outcome, pattern) => {
+			const task = txTask(outcome)
+			await run(task)
+			expect(mockPushToolResult).toHaveBeenCalledWith(expect.stringMatching(pattern))
+			expect(task.say).not.toHaveBeenCalledWith("completion_result", expect.anything(), undefined, false)
+			expect(task.recordToolError).toHaveBeenCalledWith("attempt_completion")
+		})
+
+		it("subtasks never commit", async () => {
+			const parent = { taskId: "p" }
+			const task = txTask({ kind: "error", message: "should not be called" }, { parentTask: parent })
+			mockAskFinishSubTaskApproval.mockResolvedValue(true)
+			await run(task)
+			expect(task.commitTaskTransaction).not.toHaveBeenCalled()
+		})
+
+		it("begins a new transaction when the user gives feedback after a commit", async () => {
+			const task = txTask(
+				{ kind: "committed" },
+				{
+					ask: vi.fn().mockResolvedValue({ response: "messageResponse", text: "more", images: [] }),
+					userMessageContent: [],
+				},
+			)
+			await run(task)
+			expect(task.ensureTaskTransaction).toHaveBeenCalled()
 		})
 	})
 })

@@ -33,14 +33,50 @@ export type QualityGateVerdict =
 
 // ── Project detection ──────────────────────────────────────────────────────
 
-interface ProjectInfo {
+export interface ProjectInfo {
 	type: "python" | "node" | "none"
+	/** Plain test command (text reporter), suitable for the Control-Plane progress/liveness gates. */
 	testCommand: string | null
 	compileCommand: string | null
 }
 
-function detectProject(cwd: string): ProjectInfo {
-	const exists = (name: string) => fs.existsSync(path.join(cwd, name))
+/**
+ * Detect the project's test and compile commands. `package.json` is checked
+ * before Python markers (a JS repo with a `tests/` folder is still a JS repo).
+ */
+export function detectProjectCommands(cwd: string): ProjectInfo {
+	const exists = (name: string) => {
+		try {
+			return fs.existsSync(path.join(cwd, name))
+		} catch {
+			return false
+		}
+	}
+
+	// Node detection
+	if (exists("package.json")) {
+		let testCommand: string | null = null
+
+		try {
+			const pkg = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf-8"))
+			const devDeps = { ...pkg.devDependencies, ...pkg.dependencies }
+			if (devDeps.vitest) {
+				testCommand = "npx vitest run"
+			} else if (devDeps.jest) {
+				testCommand = "npx jest --forceExit"
+			} else if (pkg.scripts?.test && !/no test specified/.test(String(pkg.scripts.test))) {
+				testCommand = "npm test"
+			}
+		} catch {
+			// Malformed package.json — skip test detection
+		}
+
+		const compileCommand = exists("tsconfig.json") ? "npx tsc --noEmit" : null
+
+		if (testCommand || compileCommand) {
+			return { type: "node", testCommand, compileCommand }
+		}
+	}
 
 	// Python detection
 	if (
@@ -57,34 +93,14 @@ function detectProject(cwd: string): ProjectInfo {
 		}
 	}
 
-	// Node detection
-	if (exists("package.json")) {
-		let testCommand: string | null = null
-
-		try {
-			const pkg = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf-8"))
-			const devDeps = { ...pkg.devDependencies, ...pkg.dependencies }
-			if (devDeps.vitest) {
-				testCommand = "npx vitest run --reporter=json"
-			} else if (devDeps.jest) {
-				testCommand = "npx jest --json --forceExit"
-			} else if (pkg.scripts?.test && pkg.scripts.test !== 'echo "Error: no test specified" && exit 1') {
-				testCommand = "npm test"
-			}
-		} catch {
-			// Malformed package.json — skip test detection
-		}
-
-		const compileCommand = exists("tsconfig.json") ? "npx tsc --noEmit" : null
-
-		if (!testCommand && !compileCommand) {
-			return { type: "none", testCommand: null, compileCommand: null }
-		}
-
-		return { type: "node", testCommand, compileCommand }
-	}
-
 	return { type: "none", testCommand: null, compileCommand: null }
+}
+
+/** Local runs use machine-readable reporters where the parser supports them. */
+function localTestCommand(testCommand: string): string {
+	if (testCommand === "npx vitest run") return "npx vitest run --reporter=json"
+	if (testCommand.startsWith("npx jest")) return `${testCommand} --json`
+	return testCommand
 }
 
 // ── Command runner ─────────────────────────────────────────────────────────
@@ -231,7 +247,7 @@ async function collectScore(project: ProjectInfo, cwd: string): Promise<QualityS
 
 	// Run tests
 	if (project.testCommand) {
-		const result = await runCommand(project.testCommand, cwd, 60_000)
+		const result = await runCommand(localTestCommand(project.testCommand), cwd, 60_000)
 		if (result.timedOut) return null // Timeout → skip gate
 
 		let parsed: { passing: number; failing: number; total: number } | null = null
@@ -291,6 +307,22 @@ function getCacheKey(task: Task): string {
 	return task.taskId
 }
 
+const noProjectLogged = new Set<string>()
+
+function logNoProjectOnce(task: Task): void {
+	if (noProjectLogged.has(task.taskId)) return
+	noProjectLogged.add(task.taskId)
+	task.providerRef
+		.deref()
+		?.log?.(`[QualityGate] No test or compile command detected; post-edit quality gate is inactive for this task`)
+}
+
+/** Drop per-task gate state (called from Task.dispose). */
+export function clearQualityGateState(taskId: string): void {
+	stateCache.delete(taskId)
+	noProjectLogged.delete(taskId)
+}
+
 function getState(task: Task): QualityGateState {
 	const key = getCacheKey(task)
 	let state = stateCache.get(key)
@@ -307,8 +339,9 @@ export async function evaluateQualityGate(task: Task, checkpointName: string): P
 	const cwd = task.cwd || getWorkspacePath()
 	if (!cwd) return { action: "skip", reason: "No workspace directory" }
 
-	const project = detectProject(cwd)
+	const project = detectProjectCommands(cwd)
 	if (project.type === "none") {
+		logNoProjectOnce(task)
 		return { action: "skip", reason: "No tests or compile checks detected" }
 	}
 
@@ -403,4 +436,122 @@ export async function executeQualityGateRollback(
 		`Fix the failing tests before attempting another save_checkpoint. ` +
 		`Run the test suite to see current failures.`
 	)
+}
+
+// ── Edit-loop integration ──────────────────────────────────────────────────
+
+/**
+ * Local (non-CP) mode: on the first edit of a task, score the pre-edit state
+ * and record it against the pre-edit checkpoint hash. Later regressions roll
+ * back to this baseline.
+ */
+export async function capturePreEditBaseline(task: Task, hash: string | undefined): Promise<void> {
+	if (task.worktreeTxId || !hash) return
+	const state = getState(task)
+	if (state.checkpoints.length > 0) return
+	const provider = task.providerRef.deref()
+	try {
+		const cwd = task.cwd || getWorkspacePath()
+		if (!cwd) return
+		const project = detectProjectCommands(cwd)
+		if (project.type === "none") {
+			logNoProjectOnce(task)
+			return
+		}
+		const score = await collectScore(project, cwd)
+		if (!score) return
+		recordCheckpointSaved(task, "baseline", hash, score)
+		provider?.log?.(
+			`[QualityGate] Pre-edit baseline ${hash.substring(0, 7)}: ${score.testsPassing}/${score.testsTotal} passing, ` +
+				`compile ${score.compileClean ? "clean" : "BROKEN"}`,
+		)
+	} catch (error) {
+		provider?.log?.(
+			`[QualityGate] Baseline error (non-fatal): ${error instanceof Error ? error.message : String(error)}`,
+		)
+	}
+}
+
+/**
+ * After a file-mutating tool completes.
+ *
+ * - Control-Plane mode: no local test runs. A post-edit CP checkpoint is the
+ *   gate; a 403 PROGRESS_VIOLATION (the CP already rolled back) is reported to
+ *   the model as an automatic rollback.
+ * - Local mode: score the post-edit state; on regression roll back to the last
+ *   good checkpoint (the pre-edit baseline at first), otherwise take a
+ *   POST-edit checkpoint and record its hash as the new good state.
+ */
+export async function runPostEditQualityGate(task: Task): Promise<void> {
+	if (!task.enableCheckpoints) return
+	const provider = task.providerRef.deref()
+
+	try {
+		if (task.worktreeTxId) {
+			const result = await task.checkpointSave(true)
+			const violation = result?.progressViolation
+			if (violation) {
+				task.taskLogger?.logQualityGate(
+					"rollback",
+					violation.currentCount ?? 0,
+					violation.lastCount ?? 0,
+					violation.kind !== "compile",
+					violation.message,
+				)
+				task.currentStreamingDidCheckpoint = false
+				task.userMessageContent.push({
+					type: "text",
+					text:
+						`\n\n⚠️ POST-EDIT QUALITY GATE FAILED — AUTOMATIC ROLLBACK\n` +
+						`The Control-Plane progress gate rejected this edit (${violation.message}).` +
+						(violation.rollbackTo
+							? ` The worktree was rolled back to ${violation.rollbackTo.substring(0, 7)}.`
+							: "") +
+						(typeof violation.currentCount === "number" && typeof violation.lastCount === "number"
+							? ` Passing tests: ${violation.currentCount} (was ${violation.lastCount}).`
+							: "") +
+						`\nRe-read the affected files and fix the regression with a different approach.`,
+				})
+			}
+			return
+		}
+
+		const verdict = await evaluateQualityGate(task, "auto")
+
+		if (verdict.action === "rollback") {
+			task.taskLogger?.logQualityGate(
+				"rollback",
+				verdict.score.testsPassing,
+				verdict.score.testsTotal,
+				verdict.score.compileClean,
+				verdict.reason,
+			)
+			const message = await executeQualityGateRollback(task, verdict)
+			// State was rolled back; the next edit needs a fresh pre-edit snapshot.
+			task.currentStreamingDidCheckpoint = false
+			task.userMessageContent.push({
+				type: "text",
+				text: `\n\n⚠️ POST-EDIT QUALITY GATE FAILED — AUTOMATIC ROLLBACK\n${message}`,
+			})
+		} else if (verdict.action === "save") {
+			task.taskLogger?.logQualityGate(
+				"save",
+				verdict.score.testsPassing,
+				verdict.score.testsTotal,
+				verdict.score.compileClean,
+			)
+			// R3: checkpoint the verified POST-edit state and record that hash.
+			const result = await task.checkpointSave(true)
+			if (result?.hash) {
+				recordCheckpointSaved(task, `auto-${Date.now()}`, result.hash, verdict.score)
+			}
+		} else {
+			task.taskLogger?.logQualityGate("skip", 0, 0, true, verdict.reason)
+		}
+	} catch (error: unknown) {
+		// Non-fatal: quality gate errors must never break tool execution
+		provider?.log?.(
+			`[PostEditQualityGate] Error (non-fatal): ${error instanceof Error ? error.message : String(error)}`,
+		)
+	}
 }

@@ -198,70 +198,8 @@ export class DiffViewProvider {
 		userEdits: string | undefined
 		finalContent: string | undefined
 	}> {
-		// If transactional mode is enabled, route to Control-Plane REST.
-		// Sub-tx children use their own composite tx_id so writes go to the correct worktree.
-		const ownerTask = this.taskRef.deref()
-		const cfg = vscode.workspace.getConfiguration()
-		const transactional =
-			cfg.get<boolean>("roo.experimental.transactionalMode") ||
-			cfg.get<boolean>("roo-cline.experimental.transactionalMode")
-		if (transactional && this.relPath && this.newContent !== undefined) {
-			const txId =
-				ownerTask?.transactionalTxId ||
-				(await vscode.commands.executeCommand<string>("roo.internal.getCurrentTxId"))
-			const port =
-				vscode.workspace.getConfiguration().get<number>("roo.cpPortOverride") ||
-				(await vscode.commands.executeCommand<number>("roo.internal.getCpPort"))
-			if (txId) {
-				// Use apply for diffs (modify) or write for create
-				const isCreate = this.editType === "create"
-				if (isCreate) {
-					if (port) {
-						const res = await fetch(`http://127.0.0.1:${port}/tx/${txId}/write`, {
-							method: "POST",
-							headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
-							body: JSON.stringify({
-								file_path: this.relPath,
-								content_base64: Buffer.from(this.newContent).toString("base64"),
-							}),
-						})
-						if (!res.ok) throw new Error(await res.text())
-						await vscode.commands.executeCommand("roo.internal.recordEdit", {
-							patchBytes: Buffer.byteLength(this.newContent, "utf8"),
-							filePath: this.relPath,
-						})
-						await vscode.commands.executeCommand("roo.internal.maybeAutoCheckpoint")
-						return {
-							newProblemsMessage: undefined,
-							userEdits: this.userEdits,
-							finalContent: this.newContent,
-						}
-					}
-				} else {
-					// Generate unified diff from originalContent -> newContent
-					const patch = formatResponse.createPrettyPatch(
-						this.relPath,
-						this.originalContent || "",
-						this.newContent,
-					)
-					if (port) {
-						const res = await fetch(`http://127.0.0.1:${port}/tx/${txId}/apply`, {
-							method: "POST",
-							headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
-							body: JSON.stringify({ file_path: this.relPath, patch }),
-						})
-						if (!res.ok) throw new Error(await res.text())
-						await vscode.commands.executeCommand("roo.internal.recordEdit", {
-							patchBytes: Buffer.byteLength(patch, "utf8"),
-							filePath: this.relPath,
-						})
-					}
-					await vscode.commands.executeCommand("roo.internal.maybeAutoCheckpoint")
-					return { newProblemsMessage: undefined, userEdits: this.userEdits, finalContent: this.newContent }
-				}
-			}
-		}
-
+		// In transactional mode the task's cwd is its transaction worktree, so
+		// writes land there directly; the workspace changes only on commit.
 		// existing implementation writes to FS; keep as default path
 		if (!this.relPath || !this.newContent || !this.activeDiffEditor) {
 			return { newProblemsMessage: undefined, userEdits: undefined, finalContent: undefined }
@@ -722,50 +660,9 @@ export class DiffViewProvider {
 		userEdits: string | undefined
 		finalContent: string | undefined
 	}> {
-		// Ensure provider state is set even if we early-return via Control-Plane.
-		// Some callers rely on this for tool responses (e.g. pushToolWriteResult) and for marking file edits.
+		// Callers rely on these for tool responses (e.g. pushToolWriteResult).
 		this.relPath = relPath
 		this.newContent = content
-
-		// If transactional mode is enabled, route to Control-Plane REST.
-		// Sub-tx children use their composite tx_id for correct worktree routing.
-		// EXCEPTION: If cwd is already a subtask worktree (.cp/worktrees/), write directly to FS.
-		const ownerTaskDirect = this.taskRef.deref()
-		const isSubtaskWorktree = this.cwd.includes(".cp/worktrees/") || this.cwd.includes(".cp\\worktrees\\")
-
-		const cfg = vscode.workspace.getConfiguration()
-		const transactional =
-			cfg.get<boolean>("roo.experimental.transactionalMode") ||
-			cfg.get<boolean>("roo-cline.experimental.transactionalMode")
-		if (transactional && !isSubtaskWorktree) {
-			const txId =
-				ownerTaskDirect?.transactionalTxId ||
-				(await vscode.commands.executeCommand<string>("roo.internal.getCurrentTxId"))
-			const port =
-				vscode.workspace.getConfiguration().get<number>("roo.cpPortOverride") ||
-				(await vscode.commands.executeCommand<number>("roo.internal.getCpPort"))
-			if (txId) {
-				const res = await fetch(`http://127.0.0.1:${port}/tx/${txId}/write`, {
-					method: "POST",
-					headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
-					body: JSON.stringify({
-						file_path: relPath,
-						content_base64: Buffer.from(content).toString("base64"),
-					}),
-				})
-				if (!res.ok) throw new Error(await res.text())
-				await vscode.commands.executeCommand("roo.internal.recordEdit", {
-					patchBytes: Buffer.byteLength(content, "utf8"),
-					filePath: relPath,
-				})
-				await vscode.commands.executeCommand("roo.internal.maybeAutoCheckpoint")
-
-				// Keep response shape consistent with non-transactional path.
-				this.newProblemsMessage = undefined
-				this.userEdits = undefined
-				return { newProblemsMessage: undefined, userEdits: undefined, finalContent: content }
-			}
-		}
 
 		// existing implementation writes to FS; keep as default path
 		const absolutePath = path.resolve(this.cwd, relPath)

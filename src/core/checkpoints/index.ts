@@ -13,7 +13,8 @@ import { t } from "../../i18n"
 import { DIFF_VIEW_URI_SCHEME } from "../../integrations/editor/DiffViewProvider"
 
 import { CheckpointServiceOptions, RepoPerTaskCheckpointService } from "../../services/checkpoints"
-import { SubTransactionManager } from "./SubTransactionManager"
+import type { CheckpointResult } from "../../services/checkpoints/types"
+import { getCpPort } from "../control-plane/client"
 
 export async function getCheckpointService(
 	task: Task,
@@ -58,34 +59,37 @@ export async function getCheckpointService(
 			return undefined
 		}
 
-		// CHECK: Is transactional mode enabled?
-		const cfg = vscode.workspace.getConfiguration()
-		const txMode =
-			cfg.get<boolean>("roo.experimental.transactionalMode") ||
-			cfg.get<boolean>("roo-cline.experimental.transactionalMode")
-		const cpPort = provider?.context.globalState?.get<number>("roo.cpPort")
-
-		// If transactional mode is enabled and Control-Plane is running, use ControlPlaneCheckpointService
-		if (txMode && cpPort) {
-			try {
-				log(`[Task#getCheckpointService] Using Control-Plane checkpoint service (port ${cpPort})`)
-				// Use the task's own transactionalTxId (composite sub-tx ID) if set,
-				// so checkpoints go to the child's sub-tx worktree, not the parent's.
-				const txId = task.transactionalTxId || provider?.context.globalState?.get<string>("roo.current_tx_id")
-				if (!txId) {
-					log("[Task#getCheckpointService] No transaction ID, creating new one")
-					// Will be set later when transaction begins
-				}
-				const baseUrl = `http://127.0.0.1:${cpPort}`
-				const cpService = new ControlPlaneCheckpointService(baseUrl, txId || "pending", log)
-				task.checkpointService = cpService as any
-				log("[Task#getCheckpointService] Control-Plane service initialized")
-				return cpService as any
-			} catch (err) {
-				log(
-					`[Task#getCheckpointService] Failed to initialize Control-Plane service: ${err.message}, falling back to local`,
-				)
+		// A task that owns (or belongs to) a Control-Plane transaction checkpoints
+		// through the CP, in its own worktree (sub-tx composite id for planner
+		// children). It never silently switches to shadow git.
+		const txId = task.worktreeTxId
+		if (txId) {
+			const cpPort = getCpPort(provider?.context)
+			if (!cpPort) {
+				log(`[Task#getCheckpointService] Transaction ${txId} is open but the Control-Plane port is unknown`)
+				return undefined
 			}
+			log(`[Task#getCheckpointService] Using Control-Plane checkpoint service (port ${cpPort}, tx ${txId})`)
+			const cpService = new ControlPlaneCheckpointService(cpPort, txId, log)
+			cpService.on("checkpoint", ({ toHash, suppressMessage }: { toHash: string; suppressMessage?: boolean }) => {
+				task.taskLogger?.logCheckpoint(task.subTransactionId ?? "", toHash)
+				;(provider as any)?.postMessageToWebview({
+					type: "currentCheckpointUpdated",
+					text: toHash,
+					suppressMessage: !!suppressMessage,
+				})
+				task.say(
+					"checkpoint_saved",
+					toHash,
+					undefined,
+					undefined,
+					{ from: "", to: toHash, suppressMessage: !!suppressMessage },
+					undefined,
+					{ isNonInteractive: true },
+				).catch(() => {})
+			})
+			task.checkpointService = cpService as any
+			return cpService as any
 		}
 
 		// Fallback: use local RepoPerTaskCheckpointService
@@ -135,118 +139,25 @@ export async function getCheckpointService(
 	}
 }
 
-export async function checkpointSaveManual(task: Task, suppressMessage = false) {
-	const provider = task.providerRef.deref()
-	const attemptSave = async () => {
-		const service = await getCheckpointService(task)
-		if (!service) return
-
-		// Checkpoint belongs to current sub-transaction (if exists)
-		const subTxnId = task.currentSubTransaction?.id
-		const message = subTxnId
-			? `Manual checkpoint at ${new Date().toISOString()} (sub-transaction: ${subTxnId})`
-			: `Manual checkpoint at ${new Date().toISOString()}`
-
-		await service.saveCheckpoint(message, {
-			allowEmpty: true,
-			suppressMessage,
-		})
-	}
-
-	try {
-		await attemptSave()
-	} catch (error: any) {
-		const message = error?.message || String(error)
-		const errorCode = error?.code || error?.cause?.code || ""
-		const isControlPlaneFailure =
-			message.includes("spawn git ENOENT") ||
-			message.includes('"code":"DENIED"') ||
-			message.includes("fetch failed") ||
-			errorCode === "ECONNREFUSED" ||
-			errorCode === "ENOTFOUND"
-
-		if (isControlPlaneFailure) {
-			provider?.log?.(`[Checkpoint] Control-Plane checkpoint failed (${message}); falling back to local Git.`)
-
-			try {
-				await provider?.context?.globalState.update("roo.cpPort", undefined)
-			} catch {}
-
-			task.checkpointService = undefined
-			task.checkpointServiceInitializing = false
-
-			try {
-				await attemptSave()
-				return
-			} catch (fallbackError) {
-				console.error("[checkpointSaveManual] fallback failed", fallbackError)
-				throw fallbackError
-			}
+export async function checkpointSaveManual(task: Task, suppressMessage = false): Promise<CheckpointSaveResult> {
+	const service = await getCheckpointService(task)
+	if (!service) {
+		if (task.worktreeTxId) {
+			throw new Error(`Control-Plane checkpoint unavailable for transaction ${task.worktreeTxId}`)
 		}
-
-		console.error("[checkpointSaveManual]", error)
-		throw error
+		return {}
 	}
+	const result = (await service.saveCheckpoint(`Manual checkpoint at ${new Date().toISOString()}`, {
+		allowEmpty: true,
+		suppressMessage,
+	})) as (CheckpointResult & { progressViolation?: ProgressViolation }) | undefined
+	return { hash: result?.commit || undefined, progressViolation: result?.progressViolation }
 }
 
-/**
- * Verify rollback succeeded by checking expected state
- * @param task The Task instance
- * @param commitHash The commit hash we rolled back to
- */
-async function verifyRollbackState(task: Task, commitHash: string): Promise<void> {
-	const workspaceDir = task.cwd || getWorkspacePath()
-	if (!workspaceDir) {
-		throw new Error("Workspace directory not found for verification")
-	}
-
-	const simpleGit = (await import("simple-git")).default
-	const git = simpleGit(workspaceDir, { binary: "git" })
-	const fs = await import("fs/promises")
-	const path = await import("path")
-
-	// Verify 1: HEAD is at the correct commit
-	const currentHead = await git.revparse(["HEAD"])
-	if (!currentHead.startsWith(commitHash.substring(0, 7))) {
-		throw new Error(
-			`Rollback verification failed: HEAD is ${currentHead.substring(0, 7)} but expected ${commitHash.substring(0, 7)}`,
-		)
-	}
-
-	// Verify 2: ROLLBACK_SENTINEL.txt check (only relevant for torture test)
-	if (process.env.TEST_TORTURE_REPO === "1") {
-		const sentinelPath = path.join(workspaceDir, "ROLLBACK_SENTINEL.txt")
-		try {
-			await fs.access(sentinelPath)
-			throw new Error(
-				`Rollback verification failed: ROLLBACK_SENTINEL.txt still exists after rollback. ` +
-					`This indicates the rollback did not restore the checkpoint state correctly.`,
-			)
-		} catch (e: any) {
-			if (e.code !== "ENOENT") {
-				// File exists but we got a different error - this is bad
-				throw e
-			}
-			// ENOENT means file doesn't exist - this is what we want
-		}
-	}
-
-	// Verify 3: No uncommitted changes (should be clean after rollback)
-	const status = await git.status()
-	if (status.files.length > 0) {
-		const provider = task.providerRef.deref()
-		provider?.log?.(
-			`[RollbackVerification] Warning: ${status.files.length} uncommitted changes after rollback: ${status.files.map((f) => f.path).join(", ")}`,
-		)
-		// Don't throw - some uncommitted changes might be expected in certain scenarios
-	}
-
-	const provider = task.providerRef.deref()
-	provider?.log?.(
-		`[RollbackVerification] ✓ HEAD at ${currentHead.substring(0, 7)}, ` +
-			`✓ ROLLBACK_SENTINEL.txt removed, ` +
-			`✓ Working tree status: ${status.files.length} files`,
-	)
+/** True when `dir` is a Control-Plane transaction worktree (never the user's workspace). */
+export function isControlPlaneWorktree(dir: string | undefined): boolean {
+	if (!dir) return false
+	return /[\\/]\.cp[\\/]worktrees[\\/]/.test(dir.replace(/[\\/]+$/, "") + "/")
 }
 
 /**
@@ -255,108 +166,47 @@ async function verifyRollbackState(task: Task, commitHash: string): Promise<void
  * Rollback affects ONLY SystemState (repo/files); AgentState (chat history, tool calls, API history)
  * is preserved for debugging, replay, and informed retries.
  *
- * This separation is critical - we treat rollback as a system-state operation;
- * agent state is preserved to support replay, debugging, and informed retries.
+ * One path: the task's checkpoint service restores the checkpoint (for a
+ * transaction this is exactly one CP `/rollback` call on the task's worktree).
+ * A direct `git reset --hard` is only allowed inside a CP worktree — never in
+ * the user's workspace. Throws on failure.
  */
 export async function rollbackToCheckpointManual(task: Task, commitHash: string) {
 	if (!commitHash) throw new Error("commit hash required")
 
-	// Get context from provider, not task (task.context might be undefined)
 	const provider = task.providerRef.deref()
-	if (!provider || !provider.context) {
-		throw new Error("Provider context not available")
-	}
+	const service = await getCheckpointService(task)
 
-	const cpPort = provider.context.globalState.get<number>("roo.cpPort")
-	const txId = provider.context.globalState.get<string>("roo.current_tx_id")
-
-	// Try Control-Plane rollback if available
-	// CP rollback resets the WORKTREE only — workspace still needs syncing via Path 3.
-	// So we use CP rollback as a "best effort" for worktree consistency but always
-	// continue to Path 3 to sync the workspace when CP is active.
-	if (cpPort && txId) {
+	if (service && typeof service.restoreCheckpoint === "function") {
 		try {
-			const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${txId}/rollback`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
-				body: JSON.stringify({ hash: commitHash }),
-				signal: AbortSignal.timeout(15_000),
-			})
-			if (!res.ok) {
-				const errorText = await res.text()
-				throw new Error(errorText || `HTTP ${res.status}`)
-			}
-			provider?.log?.(
-				`[ControlPlaneRollback] Rolled back CP worktree to ${commitHash}. Will sync workspace via direct git.`,
-			)
-			// Don't return — fall through to Path 3 to sync workspace files.
-			// CP only resets the worktree; the workspace repo still needs git reset --hard.
-		} catch (e: any) {
-			provider?.log?.(`[ControlPlaneRollback] failed: ${e.message || e}. Continuing to fallback paths.`)
-		}
-	}
-
-	// Fallback: use checkpoint service's restore method (handles shadow repos correctly)
-	// This restores SystemState (repo) only; AgentState is preserved
-	try {
-		const service = await getCheckpointService(task)
-		if (service && typeof service.restoreCheckpoint === "function") {
 			await service.restoreCheckpoint(commitHash)
-			provider?.log?.(
-				`[CheckpointServiceRollback] Successfully rolled back SystemState to ${commitHash} (AgentState preserved)`,
-			)
-			provider?.postMessageToWebview({
-				type: "currentCheckpointUpdated",
-				text: commitHash,
-			})
-
-			// For ControlPlaneCheckpointService, restoreCheckpoint only resets the CP
-			// worktree — the workspace still needs to be synced. Fall through to
-			// Path 3 (direct git reset on workspace) which handles that because
-			// CP worktrees share the object database with the workspace repo.
-			const isCpService = service instanceof ControlPlaneCheckpointService
-			if (isCpService) {
-				provider?.log?.(`[CheckpointServiceRollback] CP worktree restored. Falling through to sync workspace.`)
-			} else {
-				// Shadow/local service: restoreCheckpoint already restored workspace
-				// files directly (shadow repo has core.worktree = workspace).
-				// Do NOT verify workspace git HEAD — the checkpoint hash exists in
-				// the shadow repo's git, not the workspace's own .git, so HEAD
-				// will never match. The files ARE correct.
-				provider?.log?.(`[CheckpointServiceRollback] Shadow service restored workspace files successfully.`)
-				return
-			}
+		} catch (e: any) {
+			throw new Error(`Failed to rollback to ${commitHash}: ${e?.message || e}`)
 		}
-	} catch (e: any) {
-		provider?.log?.(`[CheckpointServiceRollback] failed: ${e.message || e}, trying direct git`)
+		provider?.log?.(`[Rollback] Restored SystemState to ${commitHash} (AgentState preserved)`)
+		provider?.postMessageToWebview({ type: "currentCheckpointUpdated", text: commitHash })
+		return
 	}
 
-	// Last resort: direct Git operations (for workspace repo only)
-	// This restores SystemState (repo) only; AgentState is preserved
-	const workspaceDir = task.cwd || getWorkspacePath()
-	if (!workspaceDir) {
-		throw new Error("Workspace directory not found")
+	// No checkpoint service. Only a CP worktree may be reset directly.
+	const dir = task.cwd
+	if (!isControlPlaneWorktree(dir)) {
+		throw new Error(
+			"Failed to rollback: no checkpoint service is available, and a direct git reset is only allowed " +
+				"inside a Control-Plane worktree (refusing to reset the workspace)",
+		)
 	}
 
 	const simpleGit = (await import("simple-git")).default
-	const git = simpleGit(workspaceDir, { binary: "git" })
-
+	const git = simpleGit(dir, { binary: "git" })
 	try {
 		await git.revparse([commitHash])
-		await git.clean("f", ["-d", "-f"])
 		await git.reset(["--hard", commitHash])
-		provider?.log?.(
-			`[DirectGitRollback] Successfully rolled back SystemState to ${commitHash} (AgentState preserved)`,
-		)
-		provider?.postMessageToWebview({
-			type: "currentCheckpointUpdated",
-			text: commitHash,
-		})
-
-		// Verify rollback succeeded
-		await verifyRollbackState(task, commitHash)
+		await git.clean("f", ["-d"])
+		provider?.log?.(`[DirectGitRollback] Reset worktree ${dir} to ${commitHash} (AgentState preserved)`)
+		provider?.postMessageToWebview({ type: "currentCheckpointUpdated", text: commitHash })
 	} catch (e: any) {
-		throw new Error(`Failed to rollback: ${e.message || e}`)
+		throw new Error(`Failed to rollback: ${e?.message || e}`)
 	}
 }
 
@@ -395,6 +245,7 @@ async function checkGitInstallation(
 
 		service.on("checkpoint", ({ fromHash: from, toHash: to, suppressMessage }) => {
 			try {
+				task.taskLogger?.logCheckpoint(task.subTransactionId ?? "", to)
 				// Always update the current checkpoint hash in the webview, including the suppress flag
 				provider?.postMessageToWebview({
 					type: "currentCheckpointUpdated",
@@ -439,64 +290,47 @@ async function checkGitInstallation(
 	}
 }
 
-export async function checkpointSave(task: Task, force = false, suppressMessage = false) {
+export interface ProgressViolation {
+	kind?: "tests" | "compile" | string
+	rollbackTo?: string
+	currentCount?: number
+	lastCount?: number
+	message: string
+}
+
+export interface CheckpointSaveResult {
+	hash?: string
+	/** Set when the Control-Plane progress gate rejected the checkpoint and rolled back. */
+	progressViolation?: ProgressViolation
+}
+
+export async function checkpointSave(
+	task: Task,
+	force = false,
+	suppressMessage = false,
+): Promise<CheckpointSaveResult> {
 	const service = await getCheckpointService(task)
 
 	if (!service) {
-		return
+		return {}
 	}
 
 	TelemetryService.instance.captureCheckpointCreated(task.taskId)
 
-	// Checkpoint belongs to current sub-transaction (if exists)
-	const subTxnId = task.currentSubTransaction?.id
-	const message = subTxnId
-		? `Task: ${task.taskId}, Time: ${Date.now()} (sub-transaction: ${subTxnId})`
-		: `Task: ${task.taskId}, Time: ${Date.now()}`
-
-	const attemptSave = async () => {
-		const svc = await getCheckpointService(task)
-		if (!svc) return
-		await svc.saveCheckpoint(message, { allowEmpty: force, suppressMessage })
-	}
-
-	// Start the checkpoint process in the background with CP fallback.
+	const message = `Task: ${task.taskId}, Time: ${Date.now()}`
 	try {
-		await attemptSave()
+		const result = (await service.saveCheckpoint(message, { allowEmpty: force, suppressMessage })) as
+			| (CheckpointResult & { progressViolation?: ProgressViolation })
+			| undefined
+		return { hash: result?.commit || undefined, progressViolation: result?.progressViolation }
 	} catch (err: any) {
-		const errMsg = err?.message || String(err)
-		const errorCode = err?.code || err?.cause?.code || ""
-		const isControlPlaneFailure =
-			errMsg.includes("spawn git ENOENT") ||
-			errMsg.includes('"code":"DENIED"') ||
-			errMsg.includes("fetch failed") ||
-			errorCode === "ECONNREFUSED" ||
-			errorCode === "ENOTFOUND"
-
-		if (isControlPlaneFailure) {
-			// Control-Plane failed (git not on CP's PATH, etc.) - fall back to local Git.
-			// Do NOT disable enableCheckpoints - the tools should remain available.
-			console.warn("[Task#checkpointSave] Control-Plane failed, falling back to local Git:", errMsg)
-			try {
-				const provider = task.providerRef.deref()
-				await provider?.context?.globalState.update("roo.cpPort", undefined)
-			} catch {}
-			task.checkpointService = undefined
-			task.checkpointServiceInitializing = false
-			try {
-				await attemptSave()
-				return
-			} catch (fallbackErr) {
-				// Local git fallback also failed - log but DON'T disable checkpoint tools.
-				// The save_checkpoint / rollback_to_checkpoint tools can still be invoked explicitly.
-				console.error("[Task#checkpointSave] fallback also failed:", fallbackErr)
-			}
-		} else {
-			// Non-CP error - log but don't disable tools for transient errors
-			console.error("[Task#checkpointSave] caught unexpected error:", err)
-			const provider = task.providerRef.deref()
-			provider?.log(`[Checkpoint] Save failed: ${err?.message || err}. Continuing without checkpoint.`)
-		}
+		// A task that owns a transaction never clears roo.cpPort or silently switches
+		// to shadow git; the failure is logged and the caller continues without a hash.
+		const provider = task.providerRef.deref()
+		provider?.log(
+			`[Checkpoint] Save failed${task.worktreeTxId ? ` (tx ${task.worktreeTxId})` : ""}: ${err?.message || err}`,
+		)
+		return {}
 	}
 }
 
@@ -617,43 +451,4 @@ export async function checkpointDiff(task: Task, { ts, previousCommitHash, commi
 		provider?.log("[checkpointDiff] disabling checkpoints for this task")
 		task.enableCheckpoints = false
 	}
-}
-
-/**
- * Commit the current sub-transaction
- *
- * Runs safety checks, sets endCheckpoint, and marks as committed.
- * This corresponds to commit point C_i in the transaction model.
- *
- * After commit, a new sub-transaction can be created for subsequent work.
- */
-export async function commitSubTransaction(task: Task): Promise<void> {
-	const manager = new SubTransactionManager(task)
-	const currentSubTxn = manager.getCurrentSubTransaction()
-
-	if (!currentSubTxn) {
-		throw new Error("No active sub-transaction to commit")
-	}
-
-	await manager.commitSubTransaction(currentSubTxn)
-}
-
-/**
- * Abort the current sub-transaction
- *
- * Rolls back to baseCheckpoint and marks as aborted.
- * This corresponds to rolling back to C_{i-1} on failure.
- *
- * SystemState is restored to baseCheckpoint; AgentState is preserved.
- * After abort, a new sub-transaction can be created for subsequent work.
- */
-export async function abortSubTransaction(task: Task): Promise<void> {
-	const manager = new SubTransactionManager(task)
-	const currentSubTxn = manager.getCurrentSubTransaction()
-
-	if (!currentSubTxn) {
-		throw new Error("No active sub-transaction to abort")
-	}
-
-	await manager.abortSubTransaction(currentSubTxn)
 }

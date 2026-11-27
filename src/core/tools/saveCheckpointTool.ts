@@ -1,7 +1,7 @@
 import { Task } from "../task/Task"
 import type { ToolUse, AskApproval, HandleError, PushToolResult, RemoveClosingTag } from "../../shared/tools"
 import { formatResponse } from "../prompts/responses"
-import { getCheckpointService } from "../checkpoints"
+import { checkpointSaveManual, getCheckpointService } from "../checkpoints"
 import {
 	evaluateQualityGate,
 	recordCheckpointSaved,
@@ -62,9 +62,10 @@ export async function saveCheckpointTool(
 		}
 
 		// Quality gate: run tests/compile and block save if quality regressed
+		// (In Control-Plane mode the CP progress gate on /checkpoint is the gate: no local tests.)
 		let verdict: QualityGateVerdict = { action: "skip", reason: "not evaluated" }
 		try {
-			verdict = await evaluateQualityGate(task, name)
+			if (!task.worktreeTxId) verdict = await evaluateQualityGate(task, name)
 		} catch (qgErr: unknown) {
 			const provider = task.providerRef.deref()
 			provider?.log?.(
@@ -81,23 +82,24 @@ export async function saveCheckpointTool(
 		const { getWorkspacePath } = await import("../../utils/path")
 		let hash: string | undefined
 
-		if (task.transactionalTxId || task.skipTransactionalWrites) {
-			// Sub-tx children: commit their worktree (task.cwd) directly.
-			// The worktree IS the isolated sub-tx workspace; commits go to
-			// the sub-tx branch and are accessible from the workspace via
-			// the shared git object store.
-			const workspaceDir = task.cwd || getWorkspacePath()
-			if (!workspaceDir) {
-				pushToolResult(formatResponse.toolError("Workspace directory not found for checkpoint."))
+		if (task.worktreeTxId) {
+			// Transaction mode (top-level tx or sub-tx child): checkpoint through the
+			// Control-Plane on this task's own worktree, subject to its progress gate.
+			const result = await checkpointSaveManual(task, true)
+			if (result.progressViolation) {
+				const v = result.progressViolation
+				pushToolResult(
+					formatResponse.toolError(
+						`Checkpoint "${name}" rejected by the progress gate: ${v.message}.` +
+							(v.rollbackTo ? ` The worktree was rolled back to ${v.rollbackTo.substring(0, 7)}.` : "") +
+							" Fix the regression before saving a checkpoint.",
+					),
+				)
 				return
 			}
-			const simpleGit = (await import("simple-git")).default
-			const git = simpleGit(workspaceDir, { binary: "git" })
-			await git.add(["-A"])
-			const wsResult = await git.commit(`Checkpoint: ${name}`, { "--allow-empty": null })
-			hash = wsResult.commit || undefined
+			hash = result.hash
 		} else {
-			// Normal path: use checkpoint service (CP or shadow)
+			// No transaction: local shadow checkpoint service
 			const service = await getCheckpointService(task)
 			if (!service) {
 				pushToolResult(
