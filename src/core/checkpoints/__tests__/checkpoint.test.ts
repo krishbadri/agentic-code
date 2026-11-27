@@ -1,7 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { Task } from "../../task/Task"
 import { ClineProvider } from "../../webview/ClineProvider"
-import { checkpointSave, checkpointRestore, checkpointDiff, getCheckpointService } from "../index"
+import {
+	checkpointSave,
+	checkpointRestore,
+	checkpointDiff,
+	getCheckpointService,
+	rollbackToCheckpointManual,
+} from "../index"
+import { ControlPlaneCheckpointService } from "../../../services/checkpoints/ControlPlaneCheckpointService"
 import * as vscode from "vscode"
 
 // Mock vscode
@@ -140,8 +147,8 @@ describe("Checkpoint functionality", () => {
 
 			const result = await checkpointSave(taskWithNoService, true)
 
-			// Result should be undefined
-			expect(result).toBeUndefined()
+			// No service → empty result
+			expect(result).toEqual({})
 
 			// saveCheckpoint should not have been called
 			expect(mockCheckpointService.saveCheckpoint).not.toHaveBeenCalled()
@@ -186,7 +193,7 @@ describe("Checkpoint functionality", () => {
 
 			// Non-Control-Plane errors are logged but do not disable checkpoints,
 			// so the tools remain available for subsequent explicit invocations.
-			expect(result).toBeUndefined()
+			expect(result).toEqual({})
 			expect(mockTask.enableCheckpoints).toBe(true)
 		})
 	})
@@ -428,6 +435,109 @@ describe("Checkpoint functionality", () => {
 
 			expect(service).toBeUndefined()
 			expect(mockTask.enableCheckpoints).toBe(false)
+		})
+	})
+
+	describe("Control-Plane transaction mode", () => {
+		const fetchMock = vi.fn()
+
+		beforeEach(() => {
+			fetchMock.mockReset()
+			vi.stubGlobal("fetch", fetchMock)
+			mockProvider.context.globalState = { get: vi.fn((k: string) => (k === "roo.cpPort" ? 4000 : undefined)) }
+			mockTask.cwd = "/test/workspace"
+		})
+
+		afterEach(() => {
+			vi.unstubAllGlobals()
+		})
+
+		const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status })
+
+		it("uses a CP service bound to the task's own tx id (never 'pending')", async () => {
+			mockTask.checkpointService = undefined
+			mockTask.worktreeTxId = "tx-1_sub_st1"
+			const service: any = await getCheckpointService(mockTask)
+			expect(service).toBeInstanceOf(ControlPlaneCheckpointService)
+			expect(service.txId).toBe("tx-1_sub_st1")
+		})
+
+		it("without a tx the shadow service is used", async () => {
+			mockTask.checkpointService = undefined
+			mockTask.worktreeTxId = undefined
+			const service = await getCheckpointService(mockTask)
+			expect(service).toBe(mockCheckpointService)
+		})
+
+		it("rollback makes exactly one /rollback call and never resets the workspace", async () => {
+			mockTask.checkpointService = undefined
+			mockTask.worktreeTxId = "tx-1"
+			mockTask.cwd = "/test/workspace/.cp/worktrees/tx_tx-1"
+			fetchMock.mockResolvedValue(json(200, { rolled_back_to: "abc1234" }))
+
+			await rollbackToCheckpointManual(mockTask, "abc1234")
+
+			expect(fetchMock).toHaveBeenCalledTimes(1)
+			const [url, init] = fetchMock.mock.calls[0]
+			expect(url).toBe("http://127.0.0.1:4000/tx/tx-1/rollback")
+			expect(JSON.parse(init.body)).toEqual({ hash: "abc1234" })
+		})
+
+		it("rollback throws when the CP rejects it", async () => {
+			mockTask.checkpointService = undefined
+			mockTask.worktreeTxId = "tx-1"
+			fetchMock.mockResolvedValue(json(400, { code: "VALIDATION_ERROR", message: "bad hash" }))
+			await expect(rollbackToCheckpointManual(mockTask, "zzz")).rejects.toThrow(/bad hash/)
+			expect(fetchMock).toHaveBeenCalledTimes(1)
+		})
+
+		it("refuses a direct git reset outside a CP worktree", async () => {
+			mockTask.enableCheckpoints = false
+			mockTask.checkpointService = undefined
+			mockTask.worktreeTxId = undefined
+			mockTask.cwd = "/test/workspace"
+			await expect(rollbackToCheckpointManual(mockTask, "abc1234")).rejects.toThrow(
+				/refusing to reset the workspace/,
+			)
+		})
+
+		it("checkpointSave returns the hash, or the progress violation on 403", async () => {
+			mockTask.checkpointService = undefined
+			mockTask.worktreeTxId = "tx-1"
+			fetchMock.mockResolvedValueOnce(json(201, { commit_sha: "c0ffee1" }))
+			expect(await checkpointSave(mockTask, true)).toEqual({ hash: "c0ffee1", progressViolation: undefined })
+
+			fetchMock.mockResolvedValueOnce(
+				json(403, {
+					code: "PROGRESS_VIOLATION",
+					message: "passing tests decreased",
+					kind: "tests",
+					rollback_to: "base000",
+					current_count: 3,
+					last_checkpoint_count: 5,
+				}),
+			)
+			const res = await checkpointSave(mockTask, true)
+			expect(res.hash).toBeUndefined()
+			expect(res.progressViolation).toMatchObject({
+				kind: "tests",
+				rollbackTo: "base000",
+				currentCount: 3,
+				lastCount: 5,
+			})
+		})
+
+		it("a CP failure while the task owns a tx does not clear roo.cpPort or fall back to shadow git", async () => {
+			mockTask.checkpointService = undefined
+			mockTask.worktreeTxId = "tx-1"
+			mockProvider.context.globalState.update = vi.fn()
+			fetchMock.mockRejectedValue(new TypeError("fetch failed"))
+			const checkpointsModule = await import("../../../services/checkpoints")
+			vi.mocked(checkpointsModule.RepoPerTaskCheckpointService.create).mockClear()
+
+			expect(await checkpointSave(mockTask, true)).toEqual({})
+			expect(mockProvider.context.globalState.update).not.toHaveBeenCalled()
+			expect(vi.mocked(checkpointsModule.RepoPerTaskCheckpointService.create)).not.toHaveBeenCalled()
 		})
 	})
 })

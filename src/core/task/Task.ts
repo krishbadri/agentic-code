@@ -141,7 +141,7 @@ import {
 	isTransactionalModeEnabled,
 	waitForControlPlane,
 } from "../control-plane/client"
-import { detectProjectCommands } from "../checkpoints/QualityGate"
+import { clearQualityGateState, detectProjectCommands } from "../checkpoints/QualityGate"
 import * as cpTx from "../control-plane/tx"
 
 /** Result of committing a task's Control-Plane transaction. */
@@ -346,10 +346,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	enableCheckpoints: boolean
 	checkpointService?: RepoPerTaskCheckpointService
 	checkpointServiceInitializing = false
-
-	// Sub-Transactions (semantic units of atomicity)
-	currentSubTransaction?: import("../checkpoints/types").SubTransaction
-	subTransactions: import("../checkpoints/types").SubTransaction[] = []
 
 	// Optional structured task logger for sub-transaction events
 	taskLogger?: {
@@ -2820,6 +2816,7 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 
 		// Clean up condense guard for this task
 		clearCondenseGuard(this.taskId)
+		clearQualityGateState(this.taskId)
 
 		// Dispose message queue and remove event listeners.
 		try {
@@ -3588,33 +3585,8 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 		// Kicks off the checkpoints initialization process in the background.
 		const checkpointServicePromise = getCheckpointService(this)
 
-		// Initialize sub-transaction once checkpoint service is ready
-		checkpointServicePromise
-			.then(async (service) => {
-				if (service && this.enableCheckpoints) {
-					try {
-						const { SubTransactionManager } = await import("../checkpoints/SubTransactionManager")
-						const manager = new SubTransactionManager(this)
-
-						// Get current HEAD as baseCheckpoint
-						const simpleGit = (await import("simple-git")).default
-						const workspaceDir = this.cwd || getWorkspacePath()
-						if (workspaceDir) {
-							const git = simpleGit(workspaceDir, { binary: "git" })
-							const baseCheckpoint = await git.revparse(["HEAD"])
-							await manager.createSubTransaction(baseCheckpoint)
-						}
-					} catch (error) {
-						const provider = this.providerRef.deref()
-						provider?.log(
-							`[Task#initiateTaskLoop] Failed to initialize sub-transaction: ${error instanceof Error ? error.message : String(error)}`,
-						)
-					}
-				}
-			})
-			.catch(() => {
-				// Ignore errors - checkpoint service may not be available
-			})
+		// Kick off checkpoint service initialization (CP-backed when the task owns a transaction).
+		void checkpointServicePromise.catch(() => {})
 
 		let nextUserContent = userContent
 		let includeFileDetails = true
