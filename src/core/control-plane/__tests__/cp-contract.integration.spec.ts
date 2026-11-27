@@ -221,7 +221,10 @@ describe("extension ⇄ control-plane contract (live server)", () => {
 			total_duration_ms: 3000,
 			wall_clock_ms: 1500,
 		})
-		expect(m.status).toBe(201)
+		// Metrics are stored in the database. Without one (e.g. no native SQLite binding on
+		// this machine) the server runs DB-less and must say so rather than pretend.
+		const hasDb = (await cp.health(port)).data.db !== "none"
+		expect(m.status).toBe(hasDb ? 201 : 503)
 
 		expect((await cp.abort(port, parent, "done")).ok).toBe(true)
 		expect((await cp.getTx(port, parent)).data.status).toBe("aborted")
