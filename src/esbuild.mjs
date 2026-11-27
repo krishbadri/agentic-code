@@ -44,7 +44,7 @@ async function main() {
 	fs.mkdirSync(webviewBuildDir, { recursive: true })
 	const webviewIndexPath = path.join(webviewBuildDir, "index.html")
 	// Check if real webview index.html exists from React build, if not create a fallback
-	const realWebviewPath = path.join(__dirname, "..", "webview-ui", "build", "index.html")
+	const realWebviewPath = path.join(srcDir, "webview-ui", "build", "index.html")
 	if (fs.existsSync(realWebviewPath)) {
 		// Copy the real React-built index.html
 		const realWebviewContent = fs.readFileSync(realWebviewPath, "utf-8")
@@ -75,7 +75,10 @@ async function main() {
 							["../.env", ".env", { optional: true }],
 							["node_modules/vscode-material-icons/generated", "assets/vscode-material-icons"],
 							["../webview-ui/audio", "webview-ui/audio"],
-							["../webview-ui/build", "webview-ui/build"],
+							// NOTE: the webview is built by Vite straight into src/webview-ui/build
+							// (webview-ui/vite.config.ts). Do not copy ../webview-ui/build here: that
+							// directory is not a build output, and copying it replaced the fresh build
+							// with whatever stale files happened to be there (and failed on a clean checkout).
 						],
 						srcDir,
 						buildDir,
