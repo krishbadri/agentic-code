@@ -181,6 +181,10 @@ export interface TaskOptions extends CreateTaskOptions {
 	onCreated?: (task: Task) => void
 	initialTodos?: TodoItem[]
 	workspacePath?: string
+	/** Planner children: `<parent>_sub_<rel>` id of the child's sub-tx worktree. */
+	transactionalTxId?: string
+	/** Planner children: the plan's sub-transaction id. */
+	subTransactionId?: string
 }
 
 export class Task extends EventEmitter<TaskEvents> implements TaskLike {
@@ -445,8 +449,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		onCreated,
 		initialTodos,
 		workspacePath,
+		transactionalTxId,
+		subTransactionId,
 	}: TaskOptions) {
 		super()
+		this.transactionalTxId = transactionalTxId
+		this.subTransactionId = subTransactionId
 
 		// Torture runs prioritize determinism and robustness over surgical diffs.
 		// In practice, models frequently misformat apply_diff (leading to loops/timeouts).
@@ -3137,11 +3145,19 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 	 */
 	public async spawnChildTasks(plan: {
 		subTransactions: import("@roo-code/types").SubTransaction[]
-		worktreePaths?: Map<string, string> // subTxId → worktree path (pre-created)
+		/** subTxId → pre-created CP worktree. Every sub-transaction MUST have one (R13). */
+		worktrees: Map<string, { path: string; txId: string }>
 	}): Promise<Task[]> {
 		const provider = this.providerRef.deref()
 		if (!provider) {
 			throw new Error("Provider not available")
+		}
+		// R13: a sub-transaction never runs outside its own isolated worktree.
+		const missing = plan.subTransactions.filter((stx) => !plan.worktrees.get(stx.id))
+		if (missing.length > 0) {
+			throw new Error(
+				`Cannot spawn sub-transaction(s) without a worktree: ${missing.map((stx) => stx.id).join(", ")}`,
+			)
 		}
 
 		const children: Task[] = []
@@ -3164,7 +3180,8 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 				}
 
 				// Resolve the worktree path for this sub-transaction (if pre-created)
-				const worktreePath = plan.worktreePaths?.get(subTx.id)
+				const worktree = plan.worktrees.get(subTx.id)!
+				const worktreePath = worktree.path
 
 				// VALIDATION: Check that file targets from plan steps actually exist
 				// Validate against the worktree path if available, otherwise parent's cwd
@@ -3217,13 +3234,18 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 					this, // parent
 					{
 						initialTodos: [],
-						...(worktreePath && { workspacePath: worktreePath }),
+						workspacePath: worktreePath,
+						// Set at construction so the very first tool call / checkpoint
+						// already addresses the child's own sub-tx worktree.
+						transactionalTxId: worktree.txId,
+						subTransactionId: subTx.id,
 					} as any,
 				)
 				if (child) {
-					// Set agent type and sub-transaction ID
 					child.agentType = subTx.agentType
 					child.subTransactionId = subTx.id
+					child.transactionalTxId = worktree.txId
+					child.worktreePath = worktreePath
 
 					// CRITICAL: Override mode for planner-spawned subtasks.
 					// The child inherits the parent's mode via initializeTaskMode()

@@ -392,3 +392,12 @@ describe("Task transaction lifecycle (EXT-2)", () => {
 		)
 	})
 })
+
+describe("Task.spawnChildTasks (R13)", () => {
+	it("refuses to spawn a sub-transaction without a worktree", async () => {
+		const { task } = makeTask()
+		await expect(
+			task.spawnChildTasks({ subTransactions: [{ id: "st1", prompt: "x" } as any], worktrees: new Map() }),
+		).rejects.toThrow(/without a worktree: st1/)
+	})
+})
