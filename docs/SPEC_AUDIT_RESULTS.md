@@ -113,10 +113,14 @@ gates, merge pipeline and commit. No API key is needed and the run is determinis
 | Progress gate                                          | An edit that breaks a passing test is rolled back automatically and never reaches the workspace.                                                       |
 | Planner: different functions of one file               | Two parallel sub-agents in separate sub-transaction worktrees; both edits merge (AST-disjoint) and are committed.                                      |
 | Planner: same function                                 | The later sub-transaction is rolled back (`STRUCTURAL_CONFLICT`), the plan fails, nothing is committed and the transaction is discarded.               |
+| Cancel → resume                                        | The cancelled task keeps its transaction and worktree; the resumed task re-attaches to the same transaction and commits the earlier work.              |
 | Control-Plane lost mid-task                            | Completion fails closed (nothing committed); the next task runs single-agent with the visible warning.                                                 |
 
 `pnpm --filter @roo-code/vscode-e2e test:cp:real` runs a two-task smoke test with a real model
-(`cp-real-model.test.ts`, OpenRouter key from the repo-root `.env`).
+(`cp-real-model.test.ts`, OpenRouter key from the repo-root `.env`; `CP_REAL_MODEL_ID` overrides the model). Last
+run: both tasks passed with `nvidia/nemotron-3-ultra-550b-a55b:free` — a single-agent edit committed through its
+transaction, and a planned task whose two parallel sub-agents edited different functions of one file and were
+merged and committed.
 
 Bugs this suite found that unit and contract tests could not:
 
@@ -133,6 +137,16 @@ Bugs this suite found that unit and contract tests could not:
 - A test runner that finds no tests (pytest exit 5, jest/vitest "no tests found") blocked every commit. An empty
   suite now passes liveness vacuously; a suite that is already red at the base commit is reported when the
   transaction begins and named in the commit refusal.
+
+- Cancel → resume opened a new transaction and orphaned the earlier work: the resumed task saved its history
+  record (without the transaction id) before re-attaching. The recorded id is now kept until re-attachment.
+- A failure to _produce_ a plan (model error, unparsable answer) stopped the task and discarded the transaction.
+  Nothing has run at that point, so the task now continues as a single agent in the same transaction.
+- With a real model, sub-agents wrapped `write_to_file` parameters in `<args><file>…` (copying the `read_file`
+  example in their prompt) and every write failed with "no target path". The prompt now shows both shapes and the
+  wrapper is unwrapped for tools that do not take `args` (`unwrapArgs.spec.ts`).
+- A task whose folder is not the one the Control-Plane manages (multi-root workspace, workspace override) now runs
+  without a transaction instead of transacting in the other repository.
 
 ## Known limitations
 

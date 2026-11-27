@@ -47,7 +47,10 @@ vi.mock("vscode", () => {
 	}
 })
 
-const cpState = vi.hoisted(() => ({ port: undefined as number | undefined }))
+const cpState = vi.hoisted(() => ({
+	port: undefined as number | undefined,
+	managesTaskFolder: undefined as boolean | undefined,
+}))
 
 vi.mock("../../control-plane/client", async (importOriginal) => {
 	const actual = (await importOriginal()) as Record<string, any>
@@ -55,6 +58,7 @@ vi.mock("../../control-plane/client", async (importOriginal) => {
 		...actual,
 		waitForControlPlane: vi.fn(async () => cpState.port),
 		getCpPort: vi.fn(() => cpState.port),
+		isCpHealthy: vi.fn(async () => cpState.managesTaskFolder !== false),
 		isTransactionalModeEnabled: vi.fn(() => true),
 		isPlannerModeEnabled: vi.fn(() => true),
 	}
@@ -188,6 +192,24 @@ describe("Task planner fallback (EXT-1)", () => {
 		expect(saidTexts(say).some((t) => t.includes("executing as single agent"))).toBe(true)
 	})
 
+	it("runs without a transaction when the Control-Plane manages a different folder", async () => {
+		// e.g. a multi-root workspace: transacting there would commit to the wrong repository.
+		cpState.port = 4000
+		cpState.managesTaskFolder = false
+		try {
+			const { task, say, loop } = makeTask()
+			await (task as any).startTask(COMPLEX_TASK)
+
+			expect(cpTx.begin).not.toHaveBeenCalled()
+			expect(task.txId).toBeUndefined()
+			expect(planner.generatePlan).not.toHaveBeenCalled()
+			expect(loop).toHaveBeenCalledTimes(1)
+			expect(saidTexts(say).some((t) => t.includes("manages a different one"))).toBe(true)
+		} finally {
+			cpState.managesTaskFolder = undefined
+		}
+	})
+
 	it("skips the planner when auto-approval would not let sub-agents read and write", async () => {
 		// Sub-agents run in the background and cannot prompt: without auto-approve the task
 		// runs as one interactive agent (still inside its transaction).
@@ -204,6 +226,20 @@ describe("Task planner fallback (EXT-1)", () => {
 				true,
 			)
 		}
+	})
+
+	it("a failure to produce a plan continues as a single agent inside the same transaction", async () => {
+		cpState.port = 4000
+		planner.generatePlan.mockRejectedValue(new Error("Failed to generate plan: 404 model unavailable"))
+		const { task, say, loop } = makeTask()
+		await (task as any).startTask(COMPLEX_TASK)
+
+		expect(planner.executePlan).not.toHaveBeenCalled()
+		expect(loop).toHaveBeenCalledTimes(1)
+		expect(task.txId).toBe("tx-1")
+		expect(cpTx.abort).not.toHaveBeenCalled()
+		expect(task.finishedSuccessfully).toBeFalsy()
+		expect(saidTexts(say).some((t) => t.includes("continuing as a single agent"))).toBe(true)
 	})
 
 	it("any other planner error stops the task", async () => {
@@ -367,6 +403,15 @@ describe("Task transaction lifecycle (EXT-2)", () => {
 		expect(cpTx.begin).not.toHaveBeenCalled()
 		expect(task.txId).toBe("tx-old")
 		expect(task.cwd).toBe("/ws/.cp/worktrees/tx_old")
+	})
+
+	it("a resumed task that saves before re-attaching keeps the recorded transaction id", async () => {
+		// The resume prompt is saved to history before the transaction is re-attached. Saving
+		// without the id orphaned the open transaction (found by the VS Code e2e suite).
+		const { task, provider } = makeTask(makeProvider(), { historyItem, task: undefined })
+		await (task as any).saveClineMessages()
+		const saved = provider.updateTaskHistory.mock.calls.at(-1)?.[0]
+		expect(saved?.txId).toBe("tx-old")
 	})
 
 	it("resume begins a new transaction when the recorded one is no longer active", async () => {

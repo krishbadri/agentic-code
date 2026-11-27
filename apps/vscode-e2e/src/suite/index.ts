@@ -32,12 +32,14 @@ export async function run() {
 		if (isCpReal) {
 			// Real-model smoke test: OpenRouter key/model from the repo-root .env.
 			if (!process.env.OPENROUTER_API_KEY) throw new Error("TEST_CP_REAL=1 needs OPENROUTER_API_KEY")
+			// CP_REAL_MODEL_ID overrides the model for this smoke test only.
+			const realModel = process.env.CP_REAL_MODEL_ID || process.env.OPENROUTER_MODEL_ID || "openai/gpt-4.1-mini"
 			await api.setConfiguration({
 				apiProvider: "openrouter" as const,
 				openRouterApiKey: process.env.OPENROUTER_API_KEY,
-				openRouterModelId: process.env.OPENROUTER_MODEL_ID || "openai/gpt-4.1-mini",
+				openRouterModelId: realModel,
 			})
-			console.log(`[cp-real] model: ${process.env.OPENROUTER_MODEL_ID || "openai/gpt-4.1-mini"}`)
+			console.log(`[cp-real] model: ${realModel}`)
 		} else {
 			const { startMockLlm } = await import("./cp/mock-llm")
 			const mock = await startMockLlm()

@@ -138,6 +138,7 @@ import {
 	getConfiguredTestCommand,
 	getCpPort,
 	isControlPlaneUnavailableError,
+	isCpHealthy,
 	isPlannerModeEnabled,
 	isTransactionalModeEnabled,
 	waitForControlPlane,
@@ -855,7 +856,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				globalStoragePath: this.globalStoragePath,
 				workspace: this.historyWorkspace,
 				mode: this._taskMode || defaultModeSlug, // Use the task's own mode, not the current provider mode.
-				txId: this.txId,
+				// Until a resumed task has re-attached, keep the recorded id: saving without it
+				// would orphan the open transaction and its uncommitted work.
+				txId: this.txId ?? this.resumeTxId,
 			})
 
 			if (hasTokenUsageChanged(tokenUsage, this.tokenUsageSnapshot)) {
@@ -2379,6 +2382,9 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 		}
 
 		if (plannerMode && task && !isSimpleRequest && plannerCpAvailable && plannerApprovalsOk) {
+			// Until the plan starts executing nothing has been changed, so a failure to
+			// *produce* a plan (model error, unparsable answer) is recoverable.
+			let planExecutionStarted = false
 			try {
 				const { PlannerAgent, shouldOpenCircuitBreaker } = await import("../planner/PlannerAgent")
 				const { PlanExecutor } = await import("../planner/PlanExecutor")
@@ -2459,6 +2465,7 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 						// Fall through to normal execution below
 					} else {
 						const executor = new PlanExecutor(this)
+						planExecutionStarted = true
 						const result = await executor.executePlan(plan)
 
 						if (result.success) {
@@ -2541,6 +2548,11 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 						"text",
 						`⚠ Control-Plane unavailable during planning (${errorMessage}); executing as single agent.`,
 					)
+				} else if (!planExecutionStarted) {
+					// No plan was produced, so nothing ran: keep the transaction and let the
+					// normal single-agent loop do the work (it has the regular retry UI if the
+					// model itself is the problem).
+					await this.say("text", `⚠ Planning failed (${errorMessage}); continuing as a single agent.`)
 				} else {
 					await this.abortTaskTransaction(`planner failed: ${errorMessage}`)
 					await this.say(
@@ -3181,6 +3193,14 @@ DO NOT invent your own API - match the existing interface EXACTLY.
   </file>
 </args>
 </read_file>
+Only read_file uses <args>. Every other tool takes its parameters directly, for example:
+<write_to_file>
+<path>path/to/file</path>
+<content>
+full file content
+</content>
+<line_count>3</line_count>
+</write_to_file>
 Do NOT ask the user for permission or file contents. Do NOT delegate via new_task or switch_mode — complete the work directly.`
 
 		// If file targets are provided from steps, add them as helpful context
@@ -3496,6 +3516,24 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 			if (!this.cpUnavailableWarned) {
 				this.cpUnavailableWarned = true
 				await this.say("text", "⚠ Control-Plane unavailable; executing as single agent.")
+			}
+			return undefined
+		}
+
+		// The server manages exactly one repository. If this task works in another folder
+		// (multi-root workspace, workspace override) a transaction would edit — and commit
+		// to — the wrong repository.
+		if (!(await isCpHealthy(port, 2_000, this.cwd))) {
+			provider.log(
+				`[Task#ensureTaskTransaction] Control-Plane on port ${port} does not manage ${this.cwd}; ` +
+					`running without a transaction`,
+			)
+			if (!this.cpUnavailableWarned) {
+				this.cpUnavailableWarned = true
+				await this.say(
+					"text",
+					"⚠ Control-Plane unavailable for this folder (it manages a different one); executing as single agent.",
+				)
 			}
 			return undefined
 		}

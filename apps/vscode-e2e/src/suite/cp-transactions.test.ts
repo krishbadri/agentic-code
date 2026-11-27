@@ -271,6 +271,60 @@ const TASK_CONFIG = {
 		assert.deepStrictEqual(worktrees(), [], "the failed transaction was discarded")
 	})
 
+	test("cancel → resume keeps the same transaction and its uncommitted work", async () => {
+		let release!: () => void
+		const held = new Promise<void>((r) => (release = r))
+		let holding = true
+		mock.script("scenario:resume", [
+			tool.write("notes/resume.txt", "written before the cancel"),
+			async () => {
+				if (holding) await held // the request that is in flight when the user cancels
+				return tool.done("Created notes/resume.txt")
+			},
+		])
+
+		const api = globalThis.api
+		const headBefore = git("rev-parse", "HEAD")
+		const taskId = await api.startNewTask({
+			configuration: TASK_CONFIG as any,
+			text: "[[scenario:resume]] Create the file notes/resume.txt in this project containing a short note.",
+		})
+		await waitFor(() => mock.requestsFor("scenario:resume").some((r) => r.turn >= 1), {
+			timeout: 120_000,
+			interval: 100,
+		})
+		const [txBefore] = [...txIdsSeen("scenario:resume")]
+		assert.ok(txBefore, "the task ran inside a transaction before the cancel")
+
+		await api.cancelCurrentTask()
+		await sleep(3000)
+		assert.strictEqual(exists("notes/resume.txt"), false, "cancelling does not commit")
+		assert.ok(worktrees().includes(txBefore!), "cancelling does not discard the transaction")
+		assert.ok(fs.existsSync(path.join(ws, ".cp", "worktrees", txBefore!, "notes", "resume.txt")))
+
+		holding = false
+		release()
+		completed.delete(taskId)
+		const seenBeforeResume = mock.requestsFor("scenario:resume").length
+		await api.resumeTask(taskId)
+		await sleep(1500)
+		await api.pressPrimaryButton() // "Resume Task"
+		await waitFor(() => completed.has(taskId), { timeout: 180_000, interval: 100 })
+		await sleep(500)
+
+		const after = mock.requestsFor("scenario:resume").slice(seenBeforeResume)
+		assert.ok(after.length > 0, "the resumed task talked to the model again")
+		assert.deepStrictEqual(
+			[...txIdsSeen("scenario:resume")],
+			[txBefore],
+			"resume re-attached to the same transaction",
+		)
+		assert.strictEqual(read("notes/resume.txt").trim(), "written before the cancel")
+		assert.notStrictEqual(git("rev-parse", "HEAD"), headBefore)
+		assert.strictEqual(git("status", "--porcelain"), "")
+		assert.deepStrictEqual(worktrees(), [])
+	})
+
 	test("Control-Plane lost mid-task: completion fails closed; the next task runs single-agent with a warning", async () => {
 		const port = await vscode.commands.executeCommand<number>("roo.internal.getCpPort")
 		const { pid } = (await (await fetch(`http://127.0.0.1:${port}/health`)).json()) as any

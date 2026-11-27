@@ -43,6 +43,7 @@ import { experiments, EXPERIMENT_IDS } from "../../shared/experiments"
 import { applyDiffToolLegacy } from "../tools/applyDiffTool"
 import { capturePreEditBaseline, runPostEditQualityGate } from "../checkpoints/QualityGate"
 import { ACTION_SAFETY_TOOLS, checkActionSafety } from "../control-plane/actionSafety"
+import { unwrapArgsParam } from "./unwrapArgs"
 
 /**
  * Processes and presents assistant message content to the user interface.
@@ -566,6 +567,11 @@ export async function presentAssistantMessage(cline: Task) {
 			// Logging: Track tool execution
 			if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
 				provider.log(`[presentAssistantMessage] Executing tool: ${block.name}, Partial: ${block.partial}`)
+			}
+
+			// Some models wrap every tool's parameters in <args> (the read_file shape).
+			if (!block.partial && unwrapArgsParam(block) && provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
+				provider.log(`[presentAssistantMessage] Unwrapped <args> for ${block.name}`)
 			}
 
 			// R9: action-safety is checked by the Control-Plane BEFORE a mutating tool
