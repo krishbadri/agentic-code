@@ -42,6 +42,7 @@ import { codebaseSearchTool } from "../tools/codebaseSearchTool"
 import { experiments, EXPERIMENT_IDS } from "../../shared/experiments"
 import { applyDiffToolLegacy } from "../tools/applyDiffTool"
 import { capturePreEditBaseline, runPostEditQualityGate } from "../checkpoints/QualityGate"
+import { ACTION_SAFETY_TOOLS, checkActionSafety } from "../control-plane/actionSafety"
 
 /**
  * Processes and presents assistant message content to the user interface.
@@ -565,6 +566,32 @@ export async function presentAssistantMessage(cline: Task) {
 			// Logging: Track tool execution
 			if (provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
 				provider.log(`[presentAssistantMessage] Executing tool: ${block.name}, Partial: ${block.partial}`)
+			}
+
+			// R9: action-safety is checked by the Control-Plane BEFORE a mutating tool
+			// executes (distinct from state-safety, which is checked at commit points).
+			if (!block.partial && ACTION_SAFETY_TOOLS.has(block.name)) {
+				const verdict = await checkActionSafety(cline, block)
+				if (!verdict.allowed) {
+					// Partial streaming may already have opened/edited a diff view: undo it.
+					try {
+						if (cline.diffViewProvider.isEditing) {
+							await cline.diffViewProvider.revertChanges()
+						}
+						await cline.diffViewProvider.reset()
+					} catch (error) {
+						provider?.log(`[presentAssistantMessage] Failed to revert blocked edit: ${error}`)
+					}
+					cline.consecutiveMistakeCount++
+					cline.recordToolError(block.name as ToolName, verdict.reason)
+					pushToolResult(
+						formatResponse.toolError(
+							`Action blocked by safety policy: ${verdict.reason}\n` +
+								"This action was prevented before execution. Try a different approach.",
+						),
+					)
+					break
+				}
 			}
 
 			switch (block.name) {

@@ -22,6 +22,10 @@ import { TerminalRegistry } from "../../integrations/terminal/TerminalRegistry"
 import { Terminal } from "../../integrations/terminal/Terminal"
 import { Package } from "../../shared/package"
 import { t } from "../../i18n"
+import { getShell } from "../../utils/shell"
+import { cpErrorMessage, getCpPort } from "../control-plane/client"
+import * as cpTx from "../control-plane/tx"
+import { toCwdRel } from "../control-plane/actionSafety"
 
 class ShellIntegrationError extends Error {}
 
@@ -207,62 +211,88 @@ export async function executeCommandTool(
 			}
 
 			try {
-				// Transactional terminal gating: route via Control-Plane when enabled
-				const cfg = vscode.workspace.getConfiguration()
-				const transactional =
-					cfg.get<boolean>("roo.experimental.transactionalMode") ||
-					cfg.get<boolean>("roo-cline.experimental.transactionalMode")
-
-				if (transactional && !task.skipTransactionalWrites) {
-					const txId = await vscode.commands.executeCommand<string>("roo.internal.getCurrentTxId")
-					const provider = task.providerRef.deref()
-					const port = provider?.context?.globalState.get<number>("roo.cpPort")
-					if (txId) {
-						if (!port) {
-							// CP not running; fall through to local execution
-						} else {
-							const args = ["bash", "-lc", command]
-							const res = await fetch(`http://127.0.0.1:${port}/shell/exec/${txId}`, {
-								method: "POST",
-								headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
-								body: JSON.stringify({
-									cmd: args[0],
-									args: args.slice(1),
-									cwd_rel: "",
-									timeout_ms: commandExecutionTimeout || 600000,
-								}),
-							})
-							const body = await res.json().catch(() => ({}))
-							const stdout = Buffer.from(body.stdout_base64 || "", "base64").toString("utf8")
-							const stderr = Buffer.from(body.stderr_base64 || "", "base64").toString("utf8")
-							const rawOutput = [stdout, stderr].filter(Boolean).join("\n")
-							// Payload control: compress large outputs to avoid "request too large" errors
-							let output = rawOutput
-							if (rawOutput && rawOutput.length > 0) {
-								const compressed = Terminal.compressTerminalOutput(
-									rawOutput,
-									terminalOutputLineLimit,
-									terminalOutputCharacterLimit,
-								)
-								if (isStage2 && rawOutput.length > 12_000) {
-									// Save full output to file, pass summary + path
-									const outPath = path.join(task.cwd || "", ".roo-output.txt")
-									try {
-										await fs.writeFile(outPath, rawOutput, "utf8")
-										const exitHint =
-											body.exit_code !== undefined ? ` Exit code: ${body.exit_code}.` : ""
-										output = `${compressed}\n\n[Full output saved to .roo-output.txt]${exitHint}`
-									} catch {
-										output = compressed
-									}
-								} else {
-									output = compressed
-								}
+				// Transactional mode: every command of a task inside a transaction (top-level
+				// or planner child) runs through the Control-Plane in that task's worktree, so
+				// it is safety-checked (R9/R31/R32/R37) and its processes are tracked. An
+				// unreachable CP never degrades to a silent local run.
+				const shellTxId = task.worktreeTxId
+				if (shellTxId) {
+					const cpPort = getCpPort(task.providerRef.deref()?.context)
+					if (!cpPort) {
+						pushToolResult(
+							formatResponse.toolError(
+								"The Control-Plane is unavailable, so the command was NOT run (fail-closed: commands " +
+									"inside a transaction must run through the Control-Plane).",
+							),
+						)
+						return
+					}
+					let res: Awaited<ReturnType<typeof cpTx.shellExec>>
+					try {
+						res = await cpTx.shellExec(cpPort, shellTxId, {
+							command,
+							shell: cpShellName(),
+							cwd_rel: toCwdRel(task.cwd, customCwd),
+							timeout_ms: commandExecutionTimeout || 600_000,
+						})
+					} catch (error) {
+						pushToolResult(
+							formatResponse.toolError(
+								`The Control-Plane could not be reached, so the command was NOT run: ${
+									error instanceof Error ? error.message : String(error)
+								}`,
+							),
+						)
+						return
+					}
+					if (!res.ok) {
+						task.recordToolError("execute_command", cpErrorMessage(res))
+						pushToolResult(
+							formatResponse.toolError(
+								`Command rejected by the Control-Plane (HTTP ${res.status}): ${cpErrorMessage(res)}`,
+							),
+						)
+						return
+					}
+					const body = res.data ?? {}
+					const stdout =
+						typeof body.stdout === "string"
+							? body.stdout
+							: Buffer.from(body.stdout_base64 || "", "base64").toString("utf8")
+					const stderr =
+						typeof body.stderr === "string"
+							? body.stderr
+							: Buffer.from(body.stderr_base64 || "", "base64").toString("utf8")
+					const rawOutput = [stdout, stderr].filter(Boolean).join("\n")
+					// Payload control: compress large outputs to avoid "request too large" errors
+					let output = rawOutput
+					if (rawOutput && rawOutput.length > 0) {
+						const compressed = Terminal.compressTerminalOutput(
+							rawOutput,
+							terminalOutputLineLimit,
+							terminalOutputCharacterLimit,
+						)
+						if (isStage2 && rawOutput.length > 12_000) {
+							// Save full output to file, pass summary + path
+							const outPath = path.join(task.cwd || "", ".roo-output.txt")
+							try {
+								await fs.writeFile(outPath, rawOutput, "utf8")
+								output = `${compressed}\n\n[Full output saved to .roo-output.txt]`
+							} catch {
+								output = compressed
 							}
-							pushToolResult(output || "<no output>")
-							return
+						} else {
+							output = compressed
 						}
 					}
+					const exitInfo =
+						(body as any).timed_out === true
+							? "Command timed out."
+							: typeof body.exit_code === "number"
+								? `Exit code: ${body.exit_code}`
+								: ""
+					pushToolResult([output || "<no output>", exitInfo].filter(Boolean).join("\n"))
+					return
 				}
 
 				// Logging: Track tool execution
@@ -565,4 +595,21 @@ export async function executeCommand(
 			].join("\n"),
 		]
 	}
+}
+
+/** Shell name for the Control-Plane `/shell/exec` route, derived from the user's terminal shell. */
+function cpShellName(): "bash" | "sh" | "zsh" | "pwsh" | "powershell" | "cmd" | "default" {
+	let shell = ""
+	try {
+		shell = path.basename(getShell() || "").toLowerCase()
+	} catch {
+		// ignore
+	}
+	if (shell.startsWith("pwsh")) return "pwsh"
+	if (shell.startsWith("powershell")) return "powershell"
+	if (shell.startsWith("cmd")) return "cmd"
+	if (shell.startsWith("zsh")) return "zsh"
+	if (shell.startsWith("bash")) return "bash"
+	if (shell === "sh") return "sh"
+	return "default"
 }

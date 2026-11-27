@@ -92,6 +92,14 @@ vi.mock("../../ignore/RooIgnoreController", () => ({
 	},
 }))
 
+vi.mock("../../control-plane/tx", () => ({ reserveFile: vi.fn() }))
+vi.mock("../../control-plane/client", async (importOriginal) => ({
+	...((await importOriginal()) as Record<string, unknown>),
+	getCpPort: vi.fn(() => 4000),
+}))
+
+import * as cpTx from "../../control-plane/tx"
+
 describe("writeToFileTool", () => {
 	// Test data
 	const testFilePath = "test/file.txt"
@@ -414,6 +422,67 @@ describe("writeToFileTool", () => {
 
 			expect(mockHandleError).toHaveBeenCalledWith("writing file", expect.any(Error))
 			expect(mockCline.diffViewProvider.reset).toHaveBeenCalled()
+		})
+	})
+
+	describe("R30 new-file reservation", () => {
+		afterEach(() => {
+			delete mockCline.rootTxId
+			delete mockCline.subTransactionId
+			delete mockCline.taskId
+		})
+
+		it("does not reserve without a transaction", async () => {
+			await executeWriteFileTool({}, { fileExists: false })
+			expect(cpTx.reserveFile).not.toHaveBeenCalled()
+		})
+
+		it("does not reserve on partial blocks", async () => {
+			mockCline.rootTxId = "tx-root"
+			await executeWriteFileTool({}, { fileExists: false, isPartial: true })
+			expect(cpTx.reserveFile).not.toHaveBeenCalled()
+		})
+
+		it("does not reserve existing files", async () => {
+			mockCline.rootTxId = "tx-root"
+			await executeWriteFileTool({}, { fileExists: true })
+			expect(cpTx.reserveFile).not.toHaveBeenCalled()
+		})
+
+		it("reserves new files under the parent (root) tx with the sub-tx id as claimer", async () => {
+			mockCline.rootTxId = "tx-root"
+			mockCline.subTransactionId = "st2"
+			mockCline.taskId = "task-2"
+			vi.mocked(cpTx.reserveFile).mockResolvedValue({ ok: true, status: 200, data: {} } as any)
+			await executeWriteFileTool({}, { fileExists: false })
+			expect(cpTx.reserveFile).toHaveBeenCalledWith(4000, "tx-root", {
+				file_path: testFilePath,
+				claimer_id: "st2",
+			})
+			expect(mockCline.diffViewProvider.saveChanges).toHaveBeenCalled()
+		})
+
+		it("a 409 blocks the write and resets the diff view", async () => {
+			mockCline.rootTxId = "tx-root"
+			mockCline.subTransactionId = "st2"
+			vi.mocked(cpTx.reserveFile).mockResolvedValue({
+				ok: false,
+				status: 409,
+				data: { code: "FILE_ALREADY_RESERVED", by: "st1" },
+			} as any)
+			const result = await executeWriteFileTool({}, { fileExists: false })
+			expect(String(result)).toMatch(/R30/)
+			expect(String(result)).toMatch(/st1/)
+			expect(mockCline.diffViewProvider.saveChanges).not.toHaveBeenCalled()
+			expect(mockCline.diffViewProvider.reset).toHaveBeenCalled()
+		})
+
+		it("an unreachable CP blocks the write (fail-closed)", async () => {
+			mockCline.rootTxId = "tx-root"
+			vi.mocked(cpTx.reserveFile).mockRejectedValue(new Error("fetch failed"))
+			const result = await executeWriteFileTool({}, { fileExists: false })
+			expect(String(result)).toMatch(/fail-closed/)
+			expect(mockCline.diffViewProvider.saveChanges).not.toHaveBeenCalled()
 		})
 	})
 })

@@ -363,13 +363,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	worktreePath?: string
 	agentType?: "coder" | "tester" | "reviewer" | "general"
 	subTransactionId?: string // Maps child task to sub-transaction ID
-	/** When true, DiffViewProvider skips CP transactional routing and writes
-	 *  directly to the filesystem.  Set on planner-spawned children so their
-	 *  file writes land in the workspace (not the CP worktree). */
-	skipTransactionalWrites = false
 	/** Composite CP tx_id for sub-transaction children (e.g. "parentTxId_sub_st1").
-	 *  When set, DiffViewProvider routes writes to this sub-tx's CP worktree
-	 *  instead of the parent transaction's worktree. */
+	 *  Addresses the child's own sub-tx worktree for checkpoints, rollback and
+	 *  shell execution. */
 	transactionalTxId?: string
 
 	// Control-Plane transaction owned by this (top-level) task. While set, `cwd`

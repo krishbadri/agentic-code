@@ -128,7 +128,6 @@ export class PlanExecutor {
 					if (worktreePath) {
 						child.worktreePath = worktreePath
 						child.transactionalTxId = worktreeTxId
-						child.skipTransactionalWrites = true
 					}
 
 					// Wait for completion
@@ -223,7 +222,6 @@ export class PlanExecutor {
 						if (wt) {
 							child.worktreePath = wt.path
 							child.transactionalTxId = wt.txId
-							child.skipTransactionalWrites = true
 						}
 
 						const childRefs = new Map<string, Task>([[child.taskId, child]])
@@ -311,7 +309,6 @@ export class PlanExecutor {
 						if (wt) {
 							child.worktreePath = wt.path
 							child.transactionalTxId = wt.txId
-							child.skipTransactionalWrites = true
 						}
 					}
 				}
@@ -610,7 +607,6 @@ export class PlanExecutor {
 				// CP worktree instead of the parent transaction's worktree.
 				childTask.transactionalTxId = `${parentTxId}_sub_${subTxId}`
 				// Skip CP shell routing — commands run locally at cwd (the worktree)
-				childTask.skipTransactionalWrites = true
 				provider?.log(
 					`[PlanExecutor] Subtask ${subTxId} cwd updated to worktree: ${data.worktree_path}, txId: ${childTask.transactionalTxId}`,
 				)
