@@ -72,6 +72,7 @@ export async function getCheckpointService(
 			log(`[Task#getCheckpointService] Using Control-Plane checkpoint service (port ${cpPort}, tx ${txId})`)
 			const cpService = new ControlPlaneCheckpointService(cpPort, txId, log)
 			cpService.on("checkpoint", ({ toHash, suppressMessage }: { toHash: string; suppressMessage?: boolean }) => {
+				task.taskLogger?.logCheckpoint(task.subTransactionId ?? "", toHash)
 				;(provider as any)?.postMessageToWebview({
 					type: "currentCheckpointUpdated",
 					text: toHash,
@@ -244,6 +245,7 @@ async function checkGitInstallation(
 
 		service.on("checkpoint", ({ fromHash: from, toHash: to, suppressMessage }) => {
 			try {
+				task.taskLogger?.logCheckpoint(task.subTransactionId ?? "", to)
 				// Always update the current checkpoint hash in the webview, including the suppress flag
 				provider?.postMessageToWebview({
 					type: "currentCheckpointUpdated",

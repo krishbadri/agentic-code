@@ -314,6 +314,7 @@ export class PlanExecutor {
 		if (!res.ok) throw new Error(cpErrorMessage(res))
 		if (!res.data?.worktree_path) throw new Error("Control-Plane returned no worktree_path")
 		this.log(`Pre-created worktree for ${stx.id}: ${res.data.worktree_path}`)
+		this.parentTask.taskLogger?.logSubTxCreated(stx.id, String(res.data.base_commit ?? parentTxId))
 		return { path: res.data.worktree_path, txId: `${parentTxId}_sub_${stx.id}` }
 	}
 
@@ -352,6 +353,11 @@ export class PlanExecutor {
 		if (!res.ok) return { ok: false, reason: `HTTP ${res.status}: ${cpErrorMessage(res)}` }
 		const gate = res.data
 		this.log(`Safety gate for ${stx.id}: ${gate.ok ? "PASSED" : `FAILED at ${gate.failedAt}`}`)
+		this.parentTask.taskLogger?.logSafetyGate(
+			stx.id,
+			!!gate.ok,
+			body.checks ?? (body.clause ? [JSON.stringify(body.clause)] : []),
+		)
 		if (gate.ok) return { ok: true }
 		return { ok: false, reason: String(gate.reason ?? gate.error ?? gate.failedAt ?? "safety gate failed") }
 	}
@@ -411,8 +417,10 @@ export class PlanExecutor {
 			const r = byId.get(id)
 			if (mergedIds.has(id) && !notMerged.has(id)) {
 				merged.push(id)
+				this.parentTask.taskLogger?.logSubTxEvent(id, "committed", r?.merge_commit)
 				continue
 			}
+			this.parentTask.taskLogger?.logSubTxEvent(id, "aborted")
 			const conflictsWith = Array.isArray(r?.conflicts_with) ? r?.conflicts_with.join(", ") : r?.conflicts_with
 			const reason =
 				`${(r?.status ?? "failed").toUpperCase()}: ${r?.reason ?? r?.error ?? "not merged by merge-pipeline"}` +

@@ -131,6 +131,7 @@ import { Gpt5Metadata, ClineMessageWithMetadata } from "./types"
 import { MessageQueueService } from "../message-queue/MessageQueueService"
 
 import { AutoApprovalHandler } from "./AutoApprovalHandler"
+import { TaskLogger } from "./TaskLogger"
 import {
 	cpErrorMessage,
 	getCommitStrategy,
@@ -351,16 +352,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	checkpointService?: RepoPerTaskCheckpointService
 	checkpointServiceInitializing = false
 
-	// Optional structured task logger for sub-transaction events
-	taskLogger?: {
-		logSubTxCreated(subTxId: string, baseCommit: string): void
-		logSubTxEvent(subTxId: string, event: string, detail?: string): void
-		logSafetyGate(subTxId: string, passed: boolean, checks: string[]): void
-		logToolCall(toolName: string, allowed: boolean, params: Record<string, unknown>): void
-		logQualityGate(...args: unknown[]): void
-		logTaskEnd(status: string, tokenUsage: unknown, toolUsage: unknown): void
-		close(): void
-	}
+	// Per-run structured task logger (JSON lines under <globalStorage>/logs, never in the workspace)
+	taskLogger?: TaskLogger
 
 	// Planner mode
 	plan?: import("../planner/types").Plan
@@ -489,6 +482,25 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		this.instanceId = crypto.randomUUID().slice(0, 8)
 		this.taskNumber = -1
+
+		// Per-run task logger for root tasks. Logs go to global storage so they
+		// never dirty the user's repository (or a transaction worktree).
+		if (!parentTask && process.env.NODE_ENV !== "test") {
+			try {
+				const ts = new Date()
+					.toISOString()
+					.replace(/:/g, "")
+					.replace(/\.\d+Z$/, "")
+				const logFile = path.join(
+					provider.context.globalStorageUri.fsPath,
+					"logs",
+					`${ts}-${this.taskId.slice(0, 8)}.log`,
+				)
+				this.taskLogger = new TaskLogger(logFile)
+			} catch {
+				// Non-fatal: logging must never break the task
+			}
+		}
 
 		this.rooIgnoreController = new RooIgnoreController(this.cwd)
 		this.rooProtectedController = new RooProtectedController(this.cwd)
@@ -2432,7 +2444,11 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 						}
 						// Emit TaskCompleted since plan execution finished (the result flag tells
 						// listeners whether all subtasks passed).
-						this.emit(RooCodeEventName.TaskCompleted, this.taskId, this.getTokenUsage(), this.toolUsage)
+						const plannerTokenUsage = this.getTokenUsage()
+						this.taskLogger?.logTaskEnd("success", plannerTokenUsage as any, this.toolUsage as any)
+						this.taskLogger?.close()
+						this.taskLogger = undefined
+						this.emit(RooCodeEventName.TaskCompleted, this.taskId, plannerTokenUsage, this.toolUsage)
 
 						// Planner mode execution complete — signal the main loop to exit
 						this.finishedSuccessfully = true
@@ -2798,6 +2814,9 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 		}
 
 		this.abort = true
+		this.taskLogger?.logTaskEnd("aborted")
+		this.taskLogger?.close()
+		this.taskLogger = undefined
 		this.emit(RooCodeEventName.TaskAborted)
 
 		try {
@@ -3610,6 +3629,14 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 		let includeFileDetails = true
 
 		this.emit(RooCodeEventName.TaskStarted)
+
+		this.taskLogger?.logTaskStart(
+			this.taskId,
+			this.api.getModel().id,
+			(this.apiConfiguration as any)?.apiProvider ?? "unknown",
+			this._taskMode ?? "unknown",
+			this.metadata.task?.slice(0, 200) ?? "",
+		)
 
 		while (!this.abort && !this.finishedSuccessfully) {
 			const didEndLoop = await this.recursivelyMakeClineRequests(nextUserContent, includeFileDetails)
