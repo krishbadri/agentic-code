@@ -3502,6 +3502,20 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 	 * Never reuses a global/stale id: each task owns its own transaction.
 	 * Returns the tx id, or undefined when running without a transaction.
 	 */
+	/**
+	 * `say` throws once the task has been aborted. Transaction setup runs at the very start
+	 * of a task and may still be awaiting the Control-Plane when the user cancels; a notice
+	 * that can no longer be shown must not turn into an unhandled rejection.
+	 */
+	private async sayIfActive(type: ClineSay, text: string): Promise<void> {
+		if (this.abort) return
+		try {
+			await this.say(type, text)
+		} catch (error) {
+			if (!this.abort) throw error
+		}
+	}
+
 	public async ensureTaskTransaction(): Promise<string | undefined> {
 		if (this.parentTask) return undefined
 		if (this.txId) return this.txId
@@ -3515,7 +3529,7 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 			provider.log(`[Task#ensureTaskTransaction] Control-Plane unavailable; running without a transaction`)
 			if (!this.cpUnavailableWarned) {
 				this.cpUnavailableWarned = true
-				await this.say("text", "⚠ Control-Plane unavailable; executing as single agent.")
+				await this.sayIfActive("text", "⚠ Control-Plane unavailable; executing as single agent.")
 			}
 			return undefined
 		}
@@ -3530,7 +3544,7 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 			)
 			if (!this.cpUnavailableWarned) {
 				this.cpUnavailableWarned = true
-				await this.say(
+				await this.sayIfActive(
 					"text",
 					"⚠ Control-Plane unavailable for this folder (it manages a different one); executing as single agent.",
 				)
@@ -3569,7 +3583,7 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 			if (!res.ok || !res.data?.tx_id || !res.data.worktree_path) {
 				const msg = res.ok ? "missing tx_id/worktree_path" : cpErrorMessage(res)
 				provider.log(`[Task#ensureTaskTransaction] /tx/begin failed: ${msg}`)
-				await this.say(
+				await this.sayIfActive(
 					"text",
 					`⚠ Could not begin a Control-Plane transaction (${msg}); executing as single agent.`,
 				)
@@ -3581,7 +3595,7 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 			const baseline = (res.data as any).progress_baseline
 			if (baseline?.failingAtBase) {
 				// Liveness requires a green suite at commit: say so now, not at the end.
-				await this.say(
+				await this.sayIfActive(
 					"text",
 					`⚠ The test command (\`${testCommand}\`) is already failing before any change. ` +
 						"This task's changes can only be committed once the tests pass; fix them as part of the task, " +
@@ -3598,7 +3612,7 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 			provider.log(`[Task#ensureTaskTransaction] Failed: ${msg}`)
 			if (!this.cpUnavailableWarned) {
 				this.cpUnavailableWarned = true
-				await this.say("text", "⚠ Control-Plane unavailable; executing as single agent.")
+				await this.sayIfActive("text", "⚠ Control-Plane unavailable; executing as single agent.")
 			}
 			return undefined
 		}
