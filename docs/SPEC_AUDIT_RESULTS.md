@@ -98,9 +98,48 @@ row below cites:
 | Rollback semantics                                 | PASS    | Tracked and untracked files are restored, with a backup ref; ignored files are kept; tx processes are killed (`commit-lifecycle` rollback tests). External side effects are not undone (documented). |
 | Replay                                             | PARTIAL | File-level only; commands and model calls are refused (`replay.test.ts`).                                                                                                                            |
 
+## End-to-end verification (real VS Code)
+
+`pnpm --filter @roo-code/vscode-e2e test:cp` launches a real VS Code with the built extension on a throw-away git
+repository and drives it with a scripted OpenAI-compatible model (`apps/vscode-e2e/src/suite/cp/mock-llm.ts`).
+Everything except the model is real: extension activation, Control-Plane auto-start, worktrees, tool execution,
+gates, merge pipeline and commit. No API key is needed and the run is deterministic.
+
+| Scenario (`cp-transactions.test.ts`)                   | What it proves                                                                                                                                         |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Control-Plane auto-starts for this repository          | Default settings start the server; `/health` reports the workspace as `repo_root`.                                                                     |
+| Single agent: edits reach the workspace only at commit | While the task runs the file exists only in the worktree; after `attempt_completion` it is committed, the workspace is clean and the worktree is gone. |
+| Gates                                                  | A test-file write, a recursive delete outside the worktree and `curl \| sh` are refused and the model is told why; a safe command runs; tx ids differ. |
+| Progress gate                                          | An edit that breaks a passing test is rolled back automatically and never reaches the workspace.                                                       |
+| Planner: different functions of one file               | Two parallel sub-agents in separate sub-transaction worktrees; both edits merge (AST-disjoint) and are committed.                                      |
+| Planner: same function                                 | The later sub-transaction is rolled back (`STRUCTURAL_CONFLICT`), the plan fails, nothing is committed and the transaction is discarded.               |
+| Control-Plane lost mid-task                            | Completion fails closed (nothing committed); the next task runs single-agent with the visible warning.                                                 |
+
+`pnpm --filter @roo-code/vscode-e2e test:cp:real` runs a two-task smoke test with a real model
+(`cp-real-model.test.ts`, OpenRouter key from the repo-root `.env`).
+
+Bugs this suite found that unit and contract tests could not:
+
+- The extension reused any healthy Control-Plane it found (stored port, well-known ports), even one serving a
+  different repository; the port was stored globally, so a second window picked up the first window's server. Now
+  `/health` reports `repo_root`, the client refuses a mismatch, and the port is stored per workspace.
+- The streaming tool-call "repairer" rewrote the `<command>` parameter of every `execute_command` that arrived in
+  one chunk (emptying the command) and could rewrite file content inside `write_to_file`. It now only repairs text
+  that precedes the first valid tool call (`toolCallRepairer.spec.ts`).
+- Planner sub-agents could not get tool approvals outside the repo's test-only "E2E mode": the chat view answers only
+  the visible task, so parallel sub-agents' edits were dropped. Their asks are now decided in the extension host from
+  the auto-approval settings (`headlessApproval.ts`); if those settings do not allow reading and writing, the planner
+  is skipped and the task runs as a single interactive agent.
+- A test runner that finds no tests (pytest exit 5, jest/vitest "no tests found") blocked every commit. An empty
+  suite now passes liveness vacuously; a suite that is already red at the base commit is reported when the
+  transaction begins and named in the commit refusal.
+
 ## Known limitations
 
-- **No live VS Code run.** There has been no interactive VS Code (F5) end-to-end run against a real model. The extension's CP traffic is covered by the live contract spec, and task logic by unit tests.
+- **Dev-host `.env`.** `src/.env` is loaded by the extension in the development host. If it sets
+  `TEST_TORTURE_REPO` / `TEST_TORTURE_REPO_WORKSPACE`, every task runs in the test-only "E2E mode" and uses the
+  torture repository as its working directory, whatever folder is open. Remove those lines for normal use.
 - **Shell analysis is best-effort.** It parses POSIX sh, PowerShell and cmd syntax; a sufficiently obfuscated command can still evade it. The post-exec test-file revert and worktree isolation are the backstop.
 - **Narrow conflict analysis.** Dependent-file analysis follows only relative JS/TS imports; other languages fall back to same-file detection.
-- **Workspace commit outside transactions.** The non-transactional `save_checkpoint` path still makes a git commit in the user's workspace (pre-existing behaviour).
+- **Liveness is absolute.** A test suite that was already failing before the task still blocks the commit (the user is warned when the transaction begins).
+- **Sub-agents follow auto-approval.** Planner sub-agents cannot prompt; anything the auto-approval settings do not allow fails that sub-transaction with the reason.
