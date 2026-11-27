@@ -88,7 +88,23 @@ export class Git {
 
 	private async git(args: string[], cwd?: string) {
 		const binary = await resolveGitBinary()
-		return pexec(binary, args, { cwd: cwd ?? this.cfg.repoRoot, windowsHide: true })
+		return pexec(binary, args, { cwd: cwd ?? this.cfg.repoRoot, windowsHide: true, maxBuffer: 64 * 1024 * 1024 })
+	}
+
+	/** Run an arbitrary git command (stdout trimmed). */
+	public async run(args: string[], cwd?: string): Promise<string> {
+		const { stdout } = await this.git(args, cwd)
+		return stdout.trim()
+	}
+
+	/** Run git and return raw stdout (not trimmed — needed for file contents/diffs). */
+	public async runRaw(args: string[], cwd?: string): Promise<string> {
+		const { stdout } = await this.git(args, cwd)
+		return stdout
+	}
+
+	public get root(): string {
+		return this.cfg.repoRoot
 	}
 
 	/**

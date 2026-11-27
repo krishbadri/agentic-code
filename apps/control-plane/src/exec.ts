@@ -66,6 +66,26 @@ export async function runCommand(cwd: string, command: string, opts: RunOptions 
 	return first
 }
 
+/** Run a command line through the platform shell (/bin/sh -c, or cmd.exe /d /s /c verbatim). */
+export function runShell(cwd: string, command: string, opts: RunOptions = {}): Promise<RunResult> {
+	return runOnce(cwd, { shell: true, command }, opts)
+}
+
+/** Run an explicit argv (no shell interpretation of the arguments). */
+export function runArgv(cwd: string, argv: string[], opts: RunOptions = {}): Promise<RunResult> {
+	if (argv.length === 0 || !argv[0]) {
+		return Promise.resolve({
+			exitCode: 127,
+			stdout: "",
+			stderr: "",
+			timedOut: false,
+			spawnError: "empty argv",
+			durationMs: 0,
+		})
+	}
+	return runOnce(cwd, { shell: false, argv }, opts)
+}
+
 type Invocation = { shell: true; command: string } | { shell: false; argv: string[] }
 
 function runOnce(cwd: string, inv: Invocation, opts: RunOptions): Promise<RunResult> {

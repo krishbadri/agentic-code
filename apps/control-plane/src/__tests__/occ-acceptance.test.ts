@@ -479,7 +479,34 @@ export function five() { return 5; }
 			// Expected order: x, y, z (alphabetical)
 			// If no tie-breaker, order might vary between runs
 			expect(mergeOrders[0]).toEqual(["agent-x", "agent-y", "agent-z"])
-		})
+		}, 90_000) // three full fixtures + strict structural analysis per run
+
+		it("strict policy: later structurally-conflicting sub-txs are rolled back (R17)", async () => {
+			const { tx_id: parentTxId } = await beginTransaction(fixture)
+			for (const [id, v] of [
+				["agent-x", "x"],
+				["agent-y", "y"],
+				["agent-z", "z"],
+			] as const) {
+				const sub = await beginSubTransaction(fixture, parentTxId, id)
+				writeFileToWorktree(sub.worktree_path, "src/shared.ts", `export const ${v} = 1;\n`)
+				commitInWorktree(sub.worktree_path, `Agent ${v}`)
+			}
+			const res = await fetch(`${fixture.baseUrl}/tx/${parentTxId}/merge-pipeline`, {
+				method: "POST",
+				headers: fixture.headers,
+				body: JSON.stringify({ sub_tx_ids: ["agent-z", "agent-y", "agent-x"] }),
+			})
+			expect(res.status).toBe(200)
+			const data = await res.json()
+			expect(data.merged_ids).toEqual(["agent-x"])
+			expect(data.rolled_back_ids.sort()).toEqual(["agent-y", "agent-z"])
+			for (const r of data.results.filter((r: any) => r.subTxId !== "agent-x")) {
+				expect(r.reason).toBe("STRUCTURAL_CONFLICT")
+				expect(r.conflicts_with).toEqual(["agent-x"])
+			}
+			expect(data.success).toBe(false)
+		}, 60_000)
 
 		it("should rollback failed merges and continue with remaining (R28)", async () => {
 			const { tx_id: parentTxId, worktree_path: parentWt } = await beginTransaction(fixture)

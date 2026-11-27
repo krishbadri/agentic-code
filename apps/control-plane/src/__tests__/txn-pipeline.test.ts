@@ -434,13 +434,24 @@ describe("T6: R30 new-file reservation", () => {
 		const commitRes = await post(fixture, `/tx/${txId}/commit`, { strategy: "rebase" })
 		expect([200, 201]).toContain(commitRes.status)
 
-		// After commit, the SAME path in a new transaction should be freely reservable
+		// The committed transaction's reservations are gone
+		expect(fixture.app.fileReservations.has(txId), "reservations must be cleared on commit").toBe(false)
+
+		// In a new transaction the file now EXISTS, so it is not a new file any more (R30)
 		const { tx_id: txId2 } = await beginTransaction(fixture)
 		const reserveRes2 = await post(fixture, `/tx/${txId2}/reserve-file`, {
 			file_path: "src/post-commit.ts",
 			claimer_id: "agent-c",
 		})
-		expect(reserveRes2.status, "new tx should allow reserving the same path again").toBe(200)
+		expect(reserveRes2.status).toBe(409)
+		expect((await reserveRes2.json()).code).toBe("FILE_EXISTS")
+
+		// ...while genuinely new paths are freely reservable
+		const reserveRes3 = await post(fixture, `/tx/${txId2}/reserve-file`, {
+			file_path: "src/brand-new.ts",
+			claimer_id: "agent-c",
+		})
+		expect(reserveRes3.status).toBe(200)
 	})
 })
 
@@ -485,6 +496,10 @@ describe("T7: AST-aware same-file conflict refinement", () => {
 		expect(checkRes.status).toBe(200)
 		const checkBody = await checkRes.json()
 		expect(checkBody.sameFileConflicts.length, "disjoint function edits must not be flagged").toBe(0)
+		// A file shared by both sides must not resurface as a dependent-file conflict
+		expect(checkBody.dependentFileConflicts.length, "shared file must not be re-flagged").toBe(0)
+		expect(checkBody.hasConflicts).toBe(false)
+		expect(checkBody.dismissedByAst.length).toBe(1)
 
 		// merge-pipeline should merge both successfully
 		const pipelineRes = await post(fixture, `/tx/${txId}/merge-pipeline`, {
@@ -546,6 +561,77 @@ describe("T7: AST-aware same-file conflict refinement", () => {
 		const checkBody = await checkRes.json()
 		expect(checkBody.hasConflicts, "non-TS same-file must still conflict").toBe(true)
 		expect(checkBody.sameFileConflicts.length).toBeGreaterThan(0)
+	})
+
+	it("T7d: disjoint edits are still dismissed after the parent advanced (merge-base is used)", async () => {
+		const { tx_id: txId, worktree_path: parentWt } = await beginTransaction(fixture)
+		const { worktree_path: wtA } = await beginSubTransaction(fixture, txId, "agent-a")
+		const { worktree_path: wtB } = await beginSubTransaction(fixture, txId, "agent-b")
+
+		// The parent moves on (unrelated file) after both sub-txs began
+		writeFileToWorktree(parentWt, "docs/notes.md", "parent work\n")
+		commitInWorktree(parentWt, "parent: unrelated change")
+
+		writeFileToWorktree(
+			wtA,
+			"src/utils.ts",
+			`export function alpha() {\n  return "A"\n}\n\nexport function beta() {\n  return "beta"\n}\n`,
+		)
+		commitInWorktree(wtA, "a")
+		writeFileToWorktree(
+			wtB,
+			"src/utils.ts",
+			`export function alpha() {\n  return "alpha"\n}\n\nexport function beta() {\n  return "B"\n}\n`,
+		)
+		commitInWorktree(wtB, "b")
+
+		const body = await (
+			await post(fixture, `/tx/${txId}/structural-check`, { sub_tx_ids: ["agent-a", "agent-b"] })
+		).json()
+		expect(body.hasConflicts).toBe(false)
+		expect(body.dismissedByAst.length).toBe(1)
+	})
+
+	it("T7e: both sides appending new top-level code at the end of the file still conflicts", async () => {
+		const { tx_id: txId } = await beginTransaction(fixture)
+		const { worktree_path: wtA } = await beginSubTransaction(fixture, txId, "agent-a")
+		const { worktree_path: wtB } = await beginSubTransaction(fixture, txId, "agent-b")
+		const base = `export function alpha() {\n  return "alpha"\n}\n\nexport function beta() {\n  return "beta"\n}\n`
+		writeFileToWorktree(wtA, "src/utils.ts", base + `\nexport function gammaA() {\n  return 1\n}\n`)
+		commitInWorktree(wtA, "a appends")
+		writeFileToWorktree(wtB, "src/utils.ts", base + `\nexport function gammaB() {\n  return 2\n}\n`)
+		commitInWorktree(wtB, "b appends")
+
+		const body = await (
+			await post(fixture, `/tx/${txId}/structural-check`, { sub_tx_ids: ["agent-a", "agent-b"] })
+		).json()
+		expect(body.hasConflicts).toBe(true)
+		expect(body.sameFileConflicts.length).toBe(1)
+	})
+
+	it("T7f: a sub-tx begun after a sibling merged does not conflict with it (sequential, not concurrent)", async () => {
+		const { tx_id: txId } = await beginTransaction(fixture)
+		const { worktree_path: wtA } = await beginSubTransaction(fixture, txId, "agent-a")
+		writeFileToWorktree(
+			wtA,
+			"src/utils.ts",
+			`export function alpha() {\n  return "A1"\n}\n\nexport function beta() {\n  return "beta"\n}\n`,
+		)
+		commitInWorktree(wtA, "a")
+		const first = await (await post(fixture, `/tx/${txId}/merge-pipeline`, { sub_tx_ids: ["agent-a"] })).json()
+		expect(first.merged_ids).toEqual(["agent-a"])
+
+		// B starts from the parent AFTER A merged and edits the same function
+		const { worktree_path: wtB } = await beginSubTransaction(fixture, txId, "agent-b")
+		writeFileToWorktree(
+			wtB,
+			"src/utils.ts",
+			`export function alpha() {\n  return "B on top of A"\n}\n\nexport function beta() {\n  return "beta"\n}\n`,
+		)
+		commitInWorktree(wtB, "b")
+		const second = await (await post(fixture, `/tx/${txId}/merge-pipeline`, { sub_tx_ids: ["agent-b"] })).json()
+		expect(second.merged_ids).toEqual(["agent-b"])
+		expect(second.rolled_back_ids).toEqual([])
 	})
 })
 
