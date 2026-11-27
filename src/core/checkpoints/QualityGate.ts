@@ -33,14 +33,50 @@ export type QualityGateVerdict =
 
 // ── Project detection ──────────────────────────────────────────────────────
 
-interface ProjectInfo {
+export interface ProjectInfo {
 	type: "python" | "node" | "none"
+	/** Plain test command (text reporter), suitable for the Control-Plane progress/liveness gates. */
 	testCommand: string | null
 	compileCommand: string | null
 }
 
-function detectProject(cwd: string): ProjectInfo {
-	const exists = (name: string) => fs.existsSync(path.join(cwd, name))
+/**
+ * Detect the project's test and compile commands. `package.json` is checked
+ * before Python markers (a JS repo with a `tests/` folder is still a JS repo).
+ */
+export function detectProjectCommands(cwd: string): ProjectInfo {
+	const exists = (name: string) => {
+		try {
+			return fs.existsSync(path.join(cwd, name))
+		} catch {
+			return false
+		}
+	}
+
+	// Node detection
+	if (exists("package.json")) {
+		let testCommand: string | null = null
+
+		try {
+			const pkg = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf-8"))
+			const devDeps = { ...pkg.devDependencies, ...pkg.dependencies }
+			if (devDeps.vitest) {
+				testCommand = "npx vitest run"
+			} else if (devDeps.jest) {
+				testCommand = "npx jest --forceExit"
+			} else if (pkg.scripts?.test && !/no test specified/.test(String(pkg.scripts.test))) {
+				testCommand = "npm test"
+			}
+		} catch {
+			// Malformed package.json — skip test detection
+		}
+
+		const compileCommand = exists("tsconfig.json") ? "npx tsc --noEmit" : null
+
+		if (testCommand || compileCommand) {
+			return { type: "node", testCommand, compileCommand }
+		}
+	}
 
 	// Python detection
 	if (
@@ -57,34 +93,14 @@ function detectProject(cwd: string): ProjectInfo {
 		}
 	}
 
-	// Node detection
-	if (exists("package.json")) {
-		let testCommand: string | null = null
-
-		try {
-			const pkg = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf-8"))
-			const devDeps = { ...pkg.devDependencies, ...pkg.dependencies }
-			if (devDeps.vitest) {
-				testCommand = "npx vitest run --reporter=json"
-			} else if (devDeps.jest) {
-				testCommand = "npx jest --json --forceExit"
-			} else if (pkg.scripts?.test && pkg.scripts.test !== 'echo "Error: no test specified" && exit 1') {
-				testCommand = "npm test"
-			}
-		} catch {
-			// Malformed package.json — skip test detection
-		}
-
-		const compileCommand = exists("tsconfig.json") ? "npx tsc --noEmit" : null
-
-		if (!testCommand && !compileCommand) {
-			return { type: "none", testCommand: null, compileCommand: null }
-		}
-
-		return { type: "node", testCommand, compileCommand }
-	}
-
 	return { type: "none", testCommand: null, compileCommand: null }
+}
+
+/** Local runs use machine-readable reporters where the parser supports them. */
+function localTestCommand(testCommand: string): string {
+	if (testCommand === "npx vitest run") return "npx vitest run --reporter=json"
+	if (testCommand.startsWith("npx jest")) return `${testCommand} --json`
+	return testCommand
 }
 
 // ── Command runner ─────────────────────────────────────────────────────────
@@ -231,7 +247,7 @@ async function collectScore(project: ProjectInfo, cwd: string): Promise<QualityS
 
 	// Run tests
 	if (project.testCommand) {
-		const result = await runCommand(project.testCommand, cwd, 60_000)
+		const result = await runCommand(localTestCommand(project.testCommand), cwd, 60_000)
 		if (result.timedOut) return null // Timeout → skip gate
 
 		let parsed: { passing: number; failing: number; total: number } | null = null
@@ -307,7 +323,7 @@ export async function evaluateQualityGate(task: Task, checkpointName: string): P
 	const cwd = task.cwd || getWorkspacePath()
 	if (!cwd) return { action: "skip", reason: "No workspace directory" }
 
-	const project = detectProject(cwd)
+	const project = detectProjectCommands(cwd)
 	if (project.type === "none") {
 		return { action: "skip", reason: "No tests or compile checks detected" }
 	}

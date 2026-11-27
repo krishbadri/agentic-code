@@ -132,12 +132,25 @@ import { MessageQueueService } from "../message-queue/MessageQueueService"
 
 import { AutoApprovalHandler } from "./AutoApprovalHandler"
 import {
+	cpErrorMessage,
+	getCommitStrategy,
+	getConfiguredTestCommand,
 	getCpPort,
 	isControlPlaneUnavailableError,
 	isPlannerModeEnabled,
+	isTransactionalModeEnabled,
 	waitForControlPlane,
 } from "../control-plane/client"
+import { detectProjectCommands } from "../checkpoints/QualityGate"
 import * as cpTx from "../control-plane/tx"
+
+/** Result of committing a task's Control-Plane transaction. */
+export type TaskCommitOutcome =
+	| { kind: "none" }
+	| { kind: "committed"; mergedSha?: string; liveness?: { ran: boolean; passed?: boolean; reason?: string } }
+	| { kind: "liveness"; rollbackTo?: string; message: string }
+	| { kind: "conflict"; code: string; message: string; files?: string[] }
+	| { kind: "error"; message: string }
 
 const MAX_EXPONENTIAL_BACKOFF_SECONDS = 600 // 10 minutes
 const DEFAULT_USAGE_COLLECTION_TIMEOUT_MS = 5000 // 5 seconds
@@ -363,6 +376,32 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	 *  instead of the parent transaction's worktree. */
 	transactionalTxId?: string
 
+	// Control-Plane transaction owned by this (top-level) task. While set, `cwd`
+	// is the transaction's worktree; the user's workspace changes only on commit.
+	txId?: string
+	txBaseCommit?: string
+	/** The user's workspace before `cwd` was switched to the transaction worktree. */
+	originalWorkspacePath?: string
+	/** Transaction id recorded in history; reused on resume if still active. */
+	private resumeTxId?: string
+	/** Whether the "Control-Plane unavailable" warning was already shown. */
+	cpUnavailableWarned = false
+
+	/** The transaction that owns this task tree (own tx for top-level, else parent's). */
+	public get rootTxId(): string | undefined {
+		return this.txId ?? this.parentTask?.rootTxId
+	}
+
+	/** The CP id whose worktree this task writes to (sub-tx composite id for planner children). */
+	public get worktreeTxId(): string | undefined {
+		return this.transactionalTxId ?? this.txId
+	}
+
+	/** Workspace recorded in history: the user's workspace, never a transaction worktree. */
+	public get historyWorkspace(): string {
+		return this.originalWorkspacePath ?? this.parentTask?.historyWorkspace ?? this.cwd
+	}
+
 	// Task Bridge
 	enableBridge: boolean
 
@@ -429,6 +468,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 
 		this.taskId = historyItem ? historyItem.id : crypto.randomUUID()
+		this.resumeTxId = historyItem?.txId
 		this.rootTaskId = historyItem ? historyItem.rootTaskId : rootTask?.taskId
 		this.parentTaskId = historyItem ? historyItem.parentTaskId : parentTask?.taskId
 		this.childTaskId = undefined
@@ -795,8 +835,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				taskNumber: this.taskNumber,
 				messages: this.clineMessages,
 				globalStoragePath: this.globalStoragePath,
-				workspace: this.cwd,
+				workspace: this.historyWorkspace,
 				mode: this._taskMode || defaultModeSlug, // Use the task's own mode, not the current provider mode.
+				txId: this.txId,
 			})
 
 			if (hasTokenUsageChanged(tokenUsage, this.tokenUsageSnapshot)) {
@@ -2265,13 +2306,18 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 				)
 		}
 
-		// Planner mode requires the Control-Plane (worktrees, safety gates, merge pipeline).
-		// If it is unavailable, run the normal single-agent loop with a visible warning.
-		let plannerCpAvailable = false
-		if (plannerMode && task && !isSimpleRequest) {
-			plannerCpAvailable = !!(await waitForControlPlane(this.providerRef.deref()?.context))
-			if (!plannerCpAvailable) {
-				this.providerRef.deref()?.log(`[Task#startTask] Control-Plane unavailable; skipping planner mode`)
+		// Every top-level task is a Control-Plane transaction (when the CP is available):
+		// from here on `this.cwd` is the transaction's worktree and the user's workspace
+		// changes only when the transaction commits.
+		await this.ensureTaskTransaction()
+
+		// Planner mode requires the Control-Plane (worktrees, safety gates, merge pipeline)
+		// and runs inside this task's transaction. Without it, run the normal single-agent loop.
+		const plannerCpAvailable = !!this.txId
+		if (plannerMode && task && !isSimpleRequest && !plannerCpAvailable) {
+			this.providerRef.deref()?.log(`[Task#startTask] Control-Plane unavailable; skipping planner mode`)
+			if (!this.cpUnavailableWarned) {
+				this.cpUnavailableWarned = true
 				await this.say("text", "⚠ Control-Plane unavailable; executing as single agent.")
 			}
 		}
@@ -2360,22 +2406,33 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 						const result = await executor.executePlan(plan)
 
 						if (result.success) {
-							// Merge parent worktree changes back to workspace (durability invariant)
-							await executor.mergeParentToWorkspace()
-							await this.say("text", "Plan executed successfully. All sub-transactions completed.")
-							// Emit TaskCompleted for parent task when planner mode succeeds
-							// This ensures the parent task is properly marked as completed
-							// for waitUntilCompleted and E2E test listeners
-							this.emit(RooCodeEventName.TaskCompleted, this.taskId, this.getTokenUsage(), this.toolUsage)
+							// All sub-transactions merged into this task's transaction. The single
+							// commit path applies it to the user's workspace (liveness-gated).
+							const outcome = await this.commitTaskTransaction()
+							if (outcome.kind === "committed" || outcome.kind === "none") {
+								await this.say("text", "Plan executed successfully. All sub-transactions completed.")
+							} else {
+								await this.say(
+									"text",
+									`⚠ Plan executed, but the transaction could not be committed: ${outcome.message}` +
+										(outcome.kind === "conflict"
+											? "\nThe transaction is still open; resolve the conflict and run 'Roo: Commit Transaction'."
+											: ""),
+								)
+							}
 						} else {
+							const reasons = (result.failures ?? []).map((f) => `- ${f.subTxId}: ${f.reason}`).join("\n")
 							await this.say(
 								"text",
-								`Plan execution completed with failures. Failed sub-transactions: ${result.failedSubTransactions?.join(", ") || "unknown"}`,
+								`Plan failed: ${result.failedSubTransactions?.join(", ") || "unknown"}` +
+									(reasons ? `\n${reasons}` : "") +
+									"\nThe transaction was discarded; your workspace is unchanged.",
 							)
-							// Even on partial failure, emit TaskCompleted since the plan execution finished
-							// The result.success flag indicates if all subtasks passed
-							this.emit(RooCodeEventName.TaskCompleted, this.taskId, this.getTokenUsage(), this.toolUsage)
+							await this.abortTaskTransaction("plan failed")
 						}
+						// Emit TaskCompleted since plan execution finished (the result flag tells
+						// listeners whether all subtasks passed).
+						this.emit(RooCodeEventName.TaskCompleted, this.taskId, this.getTokenUsage(), this.toolUsage)
 
 						// Planner mode execution complete — signal the main loop to exit
 						this.finishedSuccessfully = true
@@ -2402,64 +2459,34 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 				// Cancel all spawned child tasks to prevent them from continuing to make API calls
 				await this.cancelAllChildTasks()
 
-				// The Control-Plane went away mid-plan: roll back what we can and fall
-				// through to normal single-agent execution (the planner never writes to the
-				// conversation history, so the normal loop starts clean).
-				if (isControlPlaneUnavailableError(error)) {
-					const cpProvider = this.providerRef.deref()
-					const cpParentTxId = cpProvider?.context?.globalState.get<string>("roo.current_tx_id")
-					if (cpParentTxId && this.plan) {
-						try {
-							const { PlanExecutor } = await import("../planner/PlanExecutor")
-							await new PlanExecutor(this).rollbackAllSubTransactions(this.plan, cpParentTxId)
-						} catch {
-							// CP is unreachable; nothing more we can do
-						}
+				// Roll back every sub-transaction worktree (best effort; 404s are fine).
+				if (this.txId && this.plan) {
+					try {
+						const { PlanExecutor } = await import("../planner/PlanExecutor")
+						await new PlanExecutor(this).rollbackAllSubTransactions(this.plan, this.txId)
+					} catch {
+						// CP may be unreachable; nothing more we can do here
 					}
-					this.plan = undefined
+				}
+				this.plan = undefined
+
+				if (isControlPlaneUnavailableError(error)) {
+					// The Control-Plane went away mid-plan: detach from the (unreachable)
+					// transaction and fall through to normal single-agent execution in the
+					// user's workspace. The planner never writes to the conversation history,
+					// so the normal loop starts clean.
+					this.releaseTaskTransaction()
+					this.cpUnavailableWarned = true
 					await this.say(
 						"text",
 						`⚠ Control-Plane unavailable during planning (${errorMessage}); executing as single agent.`,
 					)
 				} else {
-					// Clean up worktrees and parent transaction
-					const provider = this.providerRef.deref()
-					const parentTxId = provider?.context?.globalState.get<string>("roo.current_tx_id")
-					if (parentTxId && this.plan) {
-						try {
-							const { PlanExecutor } = await import("../planner/PlanExecutor")
-							const executor = new PlanExecutor(this)
-
-							// Rollback all sub-transaction worktrees to prevent orphaned worktrees
-							await executor.rollbackAllSubTransactions(this.plan, parentTxId)
-
-							// Clean up parent transaction
-							await (executor as any).cleanupParentTransaction(parentTxId)
-						} catch (cleanupError) {
-							const cleanupErrorMessage =
-								cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
-							provider?.log(`[Task#startTask] Error during planner cleanup: ${cleanupErrorMessage}`)
-							// Continue - don't block fallthrough to normal execution
-						}
-					} else if (parentTxId) {
-						// No plan but we have a parent transaction - just clean it up
-						try {
-							const { PlanExecutor } = await import("../planner/PlanExecutor")
-							const executor = new PlanExecutor(this)
-							await (executor as any).cleanupParentTransaction(parentTxId)
-						} catch (cleanupError) {
-							// Ignore cleanup errors
-						}
-					}
-					// Do NOT fall through to normal execution — the LLM already
-					// generated a plan JSON which is in the conversation. If normal
-					// mode runs, the LLM sees the plan and immediately calls
-					// attempt_completion, producing a "Task Completed" with zero
-					// actual work.  Instead, report the failure and stop.
+					await this.abortTaskTransaction(`planner failed: ${errorMessage}`)
 					await this.say(
 						"text",
-						`⚠ Planner mode failed: ${errorMessage}\n\nCheck the Roo Code output panel for details. ` +
-							`Common causes:\n- Control-Plane not running (check roo.cpPort)\n- CP port stale (reload window)\n- Sub-transaction creation failed`,
+						`⚠ Planner mode failed: ${errorMessage}\n\nThe transaction was discarded; your workspace is unchanged. ` +
+							`Check the Roo Code output panel for details.`,
 					)
 					this.finishedSuccessfully = true // stop the main loop
 					return
@@ -2753,6 +2780,10 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 		}
 
 		await this.overwriteApiConversationHistory(modifiedApiConversationHistory)
+
+		// Re-attach to the task's transaction if the CP still has it open (cancel →
+		// resume keeps the work), otherwise begin a fresh one.
+		await this.ensureTaskTransaction()
 
 		// Task resuming from history item.
 		await this.initiateTaskLoop(newUserContent)
@@ -3348,6 +3379,207 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 	public async mergeChildResults(results: Map<string, import("../planner/types").ChildResult>): Promise<void> {
 		// Actual merging logic delegated to PlanExecutor
 		// This method exists for interface completeness
+	}
+
+	// ── Control-Plane transaction lifecycle ─────────────────────────────────
+	//
+	// When the CP is available every top-level task is one transaction: `cwd`
+	// is the transaction worktree, all reads/writes/commands/tests happen there,
+	// and the user's workspace changes only through `commitTaskTransaction()`.
+
+	/**
+	 * Begin (or, on resume, re-attach to) this top-level task's transaction.
+	 * Never reuses a global/stale id: each task owns its own transaction.
+	 * Returns the tx id, or undefined when running without a transaction.
+	 */
+	public async ensureTaskTransaction(): Promise<string | undefined> {
+		if (this.parentTask) return undefined
+		if (this.txId) return this.txId
+		if (!isTransactionalModeEnabled()) return undefined
+
+		const provider = this.providerRef.deref()
+		if (!provider) return undefined
+
+		const port = await waitForControlPlane(provider.context)
+		if (!port) {
+			provider.log(`[Task#ensureTaskTransaction] Control-Plane unavailable; running without a transaction`)
+			if (!this.cpUnavailableWarned) {
+				this.cpUnavailableWarned = true
+				await this.say("text", "⚠ Control-Plane unavailable; executing as single agent.")
+			}
+			return undefined
+		}
+
+		try {
+			// Resume: re-attach to the recorded transaction if the CP still has it open.
+			const resumeId = this.resumeTxId
+			this.resumeTxId = undefined
+			if (resumeId) {
+				const info = await cpTx.getTx(port, resumeId)
+				if (info.ok && info.data?.status === "active" && info.data.worktree_path) {
+					this.adoptTaskTransaction(resumeId, info.data.worktree_path, info.data.base_commit)
+					provider.log(`[Task#ensureTaskTransaction] Resumed active transaction ${resumeId}`)
+					return this.txId
+				}
+				provider.log(
+					`[Task#ensureTaskTransaction] Recorded transaction ${resumeId} is not active (${
+						info.ok ? info.data?.status : `HTTP ${info.status}`
+					}); beginning a new one`,
+				)
+			}
+
+			const commands = detectProjectCommands(this.cwd)
+			const testCommand = getConfiguredTestCommand() ?? commands.testCommand ?? undefined
+			const compileCommand = commands.compileCommand ?? undefined
+
+			const res = await cpTx.begin(port, {
+				isolation: "hybrid",
+				base: "HEAD",
+				...(testCommand ? { test_command: testCommand } : {}),
+				...(compileCommand ? { compile_command: compileCommand } : {}),
+			})
+			if (!res.ok || !res.data?.tx_id || !res.data.worktree_path) {
+				const msg = res.ok ? "missing tx_id/worktree_path" : cpErrorMessage(res)
+				provider.log(`[Task#ensureTaskTransaction] /tx/begin failed: ${msg}`)
+				await this.say(
+					"text",
+					`⚠ Could not begin a Control-Plane transaction (${msg}); executing as single agent.`,
+				)
+				this.cpUnavailableWarned = true
+				return undefined
+			}
+
+			this.adoptTaskTransaction(res.data.tx_id, res.data.worktree_path, res.data.base_commit)
+			provider.log(
+				`[Task#ensureTaskTransaction] Began transaction ${res.data.tx_id} at ${res.data.base_commit} ` +
+					`(worktree ${res.data.worktree_path}, test_command=${testCommand ?? "none"})`,
+			)
+			return this.txId
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error)
+			provider.log(`[Task#ensureTaskTransaction] Failed: ${msg}`)
+			if (!this.cpUnavailableWarned) {
+				this.cpUnavailableWarned = true
+				await this.say("text", "⚠ Control-Plane unavailable; executing as single agent.")
+			}
+			return undefined
+		}
+	}
+
+	/** Point this task at a transaction worktree. */
+	private adoptTaskTransaction(txId: string, worktreePath: string, baseCommit?: string): void {
+		this.originalWorkspacePath ??= this.cwd
+		this.txId = txId
+		this.txBaseCommit = baseCommit
+		this.switchCwd(worktreePath)
+	}
+
+	/**
+	 * Detach from the transaction (after commit/abort, or when the CP vanished)
+	 * and point the task back at the user's workspace.
+	 */
+	public releaseTaskTransaction(): void {
+		const original = this.originalWorkspacePath
+		this.txId = undefined
+		this.txBaseCommit = undefined
+		this.originalWorkspacePath = undefined
+		if (original) this.switchCwd(original)
+	}
+
+	private switchCwd(dir: string): void {
+		if (this.cwd === dir) return
+		this.cwd = dir
+		this.diffViewProvider.cwd = dir
+		// The checkpoint service is bound to a directory / tx id; rebuild lazily.
+		this.checkpointService = undefined
+		this.checkpointServiceInitializing = false
+		try {
+			this.rooIgnoreController?.dispose()
+		} catch {
+			// ignore
+		}
+		this.rooIgnoreController = new RooIgnoreController(dir)
+		this.rooIgnoreController.initialize().catch((error) => {
+			console.error("Failed to initialize RooIgnoreController:", error)
+		})
+		this.rooProtectedController = new RooProtectedController(dir)
+	}
+
+	/**
+	 * The single commit path (attempt_completion and planner success).
+	 * Fails CLOSED: anything other than a 200 keeps completion blocked.
+	 */
+	public async commitTaskTransaction(): Promise<TaskCommitOutcome> {
+		if (!this.txId) return { kind: "none" }
+		const txId = this.txId
+		const provider = this.providerRef.deref()
+		const port = getCpPort(provider?.context)
+		if (!port) {
+			return {
+				kind: "error",
+				message: "Control-Plane is unavailable, so the open transaction cannot be committed",
+			}
+		}
+
+		let res: Awaited<ReturnType<typeof cpTx.commit>>
+		try {
+			res = await cpTx.commit(port, txId, { strategy: getCommitStrategy() })
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error)
+			provider?.log(`[Task#commitTaskTransaction] ${txId}: ${msg}`)
+			return { kind: "error", message: msg }
+		}
+
+		const data = (res.data ?? {}) as Record<string, any>
+		if (res.ok) {
+			provider?.log(`[Task#commitTaskTransaction] Committed ${txId} -> ${data.merged_sha ?? "?"}`)
+			this.releaseTaskTransaction()
+			return { kind: "committed", mergedSha: data.merged_sha, liveness: data.liveness }
+		}
+
+		const message = cpErrorMessage(res)
+		provider?.log(`[Task#commitTaskTransaction] ${txId} rejected (HTTP ${res.status}): ${message}`)
+		if (res.status === 403 && data.code === "LIVENESS_FAILED") {
+			// The CP has already rolled the worktree back to the last good commit.
+			this.checkpointService = undefined
+			return { kind: "liveness", rollbackTo: data.rollback_to, message }
+		}
+		if (res.status === 409) {
+			return {
+				kind: "conflict",
+				code: typeof data.code === "string" ? data.code : "CONFLICT",
+				message,
+				files: [data.files, data.details?.files, data.details?.conflicts].find(Array.isArray),
+			}
+		}
+		return { kind: "error", message: `HTTP ${res.status}: ${message}` }
+	}
+
+	/**
+	 * Discard this task's transaction (explicit discard, plan failure, history
+	 * deletion). NOT called from abortTask/dispose so cancel → resume keeps working.
+	 */
+	public async abortTaskTransaction(reason: string): Promise<boolean> {
+		if (!this.txId) return true
+		const txId = this.txId
+		const provider = this.providerRef.deref()
+		const port = getCpPort(provider?.context)
+		let ok = false
+		if (port) {
+			try {
+				const res = await cpTx.abort(port, txId, reason)
+				ok = res.ok || res.status === 404
+				if (!res.ok && res.status !== 404) {
+					provider?.log(`[Task#abortTaskTransaction] ${txId}: ${cpErrorMessage(res)}`)
+				}
+			} catch (error) {
+				provider?.log(
+					`[Task#abortTaskTransaction] ${txId}: ${error instanceof Error ? error.message : String(error)}`,
+				)
+			}
+		}
+		this.releaseTaskTransaction()
+		return ok
 	}
 
 	// Task Loop
@@ -5203,7 +5435,7 @@ The tools are available and working. Use them now.`,
 		if (!provider) return
 
 		const cpPort = getCpPort(provider.context)
-		const txId = provider.context?.globalState.get<string>("roo.current_tx_id")
+		const txId = this.rootTxId
 
 		if (!cpPort || !txId) return
 
@@ -5272,7 +5504,7 @@ The tools are available and working. Use them now.`,
 		if (!provider) return
 
 		const cpPort = getCpPort(provider.context)
-		const txId = provider.context?.globalState.get<string>("roo.current_tx_id")
+		const txId = this.rootTxId
 
 		if (!cpPort || !txId) return
 

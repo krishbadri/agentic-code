@@ -200,6 +200,11 @@
 				"category": "Roo"
 			},
 			{
+				"command": "roo.discardTransaction",
+				"title": "Discard Transaction",
+				"category": "Roo"
+			},
+			{
 				"command": "roo-cline.rollbackCheckpoint",
 				"title": "Rollback to Checkpoint",
 				"category": "Roo",
@@ -395,6 +400,21 @@
 					"type": "string",
 					"default": "",
 					"description": "Absolute path to the Agentic-Code monorepo root that contains apps/control-plane. Used to launch the Control-Plane."
+				},
+				"roo.controlPlane.testCommand": {
+					"type": "string",
+					"default": "",
+					"description": "Test command the Control-Plane runs for the progress and liveness gates. Empty = auto-detect from package.json / pytest markers."
+				},
+				"roo.commit.strategy": {
+					"type": "string",
+					"enum": [
+						"rebase",
+						"fail-fast",
+						"hybrid"
+					],
+					"default": "rebase",
+					"description": "How a task's transaction is committed to the workspace branch."
 				},
 				"roo.cpPortOverride": {
 					"type": "number",

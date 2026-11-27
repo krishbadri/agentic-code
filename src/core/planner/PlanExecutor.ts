@@ -5,7 +5,7 @@ import delay from "delay"
 import * as vscode from "vscode"
 import * as path from "path"
 
-import { ControlPlaneUnavailableError, cpErrorMessage, waitForControlPlane } from "../control-plane/client"
+import { ControlPlaneUnavailableError } from "../control-plane/client"
 import * as cpTx from "../control-plane/tx"
 
 export class PlanExecutor {
@@ -439,29 +439,17 @@ export class PlanExecutor {
 	 * Begin a parent transaction in Control-Plane
 	 */
 	private async beginParentTransaction(): Promise<string> {
-		const provider = this.parentTask.providerRef.deref()
-
-		const cpPort = await waitForControlPlane(provider?.context)
-		if (!cpPort) {
-			throw new ControlPlaneUnavailableError("Planner execution requires the Control-Plane, which is unavailable")
+		// The plan runs inside the parent task's own transaction (begun by
+		// Task.ensureTaskTransaction); sub-transactions branch off its worktree.
+		const txId = this.parentTask.txId
+		if (!txId) {
+			throw new ControlPlaneUnavailableError(
+				"Planner execution requires the parent task's Control-Plane transaction",
+			)
 		}
-
-		// Use HEAD as base instead of a specific branch name
-		// This works regardless of whether the repo uses 'main' or 'master'
-		const res = await cpTx.begin(cpPort, { isolation: "hybrid", base: "HEAD" })
-		if (!res.ok) {
-			throw new Error(`Failed to begin transaction: ${cpErrorMessage(res)}`)
-		}
-
-		const txId = res.data.tx_id
-		// Store transaction ID in global state
-		await provider?.context?.globalState.update("roo.current_tx_id", txId)
-		this.parentTask.worktreePath = res.data.worktree_path
-
-		// Store base commit and tx ID for cleanup/merge on failure or completion
-		this.parentBaseCommit = res.data.base_commit
+		this.parentTask.worktreePath = this.parentTask.cwd
+		this.parentBaseCommit = this.parentTask.txBaseCommit
 		this.parentTxId = txId
-
 		return txId
 	}
 
@@ -528,42 +516,6 @@ export class PlanExecutor {
 			await git.commit("Auto-commit before merge", { "--allow-empty": null })
 		} catch {
 			// Ignore — might already be clean
-		}
-	}
-
-	/**
-	 * Merge parent transaction worktree changes back to workspace.
-	 * Called after all sub-transactions succeed and are merged into the parent.
-	 */
-	async mergeParentToWorkspace(): Promise<void> {
-		const provider = this.parentTask.providerRef.deref()
-		const workspaceDir = this.parentTask.cwd
-		const parentWt = this.parentTask.worktreePath
-		if (!workspaceDir || !parentWt) {
-			provider?.log("[PlanExecutor] Cannot merge to workspace: missing paths")
-			return
-		}
-		try {
-			const simpleGit = (await import("simple-git")).default
-			const wsGit = simpleGit(workspaceDir, { binary: "git" })
-
-			// Commit any uncommitted workspace changes so git merge won't refuse to run
-			try {
-				await wsGit.add(["-A"])
-				await wsGit.commit("Pre-merge: snapshot workspace state", { "--allow-empty": null })
-			} catch {
-				// Ignore - workspace may already be clean
-			}
-
-			// Proper three-way merge of the parent transaction branch into workspace.
-			// Uses the branch name rather than a SHA so git can find the common ancestor.
-			const branch = `tx/${this.parentTxId}`
-			await wsGit.merge([branch, "--no-ff", "-m", "Planner: merge all sub-transaction changes"])
-
-			provider?.log(`[PlanExecutor] Merged branch ${branch} → workspace`)
-		} catch (err: any) {
-			provider?.log(`[PlanExecutor] Failed to merge parent worktree to workspace: ${err.message || err}`)
-			throw err
 		}
 	}
 
@@ -966,13 +918,6 @@ export class PlanExecutor {
 
 		if (!cpPort) return
 
-		// Check if transaction still exists (idempotent cleanup)
-		const currentTxId = provider?.context?.globalState.get<string>("roo.current_tx_id")
-		if (currentTxId !== parentTxId) {
-			// Transaction already cleaned up or changed
-			return
-		}
-
 		try {
 			// Rollback parent transaction to base commit if we have it
 			if (this.parentBaseCommit) {
@@ -988,8 +933,6 @@ export class PlanExecutor {
 				}
 			}
 
-			// Clear transaction ID from global state
-			await provider?.context?.globalState.update("roo.current_tx_id", undefined)
 			provider?.log(`[PlanExecutor] Cleaned up parent transaction ${parentTxId}`)
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error)

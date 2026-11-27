@@ -14,7 +14,7 @@ import { DIFF_VIEW_URI_SCHEME } from "../../integrations/editor/DiffViewProvider
 
 import { CheckpointServiceOptions, RepoPerTaskCheckpointService } from "../../services/checkpoints"
 import { SubTransactionManager } from "./SubTransactionManager"
-import { cpBaseUrl, cpErrorMessage, getCpPort, isTransactionalModeEnabled } from "../control-plane/client"
+import { cpBaseUrl, cpErrorMessage, getCpPort } from "../control-plane/client"
 import * as cpTx from "../control-plane/tx"
 
 export async function getCheckpointService(
@@ -60,31 +60,20 @@ export async function getCheckpointService(
 			return undefined
 		}
 
-		// CHECK: Is transactional mode enabled?
-		const txMode = isTransactionalModeEnabled()
-		const cpPort = getCpPort(provider?.context)
-
-		// If transactional mode is enabled and Control-Plane is running, use ControlPlaneCheckpointService
-		if (txMode && cpPort) {
-			try {
-				log(`[Task#getCheckpointService] Using Control-Plane checkpoint service (port ${cpPort})`)
-				// Use the task's own transactionalTxId (composite sub-tx ID) if set,
-				// so checkpoints go to the child's sub-tx worktree, not the parent's.
-				const txId = task.transactionalTxId || provider?.context.globalState?.get<string>("roo.current_tx_id")
-				if (!txId) {
-					log("[Task#getCheckpointService] No transaction ID, creating new one")
-					// Will be set later when transaction begins
-				}
-				const baseUrl = cpBaseUrl(cpPort)
-				const cpService = new ControlPlaneCheckpointService(baseUrl, txId || "pending", log)
-				task.checkpointService = cpService as any
-				log("[Task#getCheckpointService] Control-Plane service initialized")
-				return cpService as any
-			} catch (err) {
-				log(
-					`[Task#getCheckpointService] Failed to initialize Control-Plane service: ${err.message}, falling back to local`,
-				)
+		// A task that owns (or belongs to) a Control-Plane transaction checkpoints
+		// through the CP, in its own worktree (sub-tx composite id for planner
+		// children). It never silently switches to shadow git.
+		const txId = task.worktreeTxId
+		if (txId) {
+			const cpPort = getCpPort(provider?.context)
+			if (!cpPort) {
+				log(`[Task#getCheckpointService] Transaction ${txId} is open but the Control-Plane port is unknown`)
+				return undefined
 			}
+			log(`[Task#getCheckpointService] Using Control-Plane checkpoint service (port ${cpPort}, tx ${txId})`)
+			const cpService = new ControlPlaneCheckpointService(cpBaseUrl(cpPort), txId, log)
+			task.checkpointService = cpService as any
+			return cpService as any
 		}
 
 		// Fallback: use local RepoPerTaskCheckpointService
@@ -267,7 +256,7 @@ export async function rollbackToCheckpointManual(task: Task, commitHash: string)
 	}
 
 	const cpPort = getCpPort(provider.context)
-	const txId = provider.context.globalState.get<string>("roo.current_tx_id")
+	const txId = task.worktreeTxId
 
 	// Try Control-Plane rollback if available
 	// CP rollback resets the WORKTREE only — workspace still needs syncing via Path 3.

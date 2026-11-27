@@ -65,11 +65,13 @@ import { autoImportSettings } from "./utils/autoImportSettings"
 import { API } from "./extension/api"
 import { safeWriteJson } from "./utils/safeWriteJson"
 import {
+	getCpPort,
 	isCpHealthy,
 	isTransactionalModeEnabled,
 	setControlPlaneReady,
 	getControlPlaneReady,
 } from "./core/control-plane/client"
+import * as cpTx from "./core/control-plane/tx"
 
 import {
 	handleUri,
@@ -530,10 +532,13 @@ export async function activate(context: vscode.ExtensionContext) {
 		}),
 	)
 
-	// Internal command for getting current tx id (placeholder)
+	const currentTask = () => (ClineProvider.getVisibleInstance() ?? provider)?.getCurrentTask()
+
+	// Internal command for getting current tx id
 	context.subscriptions.push(
 		vscode.commands.registerCommand("roo.internal.getCurrentTxId", async () => {
-			return (await context.globalState.get<string>("roo.current_tx_id")) || ""
+			// Each task owns its transaction; report the visible task tree's root tx.
+			return currentTask()?.rootTxId || ""
 		}),
 	)
 
@@ -582,40 +587,60 @@ export async function activate(context: vscode.ExtensionContext) {
 		}),
 	)
 
-	// Command: Commit Transaction
+	// Command: Commit Transaction (same single commit path as attempt_completion)
 	context.subscriptions.push(
 		vscode.commands.registerCommand("roo.commitTransaction", async () => {
-			const txId = await vscode.commands.executeCommand<string>("roo.internal.getCurrentTxId")
-			if (!txId) {
+			const task = currentTask()
+			const root = task?.rootTask ?? task
+			if (!root?.txId) {
 				vscode.window.showWarningMessage("No active transaction")
 				return
 			}
-			const strategy = vscode.workspace.getConfiguration().get<string>("roo.commit.strategy", "fail-fast")
-			const port = (await context.globalState.get<number>("roo.cpPort")) || 8899
-			try {
-				const res = await fetch(`http://127.0.0.1:${port}/tx/${txId}/commit`, {
-					method: "POST",
-					headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
-					body: JSON.stringify({ strategy, maxRebaseMs: 3000, maxConflictFiles: 10 }),
-				})
-				if (res.ok) {
-					vscode.window.showInformationMessage("Transaction committed to main")
-					return
-				}
-				if (res.status === 409) {
-					const body = await res.json().catch(() => ({}))
-					const conflicts: string[] = body?.details?.conflicts || []
-					vscode.window.showErrorMessage(
-						conflicts.length
-							? `Commit blocked by conflicts: ${conflicts.slice(0, 5).join(", ")}${conflicts.length > 5 ? "…" : ""}`
-							: "Commit blocked by conflicts",
+			const outcome = await root.commitTaskTransaction()
+			switch (outcome.kind) {
+				case "committed":
+				case "none":
+					vscode.window.showInformationMessage(
+						`Transaction committed${outcome.kind === "committed" && outcome.mergedSha ? ` (${outcome.mergedSha.slice(0, 7)})` : ""}`,
 					)
 					return
-				}
-				const text = await res.text().catch(() => "")
-				vscode.window.showErrorMessage(`Commit failed (${res.status}): ${text}`)
-			} catch (e) {
-				vscode.window.showErrorMessage(`Commit failed: ${e}`)
+				case "conflict":
+					vscode.window.showErrorMessage(
+						`Commit blocked (${outcome.code}): ${outcome.message}` +
+							(outcome.files?.length ? ` — ${outcome.files.slice(0, 5).join(", ")}` : ""),
+					)
+					return
+				case "liveness":
+					vscode.window.showErrorMessage(`Commit blocked by the liveness gate: ${outcome.message}`)
+					return
+				case "error":
+					vscode.window.showErrorMessage(`Commit failed: ${outcome.message}`)
+					return
+			}
+		}),
+	)
+
+	// Command: Discard Transaction (explicitly abandon the current task's transaction;
+	// the user's workspace is left untouched).
+	context.subscriptions.push(
+		vscode.commands.registerCommand("roo.discardTransaction", async () => {
+			const task = currentTask()
+			const root = task?.rootTask ?? task
+			if (!root?.txId) {
+				vscode.window.showWarningMessage("No active transaction")
+				return
+			}
+			const choice = await vscode.window.showWarningMessage(
+				"Discard the current transaction? All uncommitted agent changes in its worktree will be lost.",
+				{ modal: true },
+				"Discard",
+			)
+			if (choice !== "Discard") return
+			const ok = await root.abortTaskTransaction("discarded by user")
+			if (ok) {
+				vscode.window.showInformationMessage("Transaction discarded")
+			} else {
+				vscode.window.showErrorMessage("Could not discard the transaction on the Control-Plane (see output)")
 			}
 		}),
 	)
@@ -640,14 +665,11 @@ export async function activate(context: vscode.ExtensionContext) {
 		}),
 	)
 
-	// Internal: maybe auto-checkpoint based on thresholds
+	// Internal: maybe auto-checkpoint the current task's transaction based on thresholds
 	context.subscriptions.push(
 		vscode.commands.registerCommand("roo.internal.maybeAutoCheckpoint", async () => {
 			const cfg = vscode.workspace.getConfiguration()
-			const transactional =
-				cfg.get<boolean>("roo.experimental.transactionalMode") ||
-				cfg.get<boolean>("roo-cline.experimental.transactionalMode")
-			if (!transactional) return
+			if (!isTransactionalModeEnabled()) return
 			const enabled = cfg.get<boolean>("roo.autoCheckpoint.enabled", true)
 			if (!enabled) return
 			const patchBytesThresh = cfg.get<number>("roo.autoCheckpoint.patchBytes", 8192)
@@ -661,15 +683,11 @@ export async function activate(context: vscode.ExtensionContext) {
 			const should =
 				patchBytes >= patchBytesThresh || filesTouched >= filesTouchedThresh || elapsed >= elapsedMsThresh
 			if (!should) return
-			const txId = await vscode.commands.executeCommand<string>("roo.internal.getCurrentTxId")
-			if (!txId) return
+			const txId = currentTask()?.worktreeTxId
+			const port = getCpPort(context)
+			if (!txId || !port) return
 			try {
-				const port = (await context.globalState.get<number>("roo.cpPort")) || 8899
-				const res = await fetch(`http://127.0.0.1:${port}/tx/${txId}/checkpoint`, {
-					method: "POST",
-					headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
-					body: JSON.stringify({ reason: "auto" }),
-				})
+				const res = await cpTx.checkpoint(port, txId, { reason: "auto" })
 				if (res.ok) {
 					await context.globalState.update("roo.ac.patchBytes", 0)
 					await context.globalState.update("roo.ac.filesTouched", 0)

@@ -16,6 +16,8 @@ export interface ChildResult {
 	worktreePath?: string
 	checkpointHash?: string
 	error?: string
+	/** Wall-clock run time of the child task (used for execution metrics). */
+	durationMs?: number
 }
 
 /**
@@ -25,4 +27,6 @@ export interface ExecutionResult {
 	success: boolean
 	parentTxId?: string
 	failedSubTransactions?: string[]
+	/** Why each failed sub-transaction failed (runtime, safety gate, merge, progress, skipped). */
+	failures?: Array<{ subTxId: string; reason: string }>
 }

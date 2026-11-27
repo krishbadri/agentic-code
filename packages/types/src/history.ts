@@ -19,6 +19,8 @@ export const historyItemSchema = z.object({
 	size: z.number().optional(),
 	workspace: z.string().optional(),
 	mode: z.string().optional(),
+	/** Control-Plane transaction owned by the task; reused on resume if still active. */
+	txId: z.string().optional(),
 })
 
 export type HistoryItem = z.infer<typeof historyItemSchema>

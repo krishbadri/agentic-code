@@ -196,3 +196,199 @@ describe("Task planner fallback (EXT-1)", () => {
 		expect(saidTexts(say).some((t) => t.includes("Planner mode failed"))).toBe(true)
 	})
 })
+
+describe("Task transaction lifecycle (EXT-2)", () => {
+	let nextTx = 0
+
+	beforeEach(() => {
+		vi.clearAllMocks()
+		if (!TelemetryService.hasInstance()) TelemetryService.createInstance([])
+		cpState.port = 4000
+		nextTx = 0
+		vi.mocked(cpTx.begin).mockImplementation(async () => {
+			nextTx++
+			return {
+				ok: true,
+				status: 200,
+				data: {
+					tx_id: `tx-${nextTx}`,
+					base_commit: `base${nextTx}`,
+					branch: `tx/tx-${nextTx}`,
+					worktree_path: `/ws/.cp/worktrees/tx_tx-${nextTx}`,
+				},
+			} as any
+		})
+		vi.mocked(cpTx.abort).mockResolvedValue({ ok: true, status: 200, data: {} } as any)
+		planner.generatePlan.mockResolvedValue({ title: "p", summary: "s", subTransactions: [] })
+	})
+
+	const historyItem = {
+		id: "h1",
+		number: 1,
+		ts: 1,
+		task: COMPLEX_TASK,
+		tokensIn: 0,
+		tokensOut: 0,
+		totalCost: 0,
+		txId: "tx-old",
+	}
+
+	it("each top-level task begins its own transaction (no stale global id)", async () => {
+		const a = makeTask()
+		const b = makeTask()
+		await (a.task as any).startTask(COMPLEX_TASK)
+		await (b.task as any).startTask(COMPLEX_TASK)
+
+		expect(a.task.txId).toBe("tx-1")
+		expect(b.task.txId).toBe("tx-2")
+		expect(a.task.cwd).toBe("/ws/.cp/worktrees/tx_tx-1")
+		expect(a.task.diffViewProvider.cwd).toBe("/ws/.cp/worktrees/tx_tx-1")
+		expect(a.task.originalWorkspacePath).toBe("/ws")
+		expect(a.task.historyWorkspace).toBe("/ws")
+		expect(cpTx.begin).toHaveBeenCalledWith(4000, expect.objectContaining({ isolation: "hybrid", base: "HEAD" }))
+		// The global id is never consulted or written
+		expect(a.provider.context.globalState.update).not.toHaveBeenCalledWith("roo.current_tx_id", expect.anything())
+	})
+
+	it("passes the detected test command to /tx/begin", async () => {
+		const { task } = makeTask()
+		await task.ensureTaskTransaction()
+		expect(cpTx.begin).toHaveBeenCalledWith(4000, expect.objectContaining({ test_command: "npx vitest run" }))
+	})
+
+	it("subtasks never begin their own transaction", async () => {
+		const parent = makeTask().task
+		const child = makeTask(makeProvider(), { parentTask: parent }).task
+		expect(await child.ensureTaskTransaction()).toBeUndefined()
+		expect(cpTx.begin).not.toHaveBeenCalled()
+	})
+
+	it("commit sends the strategy, clears the tx and restores the workspace on 200", async () => {
+		const { task } = makeTask()
+		await task.ensureTaskTransaction()
+		vi.mocked(cpTx.commit).mockResolvedValue({
+			ok: true,
+			status: 200,
+			data: { merged_sha: "m1", liveness: { ran: true, passed: true } },
+		} as any)
+
+		const outcome = await task.commitTaskTransaction()
+		expect(cpTx.commit).toHaveBeenCalledWith(4000, "tx-1", { strategy: "rebase" })
+		expect(outcome).toEqual({ kind: "committed", mergedSha: "m1", liveness: { ran: true, passed: true } })
+		expect(task.txId).toBeUndefined()
+		expect(task.cwd).toBe("/ws")
+		expect(task.diffViewProvider.cwd).toBe("/ws")
+	})
+
+	it("403 LIVENESS_FAILED returns the rollback target and keeps the tx", async () => {
+		const { task } = makeTask()
+		await task.ensureTaskTransaction()
+		vi.mocked(cpTx.commit).mockResolvedValue({
+			ok: false,
+			status: 403,
+			data: { code: "LIVENESS_FAILED", message: "1 failing", rollback_to: "abc123" },
+		} as any)
+		const outcome = await task.commitTaskTransaction()
+		expect(outcome).toMatchObject({ kind: "liveness", rollbackTo: "abc123" })
+		expect(task.txId).toBe("tx-1")
+	})
+
+	it("409 keeps the tx open", async () => {
+		const { task } = makeTask()
+		await task.ensureTaskTransaction()
+		vi.mocked(cpTx.commit).mockResolvedValue({
+			ok: false,
+			status: 409,
+			data: { code: "WORKSPACE_DIRTY", message: "dirty", files: ["a.ts"] },
+		} as any)
+		const outcome = await task.commitTaskTransaction()
+		expect(outcome).toMatchObject({ kind: "conflict", code: "WORKSPACE_DIRTY", files: ["a.ts"] })
+		expect(task.txId).toBe("tx-1")
+		expect(task.cwd).toBe("/ws/.cp/worktrees/tx_tx-1")
+	})
+
+	it("network errors and 5xx fail closed", async () => {
+		const { task } = makeTask()
+		await task.ensureTaskTransaction()
+		vi.mocked(cpTx.commit).mockRejectedValueOnce(new ControlPlaneUnavailableError("unreachable"))
+		expect((await task.commitTaskTransaction()).kind).toBe("error")
+		vi.mocked(cpTx.commit).mockResolvedValueOnce({ ok: false, status: 500, data: { message: "boom" } } as any)
+		expect((await task.commitTaskTransaction()).kind).toBe("error")
+		expect(task.txId).toBe("tx-1")
+	})
+
+	it("aborting the task does not discard the transaction", async () => {
+		const { task } = makeTask()
+		await task.ensureTaskTransaction()
+		vi.spyOn(task as any, "saveClineMessages").mockResolvedValue(undefined)
+		await task.abortTask()
+		expect(cpTx.abort).not.toHaveBeenCalled()
+	})
+
+	it("explicit discard aborts the transaction and restores the workspace", async () => {
+		const { task } = makeTask()
+		await task.ensureTaskTransaction()
+		expect(await task.abortTaskTransaction("discarded by user")).toBe(true)
+		expect(cpTx.abort).toHaveBeenCalledWith(4000, "tx-1", "discarded by user")
+		expect(task.txId).toBeUndefined()
+		expect(task.cwd).toBe("/ws")
+	})
+
+	it("resume reuses the recorded transaction when it is still active", async () => {
+		vi.mocked(cpTx.getTx).mockResolvedValue({
+			ok: true,
+			status: 200,
+			data: { status: "active", worktree_path: "/ws/.cp/worktrees/tx_old", base_commit: "b0" },
+		} as any)
+		const { task } = makeTask(makeProvider(), { historyItem, task: undefined })
+		await task.ensureTaskTransaction()
+		expect(cpTx.getTx).toHaveBeenCalledWith(4000, "tx-old")
+		expect(cpTx.begin).not.toHaveBeenCalled()
+		expect(task.txId).toBe("tx-old")
+		expect(task.cwd).toBe("/ws/.cp/worktrees/tx_old")
+	})
+
+	it("resume begins a new transaction when the recorded one is no longer active", async () => {
+		vi.mocked(cpTx.getTx).mockResolvedValue({ ok: false, status: 404, data: { code: "TX_NOT_FOUND" } } as any)
+		const { task } = makeTask(makeProvider(), { historyItem, task: undefined })
+		await task.ensureTaskTransaction()
+		expect(cpTx.begin).toHaveBeenCalled()
+		expect(task.txId).toBe("tx-1")
+	})
+
+	it("planner success commits through the single commit path", async () => {
+		planner.generatePlan.mockResolvedValue({
+			title: "p",
+			summary: "s",
+			subTransactions: [{ id: "st1", title: "a", prompt: "x" }],
+		})
+		planner.executePlan.mockResolvedValue({ success: true, parentTxId: "tx-1" })
+		vi.mocked(cpTx.commit).mockResolvedValue({ ok: true, status: 200, data: { merged_sha: "m1" } } as any)
+		const { task, loop } = makeTask()
+		await (task as any).startTask(COMPLEX_TASK)
+		expect(cpTx.commit).toHaveBeenCalledWith(4000, "tx-1", { strategy: "rebase" })
+		expect(loop).not.toHaveBeenCalled()
+		expect(task.txId).toBeUndefined()
+	})
+
+	it("plan failure aborts the transaction and reports ids + reasons", async () => {
+		planner.generatePlan.mockResolvedValue({
+			title: "p",
+			summary: "s",
+			subTransactions: [{ id: "st1", title: "a", prompt: "x" }],
+		})
+		planner.executePlan.mockResolvedValue({
+			success: false,
+			parentTxId: "tx-1",
+			failedSubTransactions: ["st1"],
+			failures: [{ subTxId: "st1", reason: "STRUCTURAL_CONFLICT with st0" }],
+		})
+		const { task, say } = makeTask()
+		await (task as any).startTask(COMPLEX_TASK)
+		expect(cpTx.commit).not.toHaveBeenCalled()
+		expect(cpTx.abort).toHaveBeenCalledWith(4000, "tx-1", "plan failed")
+		expect(saidTexts(say).some((t) => t.includes("Plan failed: st1") && t.includes("STRUCTURAL_CONFLICT"))).toBe(
+			true,
+		)
+	})
+})

@@ -88,6 +88,8 @@ import { forceFullModelDetailsLoad, hasLoadedFullDetails } from "../../api/provi
 import { ContextProxy } from "../config/ContextProxy"
 import { ProviderSettingsManager } from "../config/ProviderSettingsManager"
 import { CustomModesManager } from "../config/CustomModesManager"
+import { getCpPort } from "../control-plane/client"
+import * as cpTx from "../control-plane/tx"
 import { Task } from "../task/Task"
 import { getSystemPromptFilePath } from "../prompts/sections/custom-system-prompt"
 
@@ -1571,7 +1573,22 @@ export class ClineProvider
 	async deleteTaskWithId(id: string) {
 		try {
 			// get the task directory full path
-			const { taskDirPath } = await this.getTaskWithId(id)
+			const { taskDirPath, historyItem } = await this.getTaskWithId(id)
+
+			// Deleting a task discards its Control-Plane transaction (best effort; the
+			// user's workspace is never touched by an uncommitted transaction).
+			if (historyItem?.txId) {
+				const cpPort = getCpPort(this.context)
+				if (cpPort) {
+					try {
+						await cpTx.abort(cpPort, historyItem.txId, "task deleted from history")
+					} catch (error) {
+						this.log(
+							`[deleteTaskWithId${id}] failed to abort transaction ${historyItem.txId}: ${error instanceof Error ? error.message : String(error)}`,
+						)
+					}
+				}
+			}
 
 			// remove task from stack if it's the current task
 			if (id === this.getCurrentTask()?.taskId) {
