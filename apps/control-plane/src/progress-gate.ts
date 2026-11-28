@@ -1,130 +1,248 @@
 /**
- * Progress Gate (R33): Monotonic non-decreasing passing test count
+ * Progress Gate (R33): monotonic non-decreasing passing test count.
  *
- * Runs a test command and parses the output to count passing/failing tests.
- * Supports common test frameworks: Jest, Vitest, Mocha, pytest, node test runner.
+ * Runs a test command and parses its output into pass / fail / skip counts.
+ * Parsers are order-independent ("2 failed, 5 passed" and "5 passed, 2 failed"
+ * both work) and anchored to each framework's summary line, so e.g. Vitest's
+ * "Test Files  1 passed" line is never mistaken for the test count.
  */
+import { runCommand, type RunOptions } from "./exec.js"
 
-import { execFile } from "node:child_process"
-import { promisify } from "node:util"
+export type TestOutputFormat = "jest" | "vitest" | "pytest" | "mocha" | "node-test" | "tap" | "go" | "unknown"
 
-const pexec = promisify(execFile)
-
-export interface TestResult {
+export interface ParsedCounts {
 	passingCount: number
 	failingCount: number
+	skippedCount: number
 	totalCount: number
+	format: TestOutputFormat
+}
+
+export interface TestResult extends ParsedCounts {
 	exitCode: number
+	timedOut: boolean
+	spawnError?: string
 	stdout: string
 	stderr: string
 }
 
-/**
- * Run tests in a worktree and count passing/failing tests.
- * Deterministic: same command always produces same count for same code state.
- */
-export async function runTestsAndCount(worktreePath: string, testCommand: string): Promise<TestResult> {
-	// Split command into program and args
-	const parts = testCommand.split(/\s+/)
-	const program = parts[0]
-	if (!program) {
+export async function runTestsAndCount(
+	worktreePath: string,
+	testCommand: string,
+	opts: Pick<RunOptions, "timeoutMs" | "app" | "txId"> = {},
+): Promise<TestResult> {
+	if (!testCommand.trim()) {
 		return {
 			passingCount: 0,
 			failingCount: 0,
+			skippedCount: 0,
 			totalCount: 0,
-			exitCode: 1,
+			format: "unknown",
+			exitCode: 127,
+			timedOut: false,
+			spawnError: "Test command is empty",
 			stdout: "",
 			stderr: "Test command is empty",
 		}
 	}
-	const args = parts.slice(1)
-
-	let stdout = ""
-	let stderr = ""
-	let exitCode = 0
-
-	try {
-		const result = await pexec(program, args, {
-			cwd: worktreePath,
-			windowsHide: true,
-			timeout: 60000, // 60s timeout
-			env: {
-				...process.env,
-				// Force deterministic output for common frameworks
-				FORCE_COLOR: "0",
-				CI: "true",
-			},
-		})
-		stdout = result.stdout
-		stderr = result.stderr
-	} catch (e: any) {
-		// Test command may exit non-zero if tests fail - that's expected
-		exitCode = e.code ?? 1
-		stdout = e.stdout ?? ""
-		stderr = e.stderr ?? ""
-	}
-
-	// Parse test output to count passing/failing
-	const counts = parseTestOutput(stdout + "\n" + stderr)
-
+	const r = await runCommand(worktreePath, testCommand, { timeoutMs: opts.timeoutMs ?? 300_000, ...opts })
+	const counts = parseTestOutput(r.stdout + "\n" + r.stderr)
 	return {
 		...counts,
-		exitCode,
-		stdout,
-		stderr,
+		exitCode: r.exitCode,
+		timedOut: r.timedOut,
+		spawnError: r.spawnError,
+		stdout: r.stdout,
+		stderr: r.stderr,
 	}
 }
 
+function countsFrom(line: string, words: Record<string, RegExp>): Record<string, number> {
+	const out: Record<string, number> = {}
+	for (const [k, re] of Object.entries(words)) {
+		let sum = 0
+		let matched = false
+		for (const m of line.matchAll(re)) {
+			sum += parseInt(m[1]!, 10)
+			matched = true
+		}
+		if (matched) out[k] = sum
+	}
+	return out
+}
+
+const n = (re: string) => new RegExp(`(\\d+)\\s+${re}`, "gi")
+
+function lastMatchingLine(lines: string[], re: RegExp): string | undefined {
+	for (let i = lines.length - 1; i >= 0; i--) {
+		if (re.test(lines[i]!)) return lines[i]
+	}
+	return undefined
+}
+
 /**
- * Parse test framework output to extract pass/fail counts.
- * Supports multiple frameworks with conservative fallback.
+ * Parse test framework output. Exported for unit testing.
  */
-function parseTestOutput(output: string): { passingCount: number; failingCount: number; totalCount: number } {
-	// Jest/Vitest: "Tests:  5 passed, 2 failed, 7 total"
-	const jestMatch = output.match(/Tests?:\s*(\d+)\s*passed(?:,\s*(\d+)\s*failed)?(?:,\s*(\d+)\s*total)?/i)
-	if (jestMatch && jestMatch[1]) {
-		const passed = parseInt(jestMatch[1], 10)
-		const failed = jestMatch[2] ? parseInt(jestMatch[2], 10) : 0
-		const total = jestMatch[3] ? parseInt(jestMatch[3], 10) : passed + failed
-		return { passingCount: passed, failingCount: failed, totalCount: total }
+export function parseTestOutput(rawOutput: string): ParsedCounts {
+	// Strip ANSI colour codes
+	const output = rawOutput.replace(/\x1b\[[0-9;]*m/g, "")
+	const lines = output.split(/\r?\n/)
+
+	// --- Jest: "Tests:       2 failed, 1 skipped, 5 passed, 8 total"
+	const jestLine = lastMatchingLine(lines, /^\s*Tests:\s+.*\d+\s+(passed|failed|total)/i)
+	if (jestLine) {
+		const c = countsFrom(jestLine, {
+			passed: n("passed"),
+			failed: n("failed"),
+			skipped: n("(?:skipped|pending|todo)"),
+			total: n("total"),
+		})
+		const passed = c.passed ?? 0
+		const failed = c.failed ?? 0
+		const skipped = c.skipped ?? 0
+		return {
+			passingCount: passed,
+			failingCount: failed,
+			skippedCount: skipped,
+			totalCount: c.total ?? passed + failed + skipped,
+			format: "jest",
+		}
 	}
 
-	// Mocha: "5 passing" and optionally "2 failing"
-	const mochaPassMatch = output.match(/(\d+)\s*passing/i)
-	const mochaFailMatch = output.match(/(\d+)\s*failing/i)
-	if (mochaPassMatch && mochaPassMatch[1]) {
-		const passed = parseInt(mochaPassMatch[1], 10)
-		const failed = mochaFailMatch && mochaFailMatch[1] ? parseInt(mochaFailMatch[1], 10) : 0
-		return { passingCount: passed, failingCount: failed, totalCount: passed + failed }
+	// --- Vitest: "      Tests  2 failed | 5 passed | 1 skipped (8)"  (NOT the "Test Files" line)
+	const vitestLine = lastMatchingLine(lines, /^\s*Tests\s{2,}.*\d+\s+(passed|failed)/i)
+	if (vitestLine && !/^\s*Test Files/i.test(vitestLine)) {
+		const c = countsFrom(vitestLine, {
+			passed: n("passed"),
+			failed: n("failed"),
+			skipped: n("(?:skipped|todo)"),
+		})
+		const totalM = vitestLine.match(/\((\d+)\)\s*$/)
+		const passed = c.passed ?? 0
+		const failed = c.failed ?? 0
+		const skipped = c.skipped ?? 0
+		return {
+			passingCount: passed,
+			failingCount: failed,
+			skippedCount: skipped,
+			totalCount: totalM ? parseInt(totalM[1]!, 10) : passed + failed + skipped,
+			format: "vitest",
+		}
 	}
 
-	// pytest: "5 passed, 2 failed" or "5 passed"
-	const pytestMatch = output.match(/(\d+)\s*passed(?:,\s*(\d+)\s*failed)?/i)
-	if (pytestMatch && pytestMatch[1]) {
-		const passed = parseInt(pytestMatch[1], 10)
-		const failed = pytestMatch[2] ? parseInt(pytestMatch[2], 10) : 0
-		return { passingCount: passed, failingCount: failed, totalCount: passed + failed }
+	// --- pytest: "==== 2 failed, 5 passed, 1 skipped in 0.12s ====" (also "5 passed in 0.1s")
+	const pytestLine = lastMatchingLine(lines, /\d+\s+(passed|failed|errors?)\b.*\bin\s+[\d.]+\s*s/i)
+	if (pytestLine) {
+		const c = countsFrom(pytestLine, {
+			passed: n("passed"),
+			failed: n("failed"),
+			errors: n("errors?"),
+			skipped: n("(?:skipped|xfailed|deselected)"),
+			xpassed: n("xpassed"),
+		})
+		const passed = (c.passed ?? 0) + (c.xpassed ?? 0)
+		const failed = (c.failed ?? 0) + (c.errors ?? 0)
+		const skipped = c.skipped ?? 0
+		return {
+			passingCount: passed,
+			failingCount: failed,
+			skippedCount: skipped,
+			totalCount: passed + failed + skipped,
+			format: "pytest",
+		}
 	}
 
-	// Node test runner: "tests 5" and "pass 3" "fail 2"
-	const nodePassMatch = output.match(/pass\s*(\d+)/i)
-	const nodeFailMatch = output.match(/fail\s*(\d+)/i)
-	if (nodePassMatch || nodeFailMatch) {
-		const passed = nodePassMatch && nodePassMatch[1] ? parseInt(nodePassMatch[1], 10) : 0
-		const failed = nodeFailMatch && nodeFailMatch[1] ? parseInt(nodeFailMatch[1], 10) : 0
-		return { passingCount: passed, failingCount: failed, totalCount: passed + failed }
+	// --- Mocha: "  5 passing (20ms)" / "  2 failing" / "  1 pending"
+	const mochaPass = output.match(/^\s*(\d+)\s+passing\b/im)
+	if (mochaPass) {
+		const failing = output.match(/^\s*(\d+)\s+failing\b/im)
+		const pending = output.match(/^\s*(\d+)\s+pending\b/im)
+		const passed = parseInt(mochaPass[1]!, 10)
+		const failed = failing ? parseInt(failing[1]!, 10) : 0
+		const skipped = pending ? parseInt(pending[1]!, 10) : 0
+		return {
+			passingCount: passed,
+			failingCount: failed,
+			skippedCount: skipped,
+			totalCount: passed + failed + skipped,
+			format: "mocha",
+		}
 	}
 
-	// Simple fallback: count "ok" and "not ok" (TAP format)
+	// --- node:test: "# pass 3" / "# fail 1" (TAP reporter) or "ℹ pass 3" (spec reporter)
+	const nodePass = output.match(/^[#ℹ]\s*pass\s+(\d+)/im)
+	const nodeFail = output.match(/^[#ℹ]\s*fail\s+(\d+)/im)
+	if (nodePass || nodeFail) {
+		const skippedM = output.match(/^[#ℹ]\s*skipped\s+(\d+)/im)
+		const passed = nodePass ? parseInt(nodePass[1]!, 10) : 0
+		const failed = nodeFail ? parseInt(nodeFail[1]!, 10) : 0
+		const skipped = skippedM ? parseInt(skippedM[1]!, 10) : 0
+		return {
+			passingCount: passed,
+			failingCount: failed,
+			skippedCount: skipped,
+			totalCount: passed + failed + skipped,
+			format: "node-test",
+		}
+	}
+
+	// --- TAP: "ok 1 - ..." / "not ok 2 - ..."
 	const okCount = (output.match(/^ok\s+\d+/gm) || []).length
 	const notOkCount = (output.match(/^not ok\s+\d+/gm) || []).length
 	if (okCount > 0 || notOkCount > 0) {
-		return { passingCount: okCount, failingCount: notOkCount, totalCount: okCount + notOkCount }
+		return {
+			passingCount: okCount,
+			failingCount: notOkCount,
+			skippedCount: 0,
+			totalCount: okCount + notOkCount,
+			format: "tap",
+		}
 	}
 
-	// Fallback: if exit code 0, assume 1 pass; else 0 pass 1 fail
-	// This is a conservative fallback for unknown test formats
-	return { passingCount: 0, failingCount: 0, totalCount: 0 }
+	// --- go test -v: "--- PASS: TestX" / "--- FAIL: TestY"
+	const goPass = (output.match(/^\s*--- PASS:/gm) || []).length
+	const goFail = (output.match(/^\s*--- FAIL:/gm) || []).length
+	if (goPass > 0 || goFail > 0) {
+		const goSkip = (output.match(/^\s*--- SKIP:/gm) || []).length
+		return {
+			passingCount: goPass,
+			failingCount: goFail,
+			skippedCount: goSkip,
+			totalCount: goPass + goFail + goSkip,
+			format: "go",
+		}
+	}
+
+	return { passingCount: 0, failingCount: 0, skippedCount: 0, totalCount: 0, format: "unknown" }
+}
+
+/**
+ * True when the runner started fine but found nothing to run: an empty suite, not a
+ * failing one. Runners report this with a non-zero exit code (pytest: 5, jest/vitest: 1),
+ * which would otherwise block every commit in a repository that has no tests yet.
+ */
+export function noTestsCollected(rawOutput: string, exitCode: number | null | undefined): boolean {
+	const out = rawOutput.replace(/\x1b\[[0-9;]*m/g, "")
+	// pytest: exit 5 == "no tests collected"
+	if (exitCode === 5 && /\bno tests ran\b|\bcollected 0 items\b/i.test(out)) return true
+	// jest: "No tests found, exiting with code 1"; vitest: "No test files found, exiting with code 1"
+	if (exitCode === 1 && /\bNo tests found, exiting with code 1\b|\bNo test files found\b/i.test(out)) return true
+	return false
+}
+
+/**
+ * The passing count the gate compares. For unrecognised output we cannot count
+ * tests, so we fall back to the exit code (exit 0 ⇒ 1 "pass", else 0) — but
+ * only when the baseline was also unrecognised; if the baseline was parseable
+ * and the current output is not, that is treated as 0 passing (the suite broke).
+ */
+export function effectivePassing(
+	result: { passingCount: number; format: TestOutputFormat; exitCode: number },
+	baselineFormat?: TestOutputFormat,
+): number {
+	if (result.format !== "unknown") return result.passingCount
+	if (baselineFormat && baselineFormat !== "unknown") return 0
+	return result.exitCode === 0 ? 1 : 0
 }
 
 /**

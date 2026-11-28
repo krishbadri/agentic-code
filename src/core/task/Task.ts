@@ -131,6 +131,29 @@ import { Gpt5Metadata, ClineMessageWithMetadata } from "./types"
 import { MessageQueueService } from "../message-queue/MessageQueueService"
 
 import { AutoApprovalHandler } from "./AutoApprovalHandler"
+import { TaskLogger } from "./TaskLogger"
+import {
+	cpErrorMessage,
+	getCommitStrategy,
+	getConfiguredTestCommand,
+	getCpPort,
+	isControlPlaneUnavailableError,
+	isCpHealthy,
+	isPlannerModeEnabled,
+	isTransactionalModeEnabled,
+	waitForControlPlane,
+} from "../control-plane/client"
+import { clearQualityGateState, detectProjectCommands } from "../checkpoints/QualityGate"
+import { canRunHeadlessSubAgents, decideHeadlessAsk, type HeadlessApprovalSettings } from "./headlessApproval"
+import * as cpTx from "../control-plane/tx"
+
+/** Result of committing a task's Control-Plane transaction. */
+export type TaskCommitOutcome =
+	| { kind: "none" }
+	| { kind: "committed"; mergedSha?: string; liveness?: { ran: boolean; passed?: boolean; reason?: string } }
+	| { kind: "liveness"; rollbackTo?: string; message: string }
+	| { kind: "conflict"; code: string; message: string; files?: string[] }
+	| { kind: "error"; message: string }
 
 const MAX_EXPONENTIAL_BACKOFF_SECONDS = 600 // 10 minutes
 const DEFAULT_USAGE_COLLECTION_TIMEOUT_MS = 5000 // 5 seconds
@@ -161,6 +184,10 @@ export interface TaskOptions extends CreateTaskOptions {
 	onCreated?: (task: Task) => void
 	initialTodos?: TodoItem[]
 	workspacePath?: string
+	/** Planner children: `<parent>_sub_<rel>` id of the child's sub-tx worktree. */
+	transactionalTxId?: string
+	/** Planner children: the plan's sub-transaction id. */
+	subTransactionId?: string
 }
 
 export class Task extends EventEmitter<TaskEvents> implements TaskLike {
@@ -252,7 +279,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	abandoned = false
 	abortReason?: ClineApiReqCancelReason
 	/** Track if task aborted due to blocked Task#ask in e2e mode (for parent task propagation) */
-	e2eBlockedAskAbort?: { type: string }
+	e2eBlockedAskAbort?: { type: string; reason?: string }
+
+	/** A planner sub-agent: runs in the background in its own sub-transaction, without a UI. */
+	get isHeadlessSubAgent(): boolean {
+		return !!this.parentTask && !!this.subTransactionId
+	}
 	isInitialized = false
 	isPaused: boolean = false
 	pausedModeSlug: string = defaultModeSlug
@@ -327,34 +359,44 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	checkpointService?: RepoPerTaskCheckpointService
 	checkpointServiceInitializing = false
 
-	// Sub-Transactions (semantic units of atomicity)
-	currentSubTransaction?: import("../checkpoints/types").SubTransaction
-	subTransactions: import("../checkpoints/types").SubTransaction[] = []
-
-	// Optional structured task logger for sub-transaction events
-	taskLogger?: {
-		logSubTxCreated(subTxId: string, baseCommit: string): void
-		logSubTxEvent(subTxId: string, event: string, detail?: string): void
-		logSafetyGate(subTxId: string, passed: boolean, checks: string[]): void
-		logToolCall(toolName: string, allowed: boolean, params: Record<string, unknown>): void
-		logQualityGate(...args: unknown[]): void
-		logTaskEnd(status: string, tokenUsage: unknown, toolUsage: unknown): void
-		close(): void
-	}
+	// Per-run structured task logger (JSON lines under <globalStorage>/logs, never in the workspace)
+	taskLogger?: TaskLogger
 
 	// Planner mode
 	plan?: import("../planner/types").Plan
 	worktreePath?: string
 	agentType?: "coder" | "tester" | "reviewer" | "general"
 	subTransactionId?: string // Maps child task to sub-transaction ID
-	/** When true, DiffViewProvider skips CP transactional routing and writes
-	 *  directly to the filesystem.  Set on planner-spawned children so their
-	 *  file writes land in the workspace (not the CP worktree). */
-	skipTransactionalWrites = false
 	/** Composite CP tx_id for sub-transaction children (e.g. "parentTxId_sub_st1").
-	 *  When set, DiffViewProvider routes writes to this sub-tx's CP worktree
-	 *  instead of the parent transaction's worktree. */
+	 *  Addresses the child's own sub-tx worktree for checkpoints, rollback and
+	 *  shell execution. */
 	transactionalTxId?: string
+
+	// Control-Plane transaction owned by this (top-level) task. While set, `cwd`
+	// is the transaction's worktree; the user's workspace changes only on commit.
+	txId?: string
+	txBaseCommit?: string
+	/** The user's workspace before `cwd` was switched to the transaction worktree. */
+	originalWorkspacePath?: string
+	/** Transaction id recorded in history; reused on resume if still active. */
+	private resumeTxId?: string
+	/** Whether the "Control-Plane unavailable" warning was already shown. */
+	cpUnavailableWarned = false
+
+	/** The transaction that owns this task tree (own tx for top-level, else parent's). */
+	public get rootTxId(): string | undefined {
+		return this.txId ?? this.parentTask?.rootTxId
+	}
+
+	/** The CP id whose worktree this task writes to (sub-tx composite id for planner children). */
+	public get worktreeTxId(): string | undefined {
+		return this.transactionalTxId ?? this.txId
+	}
+
+	/** Workspace recorded in history: the user's workspace, never a transaction worktree. */
+	public get historyWorkspace(): string {
+		return this.originalWorkspacePath ?? this.parentTask?.historyWorkspace ?? this.cwd
+	}
 
 	// Task Bridge
 	enableBridge: boolean
@@ -407,8 +449,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		onCreated,
 		initialTodos,
 		workspacePath,
+		transactionalTxId,
+		subTransactionId,
 	}: TaskOptions) {
 		super()
+		this.transactionalTxId = transactionalTxId
+		this.subTransactionId = subTransactionId
 
 		// Torture runs prioritize determinism and robustness over surgical diffs.
 		// In practice, models frequently misformat apply_diff (leading to loops/timeouts).
@@ -422,6 +468,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 
 		this.taskId = historyItem ? historyItem.id : crypto.randomUUID()
+		this.resumeTxId = historyItem?.txId
 		this.rootTaskId = historyItem ? historyItem.rootTaskId : rootTask?.taskId
 		this.parentTaskId = historyItem ? historyItem.parentTaskId : parentTask?.taskId
 		this.childTaskId = undefined
@@ -442,6 +489,25 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		this.instanceId = crypto.randomUUID().slice(0, 8)
 		this.taskNumber = -1
+
+		// Per-run task logger for root tasks. Logs go to global storage so they
+		// never dirty the user's repository (or a transaction worktree).
+		if (!parentTask && process.env.NODE_ENV !== "test") {
+			try {
+				const ts = new Date()
+					.toISOString()
+					.replace(/:/g, "")
+					.replace(/\.\d+Z$/, "")
+				const logFile = path.join(
+					provider.context.globalStorageUri.fsPath,
+					"logs",
+					`${ts}-${this.taskId.slice(0, 8)}.log`,
+				)
+				this.taskLogger = new TaskLogger(logFile)
+			} catch {
+				// Non-fatal: logging must never break the task
+			}
+		}
 
 		this.rooIgnoreController = new RooIgnoreController(this.cwd)
 		this.rooProtectedController = new RooProtectedController(this.cwd)
@@ -788,8 +854,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				taskNumber: this.taskNumber,
 				messages: this.clineMessages,
 				globalStoragePath: this.globalStoragePath,
-				workspace: this.cwd,
+				workspace: this.historyWorkspace,
 				mode: this._taskMode || defaultModeSlug, // Use the task's own mode, not the current provider mode.
+				// Until a resumed task has re-attached, keep the recorded id: saving without it
+				// would orphan the open transaction and its uncommitted work.
+				txId: this.txId ?? this.resumeTxId,
 			})
 
 			if (hasTokenUsageChanged(tokenUsage, this.tokenUsageSnapshot)) {
@@ -980,6 +1049,27 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		// E2E mode: Prevent ALL blocking Task#ask calls
 		const isE2EMode = !!(process.env.TEST_TORTURE_REPO || process.env.TEST_TORTURE_REPO_WORKSPACE)
+
+		// Planner sub-agents run in the background (several in parallel) and the chat view
+		// only answers the task on top of the stack, so their asks are decided here, from the
+		// user's auto-approval settings. See headlessApproval.ts.
+		if (this.isHeadlessSubAgent && !isE2EMode && isBlocking && !isMessageQueued) {
+			const provider = this.providerRef.deref()
+			const state = await provider?.getState()
+			const decision = decideHeadlessAsk(type, text, isProtected, (state ?? {}) as HeadlessApprovalSettings)
+			if (decision.kind === "approve") {
+				this.handleWebviewAskResponse("yesButtonClicked")
+			} else if (decision.kind === "respond") {
+				this.setMessageResponse(decision.text)
+			} else {
+				const errorMessage = `Sub-agent blocked: ${decision.reason}`
+				provider?.log(`[Task#ask] ${errorMessage} - Task: ${this.taskId} (${this.subTransactionId})`)
+				this.e2eBlockedAskAbort = { type, reason: decision.reason }
+				await this.abortTask()
+				throw new Error(errorMessage)
+			}
+		}
+
 		if (isE2EMode && isBlocking && !isMessageQueued) {
 			const provider = this.providerRef.deref()
 			const state = await provider?.getState()
@@ -2229,9 +2319,7 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 		const exceedsMaxDepth = nestingDepth >= MAX_PLANNER_DEPTH
 
 		// Check if planner mode is enabled (read from configuration)
-		const cfg = vscode.workspace.getConfiguration()
-		let plannerModeEnabled =
-			cfg.get<boolean>("roo.experimental.plannerMode") || cfg.get<boolean>("roo-cline.experimental.plannerMode")
+		let plannerModeEnabled = isPlannerModeEnabled()
 
 		// Allow planner mode for:
 		// 1. Root tasks (not subtasks)
@@ -2260,7 +2348,43 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 				)
 		}
 
-		if (plannerMode && task && !isSimpleRequest) {
+		// Every top-level task is a Control-Plane transaction (when the CP is available):
+		// from here on `this.cwd` is the transaction's worktree and the user's workspace
+		// changes only when the transaction commits.
+		await this.ensureTaskTransaction()
+
+		// Planner mode requires the Control-Plane (worktrees, safety gates, merge pipeline)
+		// and runs inside this task's transaction. Without it, run the normal single-agent loop.
+		const plannerCpAvailable = !!this.txId
+		if (plannerMode && task && !isSimpleRequest && !plannerCpAvailable) {
+			this.providerRef.deref()?.log(`[Task#startTask] Control-Plane unavailable; skipping planner mode`)
+			if (!this.cpUnavailableWarned) {
+				this.cpUnavailableWarned = true
+				await this.say("text", "⚠ Control-Plane unavailable; executing as single agent.")
+			}
+		}
+
+		// Sub-agents cannot prompt the user. If the auto-approval settings would not let them
+		// read and edit files, run as a single (interactive) agent instead of failing the plan.
+		let plannerApprovalsOk = true
+		if (plannerMode && task && !isSimpleRequest && plannerCpAvailable) {
+			const isE2EMode = !!(process.env.TEST_TORTURE_REPO || process.env.TEST_TORTURE_REPO_WORKSPACE)
+			if (!isE2EMode) {
+				const state = await this.providerRef.deref()?.getState()
+				const check = canRunHeadlessSubAgents((state ?? {}) as HeadlessApprovalSettings)
+				if (!check.ok) {
+					plannerApprovalsOk = false
+					this.providerRef
+						.deref()
+						?.log(`[Task#startTask] Skipping planner mode: ${check.reason} (sub-agents cannot prompt)`)
+				}
+			}
+		}
+
+		if (plannerMode && task && !isSimpleRequest && plannerCpAvailable && plannerApprovalsOk) {
+			// Until the plan starts executing nothing has been changed, so a failure to
+			// *produce* a plan (model error, unparsable answer) is recoverable.
+			let planExecutionStarted = false
 			try {
 				const { PlannerAgent, shouldOpenCircuitBreaker } = await import("../planner/PlannerAgent")
 				const { PlanExecutor } = await import("../planner/PlanExecutor")
@@ -2341,25 +2465,41 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 						// Fall through to normal execution below
 					} else {
 						const executor = new PlanExecutor(this)
+						planExecutionStarted = true
 						const result = await executor.executePlan(plan)
 
 						if (result.success) {
-							// Merge parent worktree changes back to workspace (durability invariant)
-							await executor.mergeParentToWorkspace()
-							await this.say("text", "Plan executed successfully. All sub-transactions completed.")
-							// Emit TaskCompleted for parent task when planner mode succeeds
-							// This ensures the parent task is properly marked as completed
-							// for waitUntilCompleted and E2E test listeners
-							this.emit(RooCodeEventName.TaskCompleted, this.taskId, this.getTokenUsage(), this.toolUsage)
+							// All sub-transactions merged into this task's transaction. The single
+							// commit path applies it to the user's workspace (liveness-gated).
+							const outcome = await this.commitTaskTransaction()
+							if (outcome.kind === "committed" || outcome.kind === "none") {
+								await this.say("text", "Plan executed successfully. All sub-transactions completed.")
+							} else {
+								await this.say(
+									"text",
+									`⚠ Plan executed, but the transaction could not be committed: ${outcome.message}` +
+										(outcome.kind === "conflict"
+											? "\nThe transaction is still open; resolve the conflict and run 'Roo: Commit Transaction'."
+											: ""),
+								)
+							}
 						} else {
+							const reasons = (result.failures ?? []).map((f) => `- ${f.subTxId}: ${f.reason}`).join("\n")
 							await this.say(
 								"text",
-								`Plan execution completed with failures. Failed sub-transactions: ${result.failedSubTransactions?.join(", ") || "unknown"}`,
+								`Plan failed: ${result.failedSubTransactions?.join(", ") || "unknown"}` +
+									(reasons ? `\n${reasons}` : "") +
+									"\nThe transaction was discarded; your workspace is unchanged.",
 							)
-							// Even on partial failure, emit TaskCompleted since the plan execution finished
-							// The result.success flag indicates if all subtasks passed
-							this.emit(RooCodeEventName.TaskCompleted, this.taskId, this.getTokenUsage(), this.toolUsage)
+							await this.abortTaskTransaction("plan failed")
 						}
+						// Emit TaskCompleted since plan execution finished (the result flag tells
+						// listeners whether all subtasks passed).
+						const plannerTokenUsage = this.getTokenUsage()
+						this.taskLogger?.logTaskEnd("success", plannerTokenUsage as any, this.toolUsage as any)
+						this.taskLogger?.close()
+						this.taskLogger = undefined
+						this.emit(RooCodeEventName.TaskCompleted, this.taskId, plannerTokenUsage, this.toolUsage)
 
 						// Planner mode execution complete — signal the main loop to exit
 						this.finishedSuccessfully = true
@@ -2386,47 +2526,43 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 				// Cancel all spawned child tasks to prevent them from continuing to make API calls
 				await this.cancelAllChildTasks()
 
-				// Clean up worktrees and parent transaction
-				const provider = this.providerRef.deref()
-				const parentTxId = provider?.context?.globalState.get<string>("roo.current_tx_id")
-				if (parentTxId && this.plan) {
+				// Roll back every sub-transaction worktree (best effort; 404s are fine).
+				if (this.txId && this.plan) {
 					try {
 						const { PlanExecutor } = await import("../planner/PlanExecutor")
-						const executor = new PlanExecutor(this)
-
-						// Rollback all sub-transaction worktrees to prevent orphaned worktrees
-						await executor.rollbackAllSubTransactions(this.plan, parentTxId)
-
-						// Clean up parent transaction
-						await (executor as any).cleanupParentTransaction(parentTxId)
-					} catch (cleanupError) {
-						const cleanupErrorMessage =
-							cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
-						provider?.log(`[Task#startTask] Error during planner cleanup: ${cleanupErrorMessage}`)
-						// Continue - don't block fallthrough to normal execution
-					}
-				} else if (parentTxId) {
-					// No plan but we have a parent transaction - just clean it up
-					try {
-						const { PlanExecutor } = await import("../planner/PlanExecutor")
-						const executor = new PlanExecutor(this)
-						await (executor as any).cleanupParentTransaction(parentTxId)
-					} catch (cleanupError) {
-						// Ignore cleanup errors
+						await new PlanExecutor(this).rollbackAllSubTransactions(this.plan, this.txId)
+					} catch {
+						// CP may be unreachable; nothing more we can do here
 					}
 				}
-				// Do NOT fall through to normal execution — the LLM already
-				// generated a plan JSON which is in the conversation. If normal
-				// mode runs, the LLM sees the plan and immediately calls
-				// attempt_completion, producing a "Task Completed" with zero
-				// actual work.  Instead, report the failure and stop.
-				await this.say(
-					"text",
-					`⚠ Planner mode failed: ${errorMessage}\n\nCheck the Roo Code output panel for details. ` +
-						`Common causes:\n- Control-Plane not running (check roo.cpPort)\n- CP port stale (reload window)\n- Sub-transaction creation failed`,
-				)
-				this.finishedSuccessfully = true // stop the main loop
-				return
+				this.plan = undefined
+
+				if (isControlPlaneUnavailableError(error)) {
+					// The Control-Plane went away mid-plan: detach from the (unreachable)
+					// transaction and fall through to normal single-agent execution in the
+					// user's workspace. The planner never writes to the conversation history,
+					// so the normal loop starts clean.
+					this.releaseTaskTransaction()
+					this.cpUnavailableWarned = true
+					await this.say(
+						"text",
+						`⚠ Control-Plane unavailable during planning (${errorMessage}); executing as single agent.`,
+					)
+				} else if (!planExecutionStarted) {
+					// No plan was produced, so nothing ran: keep the transaction and let the
+					// normal single-agent loop do the work (it has the regular retry UI if the
+					// model itself is the problem).
+					await this.say("text", `⚠ Planning failed (${errorMessage}); continuing as a single agent.`)
+				} else {
+					await this.abortTaskTransaction(`planner failed: ${errorMessage}`)
+					await this.say(
+						"text",
+						`⚠ Planner mode failed: ${errorMessage}\n\nThe transaction was discarded; your workspace is unchanged. ` +
+							`Check the Roo Code output panel for details.`,
+					)
+					this.finishedSuccessfully = true // stop the main loop
+					return
+				}
 			}
 		}
 
@@ -2717,6 +2853,10 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 
 		await this.overwriteApiConversationHistory(modifiedApiConversationHistory)
 
+		// Re-attach to the task's transaction if the CP still has it open (cancel →
+		// resume keeps the work), otherwise begin a fresh one.
+		await this.ensureTaskTransaction()
+
 		// Task resuming from history item.
 		await this.initiateTaskLoop(newUserContent)
 	}
@@ -2730,6 +2870,9 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 		}
 
 		this.abort = true
+		this.taskLogger?.logTaskEnd("aborted")
+		this.taskLogger?.close()
+		this.taskLogger = undefined
 		this.emit(RooCodeEventName.TaskAborted)
 
 		try {
@@ -2752,6 +2895,7 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 
 		// Clean up condense guard for this task
 		clearCondenseGuard(this.taskId)
+		clearQualityGateState(this.taskId)
 
 		// Dispose message queue and remove event listeners.
 		try {
@@ -2992,10 +3136,18 @@ DO NOT invent your own API - match the existing interface EXACTLY.
 	 * - Missing tags: <read_file><path>...</path> → adds </read_file> and <args> wrapper
 	 * - Malformed structure: fixes missing args, file wrappers, etc.
 	 */
+	private streamingToolCallRepairer?: (chunk: string) => { repaired: boolean; text: string; repairs: string[] }
+
+	/**
+	 * Repair one streamed chunk. Only text that precedes the first valid tool call of the
+	 * message is repaired: the contents of a valid tool call (the <command> parameter, file
+	 * content being written, ...) must reach the parser verbatim.
+	 */
 	private repairToolCalls(text: string): string {
 		// Use dynamic import to avoid circular dependencies and ensure proper module loading
-		const { repairToolCalls: repair } = require("../assistant-message/toolCallRepairer")
-		const result = repair(text)
+		const { createStreamingToolCallRepairer } = require("../assistant-message/toolCallRepairer")
+		this.streamingToolCallRepairer ??= createStreamingToolCallRepairer()
+		const result = this.streamingToolCallRepairer!(text)
 
 		// Log repairs for debugging
 		if (result.repaired && result.repairs.length > 0) {
@@ -3041,6 +3193,14 @@ DO NOT invent your own API - match the existing interface EXACTLY.
   </file>
 </args>
 </read_file>
+Only read_file uses <args>. Every other tool takes its parameters directly, for example:
+<write_to_file>
+<path>path/to/file</path>
+<content>
+full file content
+</content>
+<line_count>3</line_count>
+</write_to_file>
 Do NOT ask the user for permission or file contents. Do NOT delegate via new_task or switch_mode — complete the work directly.`
 
 		// If file targets are provided from steps, add them as helpful context
@@ -3076,11 +3236,19 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 	 */
 	public async spawnChildTasks(plan: {
 		subTransactions: import("@roo-code/types").SubTransaction[]
-		worktreePaths?: Map<string, string> // subTxId → worktree path (pre-created)
+		/** subTxId → pre-created CP worktree. Every sub-transaction MUST have one (R13). */
+		worktrees: Map<string, { path: string; txId: string }>
 	}): Promise<Task[]> {
 		const provider = this.providerRef.deref()
 		if (!provider) {
 			throw new Error("Provider not available")
+		}
+		// R13: a sub-transaction never runs outside its own isolated worktree.
+		const missing = plan.subTransactions.filter((stx) => !plan.worktrees.get(stx.id))
+		if (missing.length > 0) {
+			throw new Error(
+				`Cannot spawn sub-transaction(s) without a worktree: ${missing.map((stx) => stx.id).join(", ")}`,
+			)
 		}
 
 		const children: Task[] = []
@@ -3103,7 +3271,8 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 				}
 
 				// Resolve the worktree path for this sub-transaction (if pre-created)
-				const worktreePath = plan.worktreePaths?.get(subTx.id)
+				const worktree = plan.worktrees.get(subTx.id)!
+				const worktreePath = worktree.path
 
 				// VALIDATION: Check that file targets from plan steps actually exist
 				// Validate against the worktree path if available, otherwise parent's cwd
@@ -3156,13 +3325,18 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 					this, // parent
 					{
 						initialTodos: [],
-						...(worktreePath && { workspacePath: worktreePath }),
+						workspacePath: worktreePath,
+						// Set at construction so the very first tool call / checkpoint
+						// already addresses the child's own sub-tx worktree.
+						transactionalTxId: worktree.txId,
+						subTransactionId: subTx.id,
 					} as any,
 				)
 				if (child) {
-					// Set agent type and sub-transaction ID
 					child.agentType = subTx.agentType
 					child.subTransactionId = subTx.id
+					child.transactionalTxId = worktree.txId
+					child.worktreePath = worktreePath
 
 					// CRITICAL: Override mode for planner-spawned subtasks.
 					// The child inherits the parent's mode via initializeTaskMode()
@@ -3285,7 +3459,11 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 					success,
 					worktreePath: child.worktreePath,
 					checkpointHash: child.checkpointService?.baseHash,
-					error: !success ? "Task failed or was aborted" : undefined,
+					error: !success
+						? child.e2eBlockedAskAbort?.reason
+							? `Sub-agent blocked: ${child.e2eBlockedAskAbort.reason}`
+							: "Task failed or was aborted"
+						: undefined,
 				})
 			}),
 		)
@@ -3313,44 +3491,270 @@ Do NOT ask the user for permission or file contents. Do NOT delegate via new_tas
 		// This method exists for interface completeness
 	}
 
+	// ── Control-Plane transaction lifecycle ─────────────────────────────────
+	//
+	// When the CP is available every top-level task is one transaction: `cwd`
+	// is the transaction worktree, all reads/writes/commands/tests happen there,
+	// and the user's workspace changes only through `commitTaskTransaction()`.
+
+	/**
+	 * Begin (or, on resume, re-attach to) this top-level task's transaction.
+	 * Never reuses a global/stale id: each task owns its own transaction.
+	 * Returns the tx id, or undefined when running without a transaction.
+	 */
+	/**
+	 * `say` throws once the task has been aborted. Transaction setup runs at the very start
+	 * of a task and may still be awaiting the Control-Plane when the user cancels; a notice
+	 * that can no longer be shown must not turn into an unhandled rejection.
+	 */
+	private async sayIfActive(type: ClineSay, text: string): Promise<void> {
+		if (this.abort) return
+		try {
+			await this.say(type, text)
+		} catch (error) {
+			if (!this.abort) throw error
+		}
+	}
+
+	public async ensureTaskTransaction(): Promise<string | undefined> {
+		if (this.parentTask) return undefined
+		if (this.txId) return this.txId
+		if (!isTransactionalModeEnabled()) return undefined
+
+		const provider = this.providerRef.deref()
+		if (!provider) return undefined
+
+		const port = await waitForControlPlane(provider.context)
+		if (!port) {
+			provider.log(`[Task#ensureTaskTransaction] Control-Plane unavailable; running without a transaction`)
+			if (!this.cpUnavailableWarned) {
+				this.cpUnavailableWarned = true
+				await this.sayIfActive("text", "⚠ Control-Plane unavailable; executing as single agent.")
+			}
+			return undefined
+		}
+
+		// The server manages exactly one repository. If this task works in another folder
+		// (multi-root workspace, workspace override) a transaction would edit — and commit
+		// to — the wrong repository.
+		if (!(await isCpHealthy(port, 2_000, this.cwd))) {
+			provider.log(
+				`[Task#ensureTaskTransaction] Control-Plane on port ${port} does not manage ${this.cwd}; ` +
+					`running without a transaction`,
+			)
+			if (!this.cpUnavailableWarned) {
+				this.cpUnavailableWarned = true
+				await this.sayIfActive(
+					"text",
+					"⚠ Control-Plane unavailable for this folder (it manages a different one); executing as single agent.",
+				)
+			}
+			return undefined
+		}
+
+		try {
+			// Resume: re-attach to the recorded transaction if the CP still has it open.
+			const resumeId = this.resumeTxId
+			this.resumeTxId = undefined
+			if (resumeId) {
+				const info = await cpTx.getTx(port, resumeId)
+				if (info.ok && info.data?.status === "active" && info.data.worktree_path) {
+					this.adoptTaskTransaction(resumeId, info.data.worktree_path, info.data.base_commit)
+					provider.log(`[Task#ensureTaskTransaction] Resumed active transaction ${resumeId}`)
+					return this.txId
+				}
+				provider.log(
+					`[Task#ensureTaskTransaction] Recorded transaction ${resumeId} is not active (${
+						info.ok ? info.data?.status : `HTTP ${info.status}`
+					}); beginning a new one`,
+				)
+			}
+
+			const commands = detectProjectCommands(this.cwd)
+			const testCommand = getConfiguredTestCommand() ?? commands.testCommand ?? undefined
+			const compileCommand = commands.compileCommand ?? undefined
+
+			const res = await cpTx.begin(port, {
+				isolation: "hybrid",
+				base: "HEAD",
+				...(testCommand ? { test_command: testCommand } : {}),
+				...(compileCommand ? { compile_command: compileCommand } : {}),
+			})
+			if (!res.ok || !res.data?.tx_id || !res.data.worktree_path) {
+				const msg = res.ok ? "missing tx_id/worktree_path" : cpErrorMessage(res)
+				provider.log(`[Task#ensureTaskTransaction] /tx/begin failed: ${msg}`)
+				await this.sayIfActive(
+					"text",
+					`⚠ Could not begin a Control-Plane transaction (${msg}); executing as single agent.`,
+				)
+				this.cpUnavailableWarned = true
+				return undefined
+			}
+
+			this.adoptTaskTransaction(res.data.tx_id, res.data.worktree_path, res.data.base_commit)
+			const baseline = (res.data as any).progress_baseline
+			if (baseline?.failingAtBase) {
+				// Liveness requires a green suite at commit: say so now, not at the end.
+				await this.sayIfActive(
+					"text",
+					`⚠ The test command (\`${testCommand}\`) is already failing before any change. ` +
+						"This task's changes can only be committed once the tests pass; fix them as part of the task, " +
+						"or set 'roo.controlPlane.testCommand' to the right command.",
+				)
+			}
+			provider.log(
+				`[Task#ensureTaskTransaction] Began transaction ${res.data.tx_id} at ${res.data.base_commit} ` +
+					`(worktree ${res.data.worktree_path}, test_command=${testCommand ?? "none"})`,
+			)
+			return this.txId
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error)
+			provider.log(`[Task#ensureTaskTransaction] Failed: ${msg}`)
+			if (!this.cpUnavailableWarned) {
+				this.cpUnavailableWarned = true
+				await this.sayIfActive("text", "⚠ Control-Plane unavailable; executing as single agent.")
+			}
+			return undefined
+		}
+	}
+
+	/** Point this task at a transaction worktree. */
+	private adoptTaskTransaction(txId: string, worktreePath: string, baseCommit?: string): void {
+		this.originalWorkspacePath ??= this.cwd
+		this.txId = txId
+		this.txBaseCommit = baseCommit
+		this.switchCwd(worktreePath)
+	}
+
+	/**
+	 * Detach from the transaction (after commit/abort, or when the CP vanished)
+	 * and point the task back at the user's workspace.
+	 */
+	public releaseTaskTransaction(): void {
+		const original = this.originalWorkspacePath
+		this.txId = undefined
+		this.txBaseCommit = undefined
+		this.originalWorkspacePath = undefined
+		if (original) this.switchCwd(original)
+	}
+
+	private switchCwd(dir: string): void {
+		if (this.cwd === dir) return
+		this.cwd = dir
+		this.diffViewProvider.cwd = dir
+		// The checkpoint service is bound to a directory / tx id; rebuild lazily.
+		this.checkpointService = undefined
+		this.checkpointServiceInitializing = false
+		try {
+			this.rooIgnoreController?.dispose()
+		} catch {
+			// ignore
+		}
+		this.rooIgnoreController = new RooIgnoreController(dir)
+		this.rooIgnoreController.initialize().catch((error) => {
+			console.error("Failed to initialize RooIgnoreController:", error)
+		})
+		this.rooProtectedController = new RooProtectedController(dir)
+	}
+
+	/**
+	 * The single commit path (attempt_completion and planner success).
+	 * Fails CLOSED: anything other than a 200 keeps completion blocked.
+	 */
+	public async commitTaskTransaction(): Promise<TaskCommitOutcome> {
+		if (!this.txId) return { kind: "none" }
+		const txId = this.txId
+		const provider = this.providerRef.deref()
+		const port = getCpPort(provider?.context)
+		if (!port) {
+			return {
+				kind: "error",
+				message: "Control-Plane is unavailable, so the open transaction cannot be committed",
+			}
+		}
+
+		let res: Awaited<ReturnType<typeof cpTx.commit>>
+		try {
+			res = await cpTx.commit(port, txId, { strategy: getCommitStrategy() })
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error)
+			provider?.log(`[Task#commitTaskTransaction] ${txId}: ${msg}`)
+			return { kind: "error", message: msg }
+		}
+
+		const data = (res.data ?? {}) as Record<string, any>
+		if (res.ok) {
+			provider?.log(`[Task#commitTaskTransaction] Committed ${txId} -> ${data.merged_sha ?? "?"}`)
+			this.releaseTaskTransaction()
+			return { kind: "committed", mergedSha: data.merged_sha, liveness: data.liveness }
+		}
+
+		const message = cpErrorMessage(res)
+		provider?.log(`[Task#commitTaskTransaction] ${txId} rejected (HTTP ${res.status}): ${message}`)
+		if (res.status === 403 && data.code === "LIVENESS_FAILED") {
+			// The CP has already rolled the worktree back to the last good commit.
+			this.checkpointService = undefined
+			return { kind: "liveness", rollbackTo: data.rollback_to, message }
+		}
+		if (res.status === 409) {
+			return {
+				kind: "conflict",
+				code: typeof data.code === "string" ? data.code : "CONFLICT",
+				message,
+				files: [data.files, data.details?.files, data.details?.conflicts].find(Array.isArray),
+			}
+		}
+		return { kind: "error", message: `HTTP ${res.status}: ${message}` }
+	}
+
+	/**
+	 * Discard this task's transaction (explicit discard, plan failure, history
+	 * deletion). NOT called from abortTask/dispose so cancel → resume keeps working.
+	 */
+	public async abortTaskTransaction(reason: string): Promise<boolean> {
+		if (!this.txId) return true
+		const txId = this.txId
+		const provider = this.providerRef.deref()
+		const port = getCpPort(provider?.context)
+		let ok = false
+		if (port) {
+			try {
+				const res = await cpTx.abort(port, txId, reason)
+				ok = res.ok || res.status === 404
+				if (!res.ok && res.status !== 404) {
+					provider?.log(`[Task#abortTaskTransaction] ${txId}: ${cpErrorMessage(res)}`)
+				}
+			} catch (error) {
+				provider?.log(
+					`[Task#abortTaskTransaction] ${txId}: ${error instanceof Error ? error.message : String(error)}`,
+				)
+			}
+		}
+		this.releaseTaskTransaction()
+		return ok
+	}
+
 	// Task Loop
 
 	private async initiateTaskLoop(userContent: Anthropic.Messages.ContentBlockParam[]): Promise<void> {
 		// Kicks off the checkpoints initialization process in the background.
 		const checkpointServicePromise = getCheckpointService(this)
 
-		// Initialize sub-transaction once checkpoint service is ready
-		checkpointServicePromise
-			.then(async (service) => {
-				if (service && this.enableCheckpoints) {
-					try {
-						const { SubTransactionManager } = await import("../checkpoints/SubTransactionManager")
-						const manager = new SubTransactionManager(this)
-
-						// Get current HEAD as baseCheckpoint
-						const simpleGit = (await import("simple-git")).default
-						const workspaceDir = this.cwd || getWorkspacePath()
-						if (workspaceDir) {
-							const git = simpleGit(workspaceDir, { binary: "git" })
-							const baseCheckpoint = await git.revparse(["HEAD"])
-							await manager.createSubTransaction(baseCheckpoint)
-						}
-					} catch (error) {
-						const provider = this.providerRef.deref()
-						provider?.log(
-							`[Task#initiateTaskLoop] Failed to initialize sub-transaction: ${error instanceof Error ? error.message : String(error)}`,
-						)
-					}
-				}
-			})
-			.catch(() => {
-				// Ignore errors - checkpoint service may not be available
-			})
+		// Kick off checkpoint service initialization (CP-backed when the task owns a transaction).
+		void checkpointServicePromise.catch(() => {})
 
 		let nextUserContent = userContent
 		let includeFileDetails = true
 
 		this.emit(RooCodeEventName.TaskStarted)
+
+		this.taskLogger?.logTaskStart(
+			this.taskId,
+			this.api.getModel().id,
+			(this.apiConfiguration as any)?.apiProvider ?? "unknown",
+			this._taskMode ?? "unknown",
+			this.metadata.task?.slice(0, 200) ?? "",
+		)
 
 		while (!this.abort && !this.finishedSuccessfully) {
 			const didEndLoop = await this.recursivelyMakeClineRequests(nextUserContent, includeFileDetails)
@@ -3613,6 +4017,7 @@ Only AFTER you have a valid file path from the discovery tool results should you
 				this.presentAssistantMessageLocked = false
 				this.presentAssistantMessageHasPendingUpdates = false
 				this.assistantMessageParser.reset()
+				this.streamingToolCallRepairer = undefined
 
 				await this.diffViewProvider.reset()
 
@@ -4091,6 +4496,7 @@ Only AFTER you have a valid file path from the discovery tool results should you
 
 				// Reset parser after each complete conversation round
 				this.assistantMessageParser.reset()
+				this.streamingToolCallRepairer = undefined
 
 				// Now add to apiConversationHistory.
 				// Need to save assistant responses to file before proceeding to
@@ -4168,6 +4574,7 @@ Only AFTER you have a valid file path from the discovery tool results should you
 
 								// Reset parser and reparse the repaired text
 								this.assistantMessageParser.reset()
+								this.streamingToolCallRepairer = undefined
 								this.assistantMessageContent = this.assistantMessageParser.processChunk(
 									repairResult.text,
 								)
@@ -5165,24 +5572,17 @@ The tools are available and working. Use them now.`,
 		const provider = this.providerRef.deref()
 		if (!provider) return
 
-		const cpPort = provider.context?.globalState.get<number>("roo.cpPort")
-		const txId = provider.context?.globalState.get<string>("roo.current_tx_id")
+		const cpPort = getCpPort(provider.context)
+		const txId = this.rootTxId
 
 		if (!cpPort || !txId) return
 
 		try {
-			await fetch(`http://127.0.0.1:${cpPort}/tx/${txId}/tool-call`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"X-Actor-Id": "human",
-				},
-				body: JSON.stringify({
-					sub_tx_id: this.subTransactionId,
-					tool_name: toolName,
-					args_json: input,
-					checkpoint_before: checkpointBefore,
-				}),
+			await cpTx.toolCall(cpPort, txId, {
+				sub_tx_id: this.subTransactionId,
+				tool_name: toolName,
+				args_json: input,
+				checkpoint_before: checkpointBefore,
 			})
 		} catch {
 			// Ignore network errors - persistence is best-effort
@@ -5241,25 +5641,18 @@ The tools are available and working. Use them now.`,
 		const provider = this.providerRef.deref()
 		if (!provider) return
 
-		const cpPort = provider.context?.globalState.get<number>("roo.cpPort")
-		const txId = provider.context?.globalState.get<string>("roo.current_tx_id")
+		const cpPort = getCpPort(provider.context)
+		const txId = this.rootTxId
 
 		if (!cpPort || !txId) return
 
 		try {
-			await fetch(`http://127.0.0.1:${cpPort}/tx/${txId}/model-call`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"X-Actor-Id": "human",
-				},
-				body: JSON.stringify({
-					sub_tx_id: this.subTransactionId,
-					model_id: modelId,
-					prompt_hash: promptHash,
-					message_count: messageCount,
-					duration_ms: durationMs,
-				}),
+			await cpTx.modelCall(cpPort, txId, {
+				sub_tx_id: this.subTransactionId,
+				model_id: modelId,
+				prompt_hash: promptHash,
+				message_count: messageCount,
+				duration_ms: durationMs,
 			})
 		} catch {
 			// Ignore network errors - persistence is best-effort

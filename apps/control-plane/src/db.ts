@@ -8,10 +8,7 @@ import { existsSync } from "node:fs"
  * Create database pool (PostgreSQL or SQLite)
  * Returns a Pool-compatible interface that works with existing store functions
  */
-export async function createDatabase(
-	databaseUrl?: string,
-	repoRoot?: string,
-): Promise<DbPool | null> {
+export async function createDatabase(databaseUrl?: string, repoRoot?: string): Promise<DbPool | null> {
 	try {
 		if (databaseUrl && databaseUrl.startsWith("postgresql://")) {
 			// Use PostgreSQL
@@ -58,7 +55,7 @@ export async function createDatabase(
 		console.error("[db] Database initialization failed:", error)
 		return null
 	}
-	
+
 	return null
 }
 
@@ -79,6 +76,25 @@ async function migratePostgres(pool: DbPool): Promise<void> {
 			fs.readFile(new URL(`../db/migrations/${migration}`, import.meta.url), "utf8"),
 		)
 		await pool.query(sql)
+	}
+	await ensureTransactionMetaColumns(pool)
+}
+
+/**
+ * Columns added after the initial schema. Kept idempotent (probe, then ALTER)
+ * so existing databases upgrade in place on both PostgreSQL and SQLite.
+ */
+async function ensureTransactionMetaColumns(pool: DbPool): Promise<void> {
+	for (const col of ["target_branch", "compile_command", "test_command"]) {
+		try {
+			await pool.query(`SELECT ${col} FROM "transaction" LIMIT 1`)
+		} catch {
+			try {
+				await pool.query(`ALTER TABLE "transaction" ADD COLUMN ${col} TEXT`)
+			} catch {
+				/* already exists */
+			}
+		}
 	}
 }
 
@@ -125,6 +141,8 @@ async function migrateSqlite(pool: DbPool): Promise<void> {
 			// Ignore
 		}
 	}
+
+	await ensureTransactionMetaColumns(pool)
 }
 
 // Legacy exports for backward compatibility

@@ -5,6 +5,8 @@ import * as fsSync from "fs"
 
 import { runTests } from "@vscode/test-electron"
 
+import { createCpFixtureWorkspace } from "./cp-fixture"
+
 // Create a synchronous logger that writes to file immediately (no buffering)
 // __dirname in compiled output is apps/vscode-e2e/out, so we go up one level to apps/vscode-e2e/
 const LOG_FILE = path.join(__dirname, "../runner-lifecycle.log")
@@ -125,7 +127,15 @@ async function main() {
 
 		// Determine if we're running torture repo test
 		// Set env vars programmatically to ensure they override any existing values
-		const isTortureTest = process.env.TEST_TORTURE_REPO === "1" || process.argv.includes("--torture")
+		const isCpE2E = process.env.TEST_CP_E2E === "1"
+		const isTortureTest = !isCpE2E && (process.env.TEST_TORTURE_REPO === "1" || process.argv.includes("--torture"))
+		if (isCpE2E) {
+			// The scripted suite must not inherit torture-mode switches from a local .env.
+			// Set to "" rather than deleting: the extension loads src/.env on activation and
+			// dotenv does not override variables that are already defined.
+			process.env.TEST_TORTURE_REPO = ""
+			process.env.TEST_TORTURE_REPO_WORKSPACE = ""
+		}
 
 		if (isTortureTest) {
 			const tortureRepoRoot = getTortureRepoRoot()
@@ -141,6 +151,15 @@ async function main() {
 			process.env.TEST_TORTURE_REPO_WORKSPACE = tortureRepoRoot
 			testWorkspace = tortureRepoRoot
 
+			// Both torture prompts ask the agent to add new test files. Tests are otherwise
+			// "given" (R31/R32), so name exactly those files on the Control-Plane's server-side allowlist.
+			// The extension passes its environment to the Control-Plane it starts.
+			if (!process.env.CP_TEST_MODIFY_ALLOWLIST) {
+				process.env.CP_TEST_MODIFY_ALLOWLIST =
+					process.env.TEST_TORTURE_STAGE === "1" ? "tests/test_sqlite_store.py" : "tests/test_projects*.py"
+			}
+			console.log(`[runTest] CP_TEST_MODIFY_ALLOWLIST=${process.env.CP_TEST_MODIFY_ALLOWLIST}`)
+
 			console.log(`[runTest] Torture repo test mode enabled`)
 			console.log(`[runTest] TEST_TORTURE_REPO=${process.env.TEST_TORTURE_REPO}`)
 			console.log(`[runTest] TEST_TORTURE_REPO_WORKSPACE=${process.env.TEST_TORTURE_REPO_WORKSPACE}`)
@@ -154,6 +173,9 @@ async function main() {
 				console.error(`[runTest] ERROR: Workspace does not exist: ${testWorkspace}`)
 				process.exit(1)
 			}
+		} else if (isCpE2E) {
+			testWorkspace = await createCpFixtureWorkspace()
+			logSync(`[RUN-TEST-LIFECYCLE] Control-Plane e2e fixture workspace: ${testWorkspace}`)
 		} else {
 			testWorkspace =
 				process.env.TEST_TORTURE_REPO_WORKSPACE ||
@@ -172,7 +194,27 @@ async function main() {
 			const e2eRoot = path.resolve(__dirname, "..") // __dirname is apps/vscode-e2e/out in compiled output
 			// Copy ONLY the minimal settings file to avoid ENOSPC from copying caches.
 			const templateSettingsPath = path.join(e2eRoot, ".vscode-test", "user-data", "User", "settings.json")
-			if (fsSync.existsSync(templateSettingsPath)) {
+			if (isCpE2E) {
+				// Self-contained settings: defaults (CP + planner on) plus the repo root that
+				// holds apps/control-plane. No API keys — the model is scripted.
+				const destUserDir = path.join(userDataDir, "User")
+				await fs.mkdir(destUserDir, { recursive: true })
+				await fs.writeFile(
+					path.join(destUserDir, "settings.json"),
+					JSON.stringify(
+						{
+							"roo.controlPlane.rootPath": path.resolve(e2eRoot, "../.."),
+							"roo.experimental.transactionalMode": true,
+							"roo.experimental.plannerMode": true,
+							"git.enabled": false,
+							"security.workspace.trust.enabled": false,
+						},
+						null,
+						2,
+					),
+				)
+				logSync(`[RUN-TEST-LIFECYCLE] Wrote Control-Plane e2e settings`)
+			} else if (fsSync.existsSync(templateSettingsPath)) {
 				const destUserDir = path.join(userDataDir, "User")
 				await fs.mkdir(destUserDir, { recursive: true })
 				await fs.copyFile(templateSettingsPath, path.join(destUserDir, "settings.json"))

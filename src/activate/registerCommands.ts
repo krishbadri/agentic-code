@@ -18,6 +18,8 @@ import { MdmService } from "../services/mdm/MdmService"
 import { t } from "../i18n"
 import { checkpointSaveManual } from "../core/checkpoints"
 import { rollbackToCheckpointManual } from "../core/checkpoints"
+import { cpErrorMessage, getCpPort } from "../core/control-plane/client"
+import * as cpTx from "../core/control-plane/tx"
 
 /**
  * Helper to get the visible ClineProvider instance or log if not found.
@@ -248,27 +250,16 @@ const getCommandsMap = ({ context, outputChannel, provider }: RegisterCommandOpt
 
 			const provider = task.providerRef.deref()
 			const globalStorageDir = provider?.context?.globalStorageUri?.fsPath
-			const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
-			const txId = provider?.context?.globalState.get<string>("roo.current_tx_id")
-			const cfg = vscode.workspace.getConfiguration()
-			const txMode =
-				cfg.get<boolean>("roo.experimental.transactionalMode") ||
-				cfg.get<boolean>("roo-cline.experimental.transactionalMode")
+			const txId = task.worktreeTxId
 
-			// Determine which Git repo to query: transaction branch, shadow repo, or workspace repo
+			// Determine which Git repo to query: the transaction worktree, shadow repo, or workspace repo
 			let gitRepoDir: string | undefined
 			let logOptions: { maxCount: number; from?: string } = { maxCount: 50 }
 
-			if (txMode && cpPort && txId) {
-				// Try transaction branch in workspace repo
-				const workspaceGit = simpleGit(workspaceDir, { binary: "git" })
-				try {
-					await workspaceGit.raw(["rev-parse", "--verify", `tx/${txId}`])
-					gitRepoDir = workspaceDir
-					logOptions.from = `tx/${txId}`
-				} catch {
-					// Transaction branch doesn't exist, fall through to shadow repo
-				}
+			if (txId) {
+				// The task's cwd IS the transaction (or sub-transaction) worktree; its HEAD
+				// is the transaction branch with the CP checkpoint commits.
+				gitRepoDir = task.cwd
 			}
 
 			// If no transaction branch, check shadow repo (where local Git checkpoints are stored)
@@ -367,8 +358,8 @@ const getCommandsMap = ({ context, outputChannel, provider }: RegisterCommandOpt
 		if (!task) return
 
 		const provider = task.providerRef.deref()
-		const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
-		const txId = await provider?.context?.globalState.get<string>("roo.current_tx_id")
+		const cpPort = getCpPort(provider?.context)
+		const txId = task.worktreeTxId
 		const lastError = await provider?.context?.globalState.get<string>("roo.lastError")
 
 		if (!cpPort || !txId) {
@@ -383,8 +374,9 @@ const getCommandsMap = ({ context, outputChannel, provider }: RegisterCommandOpt
 				params.set("message", lastError)
 			}
 
-			const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${txId}/suggest-rollback?${params}`)
-			const data = await res.json()
+			const res = await cpTx.suggestRollback(cpPort, txId, params)
+			if (!res.ok) throw new Error(cpErrorMessage(res))
+			const data = res.data
 
 			if (data.suggested) {
 				const choice = await vscode.window.showInformationMessage(

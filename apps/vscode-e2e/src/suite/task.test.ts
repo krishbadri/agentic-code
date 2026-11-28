@@ -55,11 +55,12 @@ CLI requirements
 - Keep existing output formats unless you must change them. If you change output, keep it minimal.
 
 Tests (this is required)
+- Put the new tests in NEW files named tests/test_projects*.py (for example tests/test_projects.py). Those are the only test files you are allowed to create or change.
 - Add new unit tests covering:
   a) project isolation in-memory
   b) project isolation in sqlite
   c) sqlite persistence across a fresh store instance (simulate restart) does not mix projects
-- Do not modify existing tests except for necessary imports/fixtures if absolutely required. Prefer adding new tests only.
+- Do not modify existing tests. Writes to any other test file are blocked.
 - All tests must pass at the end.
 
 Checkpoint + rollback protocol
@@ -370,7 +371,18 @@ suite("Roo Code Task", function () {
 					// because the baseline file may mention that string in comments/docstrings even after implementation,
 					// which can cause us to incorrectly "reset" to HEAD and keep a dirty repo.
 					const storePyPath = path.join(repoPath, "app", "store.py")
-					const resetTargets = ["origin/main", "origin/master", "HEAD"]
+					// Each stage starts from its own commit of the torture repo: stage 1 from the
+					// commit without SQLite, stage 2 from the finished stage 1. Resetting to HEAD is
+					// only a fallback: HEAD may already hold the result of an earlier run.
+					// TORTURE_BASE_REF overrides the starting commit.
+					const stageBaseRef = process.env.TEST_TORTURE_STAGE === "1" ? "fc34b58" : "2cc5216"
+					const resetTargets = [
+						...(process.env.TORTURE_BASE_REF ? [process.env.TORTURE_BASE_REF] : []),
+						stageBaseRef,
+						"origin/main",
+						"origin/master",
+						"HEAD",
+					]
 					let resetSucceeded = false
 					let lastResetError: unknown = null
 					for (const target of resetTargets) {

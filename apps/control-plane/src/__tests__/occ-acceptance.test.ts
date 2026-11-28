@@ -25,6 +25,7 @@ import {
 	mergeSubTransaction,
 	rollbackSubTransaction,
 	runSafetyGate,
+	runSafetyGateClause,
 	writeFileToWorktree,
 	readFileFromWorktree,
 	commitInWorktree,
@@ -478,7 +479,34 @@ export function five() { return 5; }
 			// Expected order: x, y, z (alphabetical)
 			// If no tie-breaker, order might vary between runs
 			expect(mergeOrders[0]).toEqual(["agent-x", "agent-y", "agent-z"])
-		})
+		}, 90_000) // three full fixtures + strict structural analysis per run
+
+		it("strict policy: later structurally-conflicting sub-txs are rolled back (R17)", async () => {
+			const { tx_id: parentTxId } = await beginTransaction(fixture)
+			for (const [id, v] of [
+				["agent-x", "x"],
+				["agent-y", "y"],
+				["agent-z", "z"],
+			] as const) {
+				const sub = await beginSubTransaction(fixture, parentTxId, id)
+				writeFileToWorktree(sub.worktree_path, "src/shared.ts", `export const ${v} = 1;\n`)
+				commitInWorktree(sub.worktree_path, `Agent ${v}`)
+			}
+			const res = await fetch(`${fixture.baseUrl}/tx/${parentTxId}/merge-pipeline`, {
+				method: "POST",
+				headers: fixture.headers,
+				body: JSON.stringify({ sub_tx_ids: ["agent-z", "agent-y", "agent-x"] }),
+			})
+			expect(res.status).toBe(200)
+			const data = await res.json()
+			expect(data.merged_ids).toEqual(["agent-x"])
+			expect(data.rolled_back_ids.sort()).toEqual(["agent-y", "agent-z"])
+			for (const r of data.results.filter((r: any) => r.subTxId !== "agent-x")) {
+				expect(r.reason).toBe("STRUCTURAL_CONFLICT")
+				expect(r.conflicts_with).toEqual(["agent-x"])
+			}
+			expect(data.success).toBe(false)
+		}, 60_000)
 
 		it("should rollback failed merges and continue with remaining (R28)", async () => {
 			const { tx_id: parentTxId, worktree_path: parentWt } = await beginTransaction(fixture)
@@ -646,6 +674,102 @@ export function five() { return 5; }
 			expect(mergeResult.merged).toBe(false)
 			expect(mergeResult.status).toBe(403)
 			expect(mergeResult.error).toContain("SAFETY_GATE")
+		})
+
+		it("should pass safety gate using declarative clause (R8)", async () => {
+			const { tx_id: parentTxId } = await beginTransaction(fixture)
+
+			const agent = await beginSubTransaction(fixture, parentTxId, "agent-clause-pass")
+
+			// Make a safe change
+			writeFileToWorktree(
+				agent.worktree_path,
+				"src/lib.ts",
+				"// Clause test\nexport function add(a: number, b: number) { return a + b }\n",
+			)
+			commitInWorktree(agent.worktree_path, "Clause-safe change")
+
+			// Run safety gate with a clause instead of checks
+			const safetyResult = await runSafetyGateClause(fixture, parentTxId, "agent-clause-pass", {
+				type: "cmd_exits_0",
+				cmd: "node test.js",
+			})
+
+			expect(safetyResult.ok).toBe(true)
+			expect(safetyResult.results).toHaveLength(1)
+			expect(safetyResult.results[0].cmd).toBe("clause:cmd_exits_0")
+		})
+
+		it("should fail safety gate using declarative clause when command fails (R8)", async () => {
+			const { tx_id: parentTxId } = await beginTransaction(fixture)
+
+			const agent = await beginSubTransaction(fixture, parentTxId, "agent-clause-fail")
+
+			// Make an unsafe change that breaks tests
+			writeFileToWorktree(
+				agent.worktree_path,
+				"src/lib.ts",
+				"// Broken!\nexport function add(a: number, b: number) { return a - b }\n",
+			)
+			commitInWorktree(agent.worktree_path, "Clause-unsafe change")
+
+			// Run safety gate with clause - should fail
+			const safetyResult = await runSafetyGateClause(fixture, parentTxId, "agent-clause-fail", {
+				type: "cmd_exits_0",
+				cmd: "node test.js",
+			})
+
+			expect(safetyResult.ok).toBe(false)
+			expect(safetyResult.failedAt).toBe("clause:cmd_exits_0")
+		})
+
+		it("should evaluate compound AND clause (R8)", async () => {
+			const { tx_id: parentTxId } = await beginTransaction(fixture)
+
+			const agent = await beginSubTransaction(fixture, parentTxId, "agent-clause-and")
+
+			writeFileToWorktree(
+				agent.worktree_path,
+				"src/lib.ts",
+				"// AND test\nexport function add(a: number, b: number) { return a + b }\n",
+			)
+			commitInWorktree(agent.worktree_path, "AND clause change")
+
+			// AND clause: test passes AND file exists
+			const safetyResult = await runSafetyGateClause(fixture, parentTxId, "agent-clause-and", {
+				type: "and",
+				clauses: [
+					{ type: "cmd_exits_0", cmd: "node test.js" },
+					{ type: "file_exists", path: "src/lib.ts" },
+				],
+			})
+
+			expect(safetyResult.ok).toBe(true)
+		})
+
+		it("should fail compound AND clause when one branch fails (R8)", async () => {
+			const { tx_id: parentTxId } = await beginTransaction(fixture)
+
+			const agent = await beginSubTransaction(fixture, parentTxId, "agent-clause-and-fail")
+
+			writeFileToWorktree(
+				agent.worktree_path,
+				"src/lib.ts",
+				"// AND fail test\nexport function add(a: number, b: number) { return a + b }\n",
+			)
+			commitInWorktree(agent.worktree_path, "AND clause fail change")
+
+			// AND clause: test passes BUT file does NOT exist
+			const safetyResult = await runSafetyGateClause(fixture, parentTxId, "agent-clause-and-fail", {
+				type: "and",
+				clauses: [
+					{ type: "cmd_exits_0", cmd: "node test.js" },
+					{ type: "file_exists", path: "nonexistent-file.ts" },
+				],
+			})
+
+			expect(safetyResult.ok).toBe(false)
+			expect(safetyResult.failedAt).toBe("clause:and")
 		})
 	})
 
@@ -1300,16 +1424,21 @@ line4
 			const { mkdir } = await import("node:fs/promises")
 			await mkdir(join(worktree_path, "symlink-dir"), { recursive: true })
 
-			// Try to create symlink - may fail on Windows without admin/dev mode
+			// The link points at a real directory OUTSIDE the worktree, so a missed check
+			// would actually write there. On Windows a plain symlink needs admin/dev mode;
+			// a junction does not, and is the same escape route.
+			const { mkdtempSync, existsSync } = await import("node:fs")
+			const { tmpdir } = await import("node:os")
+			const outside = mkdtempSync(join(tmpdir(), "cp-outside-"))
+			const linkPath = join(worktree_path, "symlink-dir", "link")
 			try {
-				await symlink("../../outside", join(worktree_path, "symlink-dir", "link"))
+				await symlink(outside, linkPath, "dir")
 			} catch (e: any) {
-				// On Windows, symlinks may require admin privileges
-				// Skip test if symlink creation fails (EPERM on Windows)
 				if (platform() === "win32" && (e.code === "EPERM" || e.code === "EACCES")) {
-					return // Skip test on Windows if symlinks aren't available
+					await symlink(outside, linkPath, "junction")
+				} else {
+					throw e
 				}
-				throw e // Re-throw if it's a different error
 			}
 
 			// Try to write through the symlink
@@ -1326,6 +1455,14 @@ line4
 			const data = await res.json()
 			expect(data.code).toBe("DENIED")
 			expect(data.message).toContain("Symlink path")
+			expect(existsSync(join(outside, "target.txt"))).toBe(false)
+
+			// Reading through the link is refused as well.
+			const read = await fetch(`${fixture.baseUrl}/tx/${tx_id}/read?file_path=symlink-dir/link/target.txt`, {
+				headers: fixture.headers,
+			})
+			expect(read.status).toBe(400)
+			expect((await read.json()).code).toBe("DENIED")
 		})
 
 		it("should handle rapid create-delete cycles without leaking resources", async () => {

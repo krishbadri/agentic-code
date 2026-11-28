@@ -152,6 +152,23 @@ Same-file edits MAY proceed if they touch disjoint AST nodes/functions; otherwis
 
 ---
 
+### Implementation Decisions (2026-11)
+
+These decisions fix the places where the requirements above are underspecified. The control plane and extension implement them; see `apps/control-plane/README.md` for the HTTP contract.
+
+- **Transactions by default.** `roo.experimental.transactionalMode` defaults to `true`, and the control plane (CP) auto-starts. Every top-level task is a transaction whose working directory is its own worktree, so the user's workspace changes only at the final commit. If the CP is unavailable when a task starts, the task runs as a single agent without transactional guarantees and the user sees a warning. If the CP becomes unavailable while a transaction is open, the commit fails closed.
+- **Structural conflicts (strict).**
+    - **Which pairs count:** two sub-transactions are concurrent unless one was started from a parent state that already contained the other. A concurrent pair conflicts when they touch the same file, or when a file changed only by one side reaches a file changed only by the other through relative imports.
+    - **Merge order:** `depends_on` first, then non-conflicting sub-txs, then by lines changed (descending), with the id as tie-break.
+    - **Outcome:** a sub-tx that conflicts with one already merged is rolled back and reported as failed, even if git could merge it.
+    - **The only exception:** same-file JS/TS edits where every hunk on both sides lies inside a single top-level declaration and the two sides touch different declarations (the "disjoint AST nodes" clause above). Diffs are taken from the common merge-base.
+- **Clause language (implemented subset).** `cmd_exits_0`, `test_suite`, `file_exists`, `not`, `and`, `or`. `FORALL`, `lint-result`, `type-check` and `metric-threshold` atoms are expressed as `cmd_exits_0` / `test_suite` commands; they are not dedicated atoms. Evaluation errors (missing worktree, blocked or unstartable command) always fail the clause, including under `not` and `or`.
+- **Progress (R33).** The passing-test count is parsed from Jest, Vitest, pytest, mocha, node:test, TAP and go output. Unrecognised output falls back to the exit code. An optional `compile_command` failure is also a progress violation.
+- **Rollback.** A rollback restores the tracked and untracked (non-ignored) files of the worktree. Before resetting, it saves the discarded state under `refs/cp/backup/…`. It leaves ignored files (e.g. `node_modules`, `.env`) untouched and kills processes the transaction started. It does not undo external side effects (network calls, global installs). The agent's conversation is preserved and annotated, not rewound.
+- **Replay** is file-level only: it re-applies recorded write, patch and delete effects. Commands and model calls are reported as not deterministically replayable.
+
+---
+
 ### Agent Action Surface
 
 **R35**: Agent action surface MUST include add, remove, and rename files.

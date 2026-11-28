@@ -21,6 +21,8 @@ export type TaskMetadataOptions = {
 	globalStoragePath: string
 	workspace: string
 	mode?: string
+	/** Control-Plane transaction owned by the task (reused on resume if still active). */
+	txId?: string
 }
 
 export async function taskMetadata({
@@ -32,6 +34,7 @@ export async function taskMetadata({
 	globalStoragePath,
 	workspace,
 	mode,
+	txId,
 }: TaskMetadataOptions) {
 	const taskDir = await getTaskDirectoryPath(globalStoragePath, id)
 
@@ -101,6 +104,7 @@ export async function taskMetadata({
 		size: taskDirSize,
 		workspace,
 		mode,
+		...(txId ? { txId } : {}),
 	}
 
 	return { historyItem, tokenUsage }

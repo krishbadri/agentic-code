@@ -1,62 +1,40 @@
 import type { FastifyInstance } from "fastify"
 import { z } from "zod"
-import { execFile } from "node:child_process"
-import { promisify } from "node:util"
 import * as path from "node:path"
+import { existsSync } from "node:fs"
+import { unlink } from "node:fs/promises"
 import { Git } from "../git.js"
-const pexec = promisify(execFile)
-
-// R31, R32: Tests are "given" - check if a path is a test file
-function isTestFile(filePath: string): boolean {
-	const normalized = filePath.replace(/\\/g, "/").toLowerCase()
-	if (
-		normalized.includes("/test/") ||
-		normalized.includes("/tests/") ||
-		normalized.includes("/__tests__/") ||
-		normalized.startsWith("test/") ||
-		normalized.startsWith("tests/") ||
-		normalized.startsWith("__tests__/") ||
-		normalized.endsWith(".test.ts") ||
-		normalized.endsWith(".test.js") ||
-		normalized.endsWith(".spec.ts") ||
-		normalized.endsWith(".spec.js") ||
-		normalized.endsWith(".test.tsx") ||
-		normalized.endsWith(".test.jsx") ||
-		normalized.endsWith(".spec.tsx") ||
-		normalized.endsWith(".spec.jsx")
-	) {
-		return true
-	}
-	const basename = normalized.split("/").pop() || ""
-	return basename === "test.js" || basename === "test.ts"
-}
+import { CPError } from "../errors.js"
+import { isTestFile, isTestModifyAllowed } from "../test-files.js"
+import { checkActionSafety, normalizeTargetPath } from "../action-safety.js"
+import { splitCommands, effectiveArgv } from "../shell-lex.js"
+import { runArgv, runShell } from "../exec.js"
 
 // Parse git status --porcelain output to extract changed file paths
 export function parseGitStatusOutput(output: string): string[] {
 	const changedFiles: string[] = []
 	const statusLines = output.trim().split("\n").filter(Boolean)
 	for (const line of statusLines) {
-		// Git status format: XY filename
-		// X = index status, Y = working tree status
-		// M = modified, A = added, ?? = untracked
-		// We want to catch all changes (staged and unstaged)
-		// Match: 2 status chars, whitespace, then filename
+		// Git status format: XY filename (rename: "XY old -> new")
 		const match = line.match(/^.{2}\s+(.+)$/)
+		let file: string | undefined
 		if (match && match[1]) {
-			changedFiles.push(match[1].trim())
+			file = match[1].trim()
 		} else {
-			// Fallback: if regex doesn't match, try to extract filename after first 2 chars
-			// This handles edge cases where format might vary
 			const trimmed = line.trim()
-			if (trimmed.length > 2) {
-				const potentialFile = trimmed.substring(2).trim()
-				if (potentialFile) {
-					changedFiles.push(potentialFile)
-				}
-			}
+			if (trimmed.length > 2) file = trimmed.substring(2).trim()
 		}
+		if (!file) continue
+		changedFiles.push(file)
 	}
 	return changedFiles
+}
+
+/** Paths affected by a status entry ("old -> new" renames yield both). */
+function statusEntryPaths(entry: string): string[] {
+	const arrow = entry.indexOf(" -> ")
+	const parts = arrow >= 0 ? [entry.slice(0, arrow), entry.slice(arrow + 4)] : [entry]
+	return parts.map((p) => p.replace(/^"|"$/g, ""))
 }
 
 const HeadersSchema = z.object({
@@ -64,181 +42,168 @@ const HeadersSchema = z.object({
 	"x-repo-id": z.string().min(1).optional(),
 })
 
-const BodySchema = z.object({
-	cmd: z.string(),
-	args: z.array(z.string()).default([]),
-	cwd_rel: z.string().default(""),
-	stdin_base64: z.string().nullable().optional(),
-	timeout_ms: z.number().int().default(600000),
-	env: z.record(z.string()).default({}),
-})
+const BodySchema = z
+	.object({
+		// Preferred: a command line run through `shell`
+		command: z.string().min(1).optional(),
+		shell: z.enum(["bash", "sh", "zsh", "pwsh", "powershell", "cmd", "default"]).default("default"),
+		// Legacy: explicit argv
+		cmd: z.string().min(1).optional(),
+		args: z.array(z.string()).default([]),
+		cwd_rel: z.string().default(""),
+		stdin_base64: z.string().nullable().optional(),
+		timeout_ms: z.number().int().positive().max(3_600_000).default(600_000),
+		env: z.record(z.string()).default({}),
+	})
+	.refine((b) => !!b.command || !!b.cmd, { message: "command (or legacy cmd) is required" })
+
+/** argv that runs `command` in the requested shell */
+function shellArgv(shell: string, command: string): string[] {
+	switch (shell) {
+		case "bash":
+		case "sh":
+		case "zsh":
+			return [shell, "-lc", command]
+		case "pwsh":
+		case "powershell":
+			return [shell, "-NoProfile", "-NonInteractive", "-Command", command]
+		case "cmd":
+			return ["cmd.exe", "/d", "/s", "/c", command]
+		default:
+			return process.platform === "win32" ? ["cmd.exe", "/d", "/s", "/c", command] : ["/bin/sh", "-c", command]
+	}
+}
+
+/** Files a command line would write that are test files (redirects, rm/mv/cp/tee/sed -i targets). */
+function testFileWriteTargets(commandLine: string, allowlist: string[]): string[] {
+	const hits = new Set<string>()
+	const consider = (p: string) => {
+		const v = normalizeTargetPath(p)
+		const rel = v.ok ? v.rel : p.replace(/\\/g, "/")
+		if (isTestFile(rel) && !isTestModifyAllowed(rel, allowlist)) hits.add(rel)
+	}
+	for (const cmd of splitCommands(commandLine)) {
+		for (const r of cmd.redirects) if (r.op.includes(">")) consider(r.target)
+		const { prog, args } = effectiveArgv(cmd.argv)
+		const operands = args.filter((a) => !a.startsWith("-"))
+		if (["rm", "unlink", "truncate", "touch", "tee"].includes(prog)) operands.forEach(consider)
+		if (["mv", "cp", "ln", "install"].includes(prog) && operands.length >= 2) {
+			consider(operands[operands.length - 1]!)
+			if (prog === "mv") operands.slice(0, -1).forEach(consider)
+		}
+		if (prog === "sed" && args.some((a) => a === "-i" || a.startsWith("-i") || a === "--in-place")) {
+			operands.slice(1).forEach(consider)
+		}
+	}
+	return Array.from(hits)
+}
 
 export function registerShellRoutes(app: FastifyInstance) {
 	app.post("/shell/exec/:tx_id", async (req, reply) => {
 		HeadersSchema.parse(req.headers as any)
 		const body = BodySchema.parse((req as any).body || {})
-		const whitelist = new Set([
-			"node",
-			"pnpm",
-			"npm",
-			"yarn",
-			"pytest",
-			"go",
-			"cargo",
-			"make",
-			"eslint",
-			"prettier",
-			"ruff",
-			"bash",
-			"powershell",
-			"pwsh",
-			"cmd",
-			"cmd.exe",
-		])
-		if (!whitelist.has(body.cmd)) {
-			return reply.code(403).send({ code: "DENIED", message: "Command not allowed" })
-		}
 
-		// SECURITY: R31/R32 - Pre-execution gate: block commands that reference test files
-		const fullCommandString = [body.cmd, ...body.args].join(" ")
-		if (isTestFile(fullCommandString)) {
-			// Extract test file paths from the command string
-			const testFilePaths: string[] = []
-			// Match file paths that look like test files (e.g., test/file.test.ts, tests/foo.spec.js)
-			const testFilePattern =
-				/(\S*(?:test|tests|__tests__)\/[^\s"']+\.(?:test|spec)\.(?:ts|js|tsx|jsx)|\S+\.(?:test|spec)\.(?:ts|js|tsx|jsx))/gi
-			const matches = fullCommandString.match(testFilePattern)
-			if (matches) {
-				for (const match of matches) {
-					// Clean up the match (remove quotes, redirection symbols, etc.)
-					const cleaned = match.replace(/^[>"']+|["'<>]+$/g, "").trim()
-					if (cleaned && isTestFile(cleaned)) {
-						testFilePaths.push(cleaned)
-					}
-				}
-			}
-			// If no specific paths found, use the full command string as fallback
-			const modifiedTestFiles = testFilePaths.length > 0 ? testFilePaths : [fullCommandString]
-			return reply.code(403).send({
-				code: "TEST_FILE_PROTECTED",
-				message: "R31/R32 violation: Command references test files directly and is blocked before execution.",
-				modified_test_files: modifiedTestFiles,
-				command: fullCommandString,
-			})
-		}
-
+		// :tx_id may be a parent tx or a composite "<parent>_sub_<rel>" id
 		const txId = (req.params as any).tx_id
 		const git = new Git({ repoRoot: app.repoRoot })
 		const worktreePath = git.worktreePath(txId)
+		if (!existsSync(worktreePath)) {
+			throw new CPError("TX_NOT_FOUND", `Transaction ${txId} not found (no worktree)`, { tx_id: txId })
+		}
 
-		const started = Date.now()
-		const cwd = path.join(worktreePath, body.cwd_rel || "")
-		const controller = new AbortController()
-		const timeout = setTimeout(() => controller.abort(), body.timeout_ms)
+		const cwdCheck = normalizeTargetPath(body.cwd_rel || ".", worktreePath)
+		if (!cwdCheck.ok) {
+			throw new CPError("VALIDATION_ERROR", `cwd_rel ${cwdCheck.reason}`, { cwd_rel: body.cwd_rel })
+		}
+		const cwd = path.join(worktreePath, cwdCheck.rel === "." ? "" : cwdCheck.rel)
 
-		// Helper to check and revert test file modifications
+		const argv = body.command ? shellArgv(body.shell, body.command) : [body.cmd!, ...body.args]
+		// The full command line as a shell would see it (for analysis)
+		const commandLine =
+			body.command ?? argv.map((a) => (/\s|["'$`|&;<>]/.test(a) ? JSON.stringify(a) : a)).join(" ")
+
+		// SECURITY: R31/R32 — refuse commands that would write test files, before running them
+		const testTargets = testFileWriteTargets(commandLine, app.testModifyAllowlist)
+		if (testTargets.length > 0) {
+			return reply.code(403).send({
+				code: "TEST_FILE_PROTECTED",
+				message: "R31/R32 violation: command writes test files and is blocked before execution.",
+				modified_test_files: testTargets,
+				command: commandLine,
+			})
+		}
+
+		// SECURITY: R9/R37 — action-safety on every simple command (nested shells included)
+		const safety = checkActionSafety(
+			"execute_command",
+			{ command: commandLine },
+			{ worktreeRoot: worktreePath, unknownActionPolicy: app.cpConfig.unknownActionPolicy },
+		)
+		if (!safety.allowed) {
+			return reply.code(403).send({
+				code: "ACTION_BLOCKED",
+				message: safety.reason,
+				rule: safety.rule,
+				command: commandLine,
+			})
+		}
+
+		// Post-exec gate: revert any test file the command changed anyway
 		const checkAndRevertTestFiles = async (): Promise<string[] | null> => {
 			try {
-				// SECURITY: R31/R32 - Post-exec file-change gate
-				// Check for test file modifications using git status (covers all changes: modified, added, untracked)
-				const { stdout: statusOutput } = await pexec(
-					"git",
-					["status", "--porcelain=v1", "--untracked-files=all", "--ignored"],
-					{
-						cwd: worktreePath,
-						windowsHide: true,
-					},
+				const statusOutput = await git.runRaw(
+					["status", "--porcelain=v1", "--untracked-files=all"],
+					worktreePath,
 				)
-
-				const changedFiles = parseGitStatusOutput(statusOutput)
-
-				const modifiedTestFiles: string[] = []
-				for (const filePath of changedFiles) {
-					if (isTestFile(filePath)) {
-						modifiedTestFiles.push(filePath)
+				const modified = parseGitStatusOutput(statusOutput)
+					.flatMap(statusEntryPaths)
+					.filter((f) => isTestFile(f) && !isTestModifyAllowed(f, app.testModifyAllowlist))
+				for (const testFile of modified) {
+					try {
+						await git.run(["restore", "--staged", "--worktree", "--", testFile], worktreePath)
+					} catch {
+						// untracked (new) file: delete it
+						await unlink(path.join(worktreePath, testFile)).catch(() => {})
 					}
 				}
-
-				// If any test files were modified, revert them
-				if (modifiedTestFiles.length > 0) {
-					// Revert test files back to HEAD (do NOT stage them)
-					for (const testFile of modifiedTestFiles) {
-						try {
-							// Try restore first (for tracked files)
-							await pexec("git", ["restore", "--", testFile], {
-								cwd: worktreePath,
-								windowsHide: true,
-							})
-						} catch {
-							// If restore fails, file might be new (untracked) - delete it
-							try {
-								const { unlink } = await import("node:fs/promises")
-								await unlink(path.join(worktreePath, testFile))
-							} catch {
-								// Ignore delete errors (file may not exist)
-							}
-						}
-					}
-					return modifiedTestFiles
-				}
+				return modified.length > 0 ? modified : null
 			} catch {
-				// If git commands fail, return null (no test files modified or git error)
+				return null
 			}
-			return null
 		}
 
-		try {
-			// Execute the shell command
-			const res = await pexec(body.cmd, body.args, {
-				cwd,
-				env: { ...process.env, ...body.env },
-				signal: controller.signal,
-				windowsHide: true,
-			})
-			const duration_ms = Date.now() - started
-			clearTimeout(timeout)
+		const runOpts = { timeoutMs: body.timeout_ms, env: body.env, app, txId }
+		// The platform shell (and cmd.exe) must receive the command line verbatim;
+		// passing it as an argv element would re-quote it on Windows.
+		const usePlatformShell =
+			!!body.command && (body.shell === "default" || (body.shell === "cmd" && process.platform === "win32"))
+		const res = usePlatformShell ? await runShell(cwd, body.command!, runOpts) : await runArgv(cwd, argv, runOpts)
 
-			// Check for test file modifications after successful execution
-			const modifiedTestFiles = await checkAndRevertTestFiles()
-			if (modifiedTestFiles) {
-				return reply.code(403).send({
-					code: "TEST_FILE_PROTECTED",
-					message: `R31/R32 violation: Shell command modified test files. Tests are "given" and cannot be modified. Files have been reverted.`,
-					modified_test_files: modifiedTestFiles,
-					command: [body.cmd, ...body.args].join(" "),
-				})
-			}
-
-			return reply.send({
-				exit_code: 0,
-				stdout_base64: Buffer.from(res.stdout ?? "").toString("base64"),
-				stderr_base64: Buffer.from(res.stderr ?? "").toString("base64"),
-				truncated: false,
-				duration_ms,
-			})
-		} catch (err: any) {
-			const duration_ms = Date.now() - started
-			clearTimeout(timeout)
-
-			// Even if command failed, check for test file modifications
-			const modifiedTestFiles = await checkAndRevertTestFiles()
-			if (modifiedTestFiles) {
-				return reply.code(403).send({
-					code: "TEST_FILE_PROTECTED",
-					message: `R31/R32 violation: Shell command modified test files. Tests are "given" and cannot be modified. Files have been reverted.`,
-					modified_test_files: modifiedTestFiles,
-					command: [body.cmd, ...body.args].join(" "),
-				})
-			}
-
-			const exit_code = typeof err?.code === "number" ? err.code : 1
-			return reply.send({
-				exit_code,
-				stdout_base64: Buffer.from(err?.stdout ?? "").toString("base64"),
-				stderr_base64: Buffer.from(err?.stderr ?? String(err)).toString("base64"),
-				truncated: false,
-				duration_ms,
+		const modifiedTestFiles = await checkAndRevertTestFiles()
+		if (modifiedTestFiles) {
+			return reply.code(403).send({
+				code: "TEST_FILE_PROTECTED",
+				message: `R31/R32 violation: Shell command modified test files. Tests are "given" and cannot be modified. Files have been reverted.`,
+				modified_test_files: modifiedTestFiles,
+				command: commandLine,
 			})
 		}
+
+		if (res.spawnError) {
+			return reply.code(400).send({
+				code: "VALIDATION_ERROR",
+				message: `Command could not be started: ${res.spawnError}`,
+				exit_code: res.exitCode,
+			})
+		}
+
+		return reply.send({
+			exit_code: res.exitCode,
+			timed_out: res.timedOut,
+			stdout_base64: Buffer.from(res.stdout).toString("base64"),
+			stderr_base64: Buffer.from(res.stderr).toString("base64"),
+			truncated: false,
+			duration_ms: res.durationMs,
+		})
 	})
 }

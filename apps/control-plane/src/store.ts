@@ -20,12 +20,27 @@ export type TxRow = {
 	agent_id: string
 	isolation_policy: string
 	base_commit: string
+	head_commit?: string | null
+	state?: "active" | "committed" | "rolled_back" | "aborted"
+	target_branch?: string | null
+	compile_command?: string | null
+	test_command?: string | null
 }
 
 export async function insertTransaction(pool: Db, row: TxRow) {
 	await pool.query(
-		`INSERT INTO "transaction" (tx_id, repo_id, actor_id, agent_id, isolation_policy, base_commit) VALUES ($1,$2,$3,$4,$5,$6)`,
-		[row.tx_id, row.repo_id, row.actor_id, row.agent_id, row.isolation_policy, row.base_commit],
+		`INSERT INTO "transaction" (tx_id, repo_id, actor_id, agent_id, isolation_policy, base_commit, target_branch, compile_command, test_command) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		[
+			row.tx_id,
+			row.repo_id,
+			row.actor_id,
+			row.agent_id,
+			row.isolation_policy,
+			row.base_commit,
+			row.target_branch ?? null,
+			row.compile_command ?? null,
+			row.test_command ?? null,
+		],
 	)
 }
 
@@ -70,7 +85,7 @@ export async function listVersions(pool: Db, repo_id: string, limit = 50, after?
 
 export async function getTransaction(pool: Db, tx_id: string): Promise<TxRow | null> {
 	const q = await pool.query(
-		`SELECT tx_id, repo_id, actor_id, agent_id, isolation_policy, base_commit FROM "transaction" WHERE tx_id = $1`,
+		`SELECT tx_id, repo_id, actor_id, agent_id, isolation_policy, base_commit, head_commit, state, target_branch, compile_command, test_command FROM "transaction" WHERE tx_id = $1`,
 		[tx_id],
 	)
 	return q.rowCount ? (q.rows[0] as TxRow) : null
@@ -476,23 +491,50 @@ export async function insertMetricExecution(
 	return q.rows[0].id as number
 }
 
+/**
+ * Parallel-vs-serial speedup.
+ *
+ * - estimated_speedup: mean over parallel runs of (sum of per-sub-tx durations
+ *   / wall clock) — what serial execution of the same work would have cost.
+ *   Requires callers to report total_duration_ms as that SUM.
+ * - measured_speedup: mean serial wall clock / mean parallel wall clock, only
+ *   when real serial baselines exist (null otherwise).
+ * - speedup_ratio: kept for compatibility = measured ?? estimated ?? 0.
+ */
 export async function getParallelSpeedupStats(pool: Db): Promise<{
+	parallel_runs: number
+	serial_runs: number
 	parallel_avg_wall_clock_ms: number
 	serial_avg_wall_clock_ms: number
+	estimated_speedup: number | null
+	measured_speedup: number | null
 	speedup_ratio: number
 }> {
 	const q = await pool.query(
-		`SELECT 
-		   COALESCE(AVG(CASE WHEN execution_mode = 'parallel' THEN wall_clock_ms END), 0)::int as parallel_avg_wall_clock_ms,
-		   COALESCE(AVG(CASE WHEN execution_mode = 'serial' THEN wall_clock_ms END), 0)::int as serial_avg_wall_clock_ms,
-		   CASE 
-		     WHEN COALESCE(AVG(CASE WHEN execution_mode = 'parallel' THEN wall_clock_ms END), 0) = 0 THEN 0
-		     ELSE COALESCE(AVG(CASE WHEN execution_mode = 'serial' THEN wall_clock_ms END), 0) / 
-		          NULLIF(AVG(CASE WHEN execution_mode = 'parallel' THEN wall_clock_ms END), 0)
-		   END::float as speedup_ratio
+		`SELECT
+		   COUNT(CASE WHEN execution_mode = 'parallel' THEN 1 END) as parallel_runs,
+		   COUNT(CASE WHEN execution_mode = 'serial' THEN 1 END) as serial_runs,
+		   AVG(CASE WHEN execution_mode = 'parallel' THEN wall_clock_ms END) as parallel_avg,
+		   AVG(CASE WHEN execution_mode = 'serial' THEN wall_clock_ms END) as serial_avg,
+		   AVG(CASE WHEN execution_mode = 'parallel' AND wall_clock_ms > 0
+		            THEN (total_duration_ms * 1.0) / wall_clock_ms END) as estimated
 		 FROM metric_execution`,
 	)
-	return q.rows[0]
+	const r = q.rows[0] ?? {}
+	const num = (v: unknown) => (v === null || v === undefined ? null : Number(v))
+	const parallelAvg = num(r.parallel_avg)
+	const serialAvg = num(r.serial_avg)
+	const estimated = num(r.estimated)
+	const measured = parallelAvg && serialAvg ? serialAvg / parallelAvg : null
+	return {
+		parallel_runs: Number(r.parallel_runs ?? 0),
+		serial_runs: Number(r.serial_runs ?? 0),
+		parallel_avg_wall_clock_ms: Math.round(parallelAvg ?? 0),
+		serial_avg_wall_clock_ms: Math.round(serialAvg ?? 0),
+		estimated_speedup: estimated,
+		measured_speedup: measured,
+		speedup_ratio: measured ?? estimated ?? 0,
+	}
 }
 
 // ============================================================================

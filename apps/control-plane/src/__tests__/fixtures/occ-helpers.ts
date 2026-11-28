@@ -9,7 +9,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync 
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { execFileSync, execFile } from "node:child_process"
-import { startServer } from "../../server.js"
+import { startServer, type ServerConfig } from "../../server.js"
 
 export interface OccFixture {
 	tmpDir: string
@@ -35,12 +35,7 @@ export async function initGitRepo(dir: string): Promise<void> {
 /**
  * Create a file in the repo and commit it
  */
-export function createAndCommitFile(
-	dir: string,
-	relativePath: string,
-	content: string,
-	commitMessage: string,
-): string {
+export function createAndCommitFile(dir: string, relativePath: string, content: string, commitMessage: string): string {
 	const fullPath = join(dir, relativePath)
 	const parentDir = join(fullPath, "..")
 	if (!existsSync(parentDir)) {
@@ -57,15 +52,23 @@ export function createAndCommitFile(
 /**
  * Create the standard OCC test fixture
  */
-export async function createOccFixture(): Promise<OccFixture> {
+export interface OccFixtureOptions {
+	/** Use a real SQLite database (in <tmpDir>/.cp) instead of DB-less mode. */
+	db?: boolean
+	/** Extra server config (test command, allowlists, ...). */
+	config?: Partial<Omit<ServerConfig, "repoRoot" | "port">>
+}
+
+export async function createOccFixture(opts: OccFixtureOptions = {}): Promise<OccFixture> {
 	const tmpDir = mkdtempSync(join(tmpdir(), "occ-test-"))
 	await initGitRepo(tmpDir)
 
 	const app = await startServer({
 		repoRoot: tmpDir,
 		port: 0, // Let OS choose a free port
-		disableDb: true,
+		disableDb: !opts.db,
 		disableMcp: true,
+		...(opts.config ?? {}),
 	})
 
 	const address = app.server.address()
@@ -192,7 +195,12 @@ export async function createOccFixtureWithTests(): Promise<OccFixture> {
 	const fixture = await createOccFixture()
 
 	// Create src/lib.ts
-	createAndCommitFile(fixture.tmpDir, "src/lib.ts", "export function add(a: number, b: number) { return a + b }\n", "Add lib.ts")
+	createAndCommitFile(
+		fixture.tmpDir,
+		"src/lib.ts",
+		"export function add(a: number, b: number) { return a + b }\n",
+		"Add lib.ts",
+	)
 
 	// Create a simple test script that can be run via shell
 	// Using a simple approach: write a test.js that exits 0 on pass, 1 on fail
@@ -291,6 +299,25 @@ export const result = useFoo(bar.value);
 }
 
 /**
+ * Create a fixture with a TS file containing two distinct top-level functions
+ * and a non-TS config file, for AST-aware conflict refinement testing.
+ */
+export async function createOccFixtureWithMultiFunctionFile(): Promise<OccFixture> {
+	const fixture = await createOccFixture()
+
+	createAndCommitFile(
+		fixture.tmpDir,
+		"src/utils.ts",
+		`export function alpha() {\n  return "alpha"\n}\n\nexport function beta() {\n  return "beta"\n}\n`,
+		"Add src/utils.ts with alpha and beta functions",
+	)
+
+	createAndCommitFile(fixture.tmpDir, "data/config.json", '{"key": "original"}\n', "Add data/config.json")
+
+	return fixture
+}
+
+/**
  * Helper to begin a parent transaction
  */
 export async function beginTransaction(
@@ -369,7 +396,7 @@ export async function createCheckpoint(fixture: OccFixture, txId: string): Promi
 }
 
 /**
- * Helper to run safety gate checks
+ * Helper to run safety gate checks (legacy shell commands)
  */
 export async function runSafetyGate(
 	fixture: OccFixture,
@@ -384,6 +411,26 @@ export async function runSafetyGate(
 	})
 	if (!res.ok) {
 		throw new Error(`Failed to run safety gate: ${await res.text()}`)
+	}
+	return res.json()
+}
+
+/**
+ * Helper to run safety gate with a declarative clause (R8)
+ */
+export async function runSafetyGateClause(
+	fixture: OccFixture,
+	parentTxId: string,
+	subTxId: string,
+	clause: Record<string, unknown>,
+): Promise<{ ok: boolean; failedAt?: string; results: any[] }> {
+	const res = await fetch(`${fixture.baseUrl}/tx/${parentTxId}/sub-tx/${subTxId}/safety-gate`, {
+		method: "POST",
+		headers: fixture.headers,
+		body: JSON.stringify({ clause }),
+	})
+	if (!res.ok) {
+		throw new Error(`Failed to run safety gate (clause): ${await res.text()}`)
 	}
 	return res.json()
 }

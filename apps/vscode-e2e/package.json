@@ -8,6 +8,9 @@
 		"test": "pnpm test:run",
 		"test:ci": "pnpm -w bundle && pnpm --filter @roo-code/vscode-webview build && pnpm test:run",
 		"test:run": "rimraf out && tsc -p tsconfig.json && npx dotenvx run -f ../../.env -- node ./out/runTest.js",
+		"test:torture": "rimraf out && tsc -p tsconfig.json && npx dotenvx run -f ../../.env -- node ./out/runTest.js --torture",
+		"test:cp": "rimraf out && tsc -p tsconfig.json && node ./scripts/run-cp-e2e.js",
+		"test:cp:real": "rimraf out && tsc -p tsconfig.json && npx dotenvx run -f ../../.env -- node ./scripts/run-cp-e2e.js --real",
 		"clean": "rimraf out .turbo"
 	},
 	"devDependencies": {

@@ -2,7 +2,10 @@ import type { FastifyInstance } from "fastify"
 import { randomUUID } from "node:crypto"
 import { z } from "zod"
 import { Git } from "../git.js"
-import { errorResponse } from "../errors.js"
+import { CPError, errorResponse, sendError } from "../errors.js"
+import type { ProgressBaselineState } from "../server.js"
+import { isTestFile, isTestModifyAllowed } from "../test-files.js"
+import { subTxDeps, subTxHasChecks, subTxStatus, recordSubTxRollbackMetric, setSubTxStatus } from "../subtx-state.js"
 import {
 	getOrCreateRepo,
 	insertTransaction,
@@ -25,86 +28,7 @@ const HeadersSchema = z.object({
 	"x-repo-id": z.string().min(1).optional(),
 })
 
-// R31, R32: Tests are "given" - agents must not introduce or modify tests
-// unless explicitly allowlisted via SERVER-SIDE config (NOT agent-controlled).
-// Test file patterns: /test/, /tests/, /__tests__/, *.test.ts, *.spec.ts, etc.
-function isTestFile(filePath: string): boolean {
-	const normalized = filePath.replace(/\\/g, "/").toLowerCase()
-
-	// Directory patterns (check both /test/ and test/ at start)
-	if (
-		normalized.includes("/test/") ||
-		normalized.includes("/tests/") ||
-		normalized.includes("/__tests__/") ||
-		normalized.startsWith("test/") ||
-		normalized.startsWith("tests/") ||
-		normalized.startsWith("__tests__/")
-	) {
-		return true
-	}
-
-	// File extension patterns
-	if (
-		normalized.endsWith(".test.ts") ||
-		normalized.endsWith(".test.js") ||
-		normalized.endsWith(".spec.ts") ||
-		normalized.endsWith(".spec.js") ||
-		normalized.endsWith(".test.tsx") ||
-		normalized.endsWith(".test.jsx") ||
-		normalized.endsWith(".spec.tsx") ||
-		normalized.endsWith(".spec.jsx")
-	) {
-		return true
-	}
-
-	// Root level test files
-	const basename = normalized.split("/").pop() || ""
-	if (basename === "test.js" || basename === "test.ts") {
-		return true
-	}
-
-	return false
-}
-
-/**
- * Check if test file modification is allowed via SERVER-SIDE allowlist.
- *
- * SECURITY: This is NOT controlled by agent input (headers, request body).
- * Only paths explicitly configured in the server's testModifyAllowlist
- * can be modified. An empty allowlist means NO test modifications allowed.
- */
-function isTestModifyAllowed(filePath: string, allowlist: string[]): boolean {
-	// Empty allowlist = no modifications allowed (secure default)
-	if (!allowlist || allowlist.length === 0) {
-		return false
-	}
-
-	const normalized = filePath.replace(/\\/g, "/").toLowerCase()
-
-	for (const pattern of allowlist) {
-		const normalizedPattern = pattern.replace(/\\/g, "/").toLowerCase()
-
-		// Exact match
-		if (normalized === normalizedPattern) {
-			return true
-		}
-
-		// Glob pattern matching
-		if (normalizedPattern.includes("*")) {
-			const regex = new RegExp("^" + normalizedPattern.replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*") + "$", "i")
-			if (regex.test(normalized)) {
-				return true
-			}
-		}
-
-		// Prefix matching (directory allowlist)
-		if (normalizedPattern.endsWith("/") && normalized.startsWith(normalizedPattern)) {
-			return true
-		}
-	}
-
-	return false
-}
+// R31, R32: tests are "given" — shared definition in test-files.ts
 
 /**
  * Parse patch content to extract all file paths that would be modified.
@@ -142,31 +66,114 @@ function extractPatchFilePaths(patch: string): string[] {
 	return Array.from(filePaths)
 }
 
+/**
+ * Resolve a caller-supplied sub-tx id (relative or global) to the GLOBAL id of
+ * an existing sub_transaction row, or undefined (so the FK is never violated).
+ */
+async function resolveSubTxFk(app: FastifyInstance, txId: string, raw?: string): Promise<string | undefined> {
+	if (!raw || !app.db) return undefined
+	const { toGlobalSubTxId } = await import("../ids.js")
+	const global = toGlobalSubTxId(txId, raw)
+	return (await getSubTransaction(app.db, global)) ? global : undefined
+}
+
 export function registerTxRoutes(app: FastifyInstance) {
 	app.get("/health", async (req, reply) => {
-		return reply.send({ status: "ok", timestamp: Date.now() })
+		return reply.send({
+			status: "ok",
+			timestamp: Date.now(),
+			version: "0.2.0",
+			// Bumped when the HTTP contract changes; the extension requires api >= 2
+			api: 2,
+			capabilities: [
+				"strict-structural",
+				"ast-refine-js-ts",
+				"clause-v1",
+				"replay-file-level",
+				"reserve-file",
+				"liveness-config",
+				"tx-status",
+				"tx-abort",
+				"rollback-backup-refs",
+			],
+			db: !app.db ? "none" : app.databaseUrl?.startsWith("postgresql://") ? "postgres" : "sqlite",
+			// The repository this server manages. Clients MUST check it: a Control-Plane
+			// bound to another repository would put their transaction in the wrong repo.
+			repo_root: app.repoRoot,
+			pid: process.pid,
+			test_command_configured: !!app.cpConfig.testCommand,
+		})
 	})
 
 	app.post("/tx/begin", async (req, reply) => {
 		const headers = HeadersSchema.parse(req.headers as any)
 		const body = z
 			.object({
-				isolation: z.enum(["fail-fast", "rebase", "hybrid"]),
-				base: z.string().default("main"),
-				// R33: Progress gate - test command to run for monotonicity check
-				test_command: z.string().optional(),
+				isolation: z.enum(["fail-fast", "rebase", "hybrid"]).default("hybrid"),
+				// "HEAD" = whatever the user's repository currently has checked out
+				base: z.string().min(1).default("HEAD"),
+				// Branch the transaction publishes to on commit (default: resolved from base)
+				target_branch: z.string().min(1).optional(),
+				// R33/R6: test command for the progress + liveness gates
+				test_command: z.string().min(1).optional(),
+				// R4: compile/type-check command; a failure is a progress violation
+				compile_command: z.string().min(1).optional(),
 			})
 			.parse((req as any).body || {})
 
 		const tx_id = randomUUID()
 		try {
-			console.log(`[tx/begin] repoRoot: ${app.repoRoot}, cwd: ${process.cwd()}, body.base: ${body.base}`)
 			const git = new Git({ repoRoot: app.repoRoot })
+			await git.ensureCpExcluded()
+
+			// Resolve which branch this transaction will publish to.
+			let targetBranch = body.target_branch
+			if (!targetBranch) {
+				if (body.base === "HEAD") {
+					targetBranch = (await git.currentBranch()) ?? undefined
+					if (!targetBranch) {
+						throw new CPError(
+							"VALIDATION_ERROR",
+							"Repository HEAD is detached; pass target_branch explicitly",
+						)
+					}
+				} else if (await git.branchExists(body.base)) {
+					targetBranch = body.base
+				} else {
+					throw new CPError(
+						"VALIDATION_ERROR",
+						`base "${body.base}" is not a branch; pass target_branch explicitly`,
+					)
+				}
+			}
+			if (!(await git.branchExists(targetBranch))) {
+				throw new CPError("VALIDATION_ERROR", `target_branch "${targetBranch}" does not exist`)
+			}
+
+			const testCommand = body.test_command ?? app.cpConfig.testCommand
 			const base_commit = await git.beginTx(tx_id, body.base)
 			const worktree_path = git.worktreePath(tx_id)
 
+			app.txMeta.set(tx_id, {
+				base_commit,
+				isolation: body.isolation,
+				target_branch: targetBranch,
+				test_command: testCommand,
+				compile_command: body.compile_command,
+				status: "active",
+			})
+
 			let repo_id = "default"
-			let progressBaseline: { passingCount: number; totalCount: number } | undefined
+			let progressBaseline:
+				| {
+						passingCount: number
+						totalCount: number
+						format?: string
+						exitCode?: number
+						failingAtBase?: boolean
+						warning?: string
+				  }
+				| undefined
 
 			if (app.db) {
 				repo_id = await getOrCreateRepo(app.db, app.repoRoot)
@@ -177,45 +184,150 @@ export function registerTxRoutes(app: FastifyInstance) {
 					agent_id: headers["x-actor-id"],
 					isolation_policy: body.isolation,
 					base_commit,
+					target_branch: targetBranch,
+					compile_command: body.compile_command,
+					test_command: testCommand,
 				})
 			}
 
-			// R33: If test_command provided, run tests and store baseline
-			if (body.test_command) {
+			// R33: If a test command is configured, run tests and store the baseline
+			if (testCommand) {
 				const { runTestsAndCount } = await import("../progress-gate.js")
-				const result = await runTestsAndCount(worktree_path, body.test_command)
-				progressBaseline = { passingCount: result.passingCount, totalCount: result.totalCount }
+				const result = await runTestsAndCount(worktree_path, testCommand, {
+					timeoutMs: app.cpConfig.testTimeoutMs,
+				})
+				if (result.spawnError) {
+					// Roll the half-created tx back so a typo doesn't leak a worktree
+					await git.removeTx(tx_id)
+					app.txMeta.delete(tx_id)
+					if (app.db) {
+						try {
+							await finalizeTransaction(app.db, tx_id, "aborted")
+						} catch {
+							/* ignore */
+						}
+					}
+					throw new CPError(
+						"TEST_COMMAND_INVALID",
+						`Test command could not be started: ${result.spawnError}`,
+						{
+							test_command: testCommand,
+						},
+					)
+				}
+				const { effectivePassing } = await import("../progress-gate.js")
+				const basePassing = effectivePassing(result)
+				const { noTestsCollected } = await import("../progress-gate.js")
+				const baseRed =
+					result.exitCode !== 0 && !noTestsCollected(result.stdout + "\n" + result.stderr, result.exitCode)
+				progressBaseline = {
+					passingCount: basePassing,
+					totalCount: result.totalCount,
+					format: result.format,
+					exitCode: result.exitCode,
+					// The final commit requires a green suite (liveness). Tell the client up
+					// front when the suite is already red, so it is not discovered at commit.
+					failingAtBase: baseRed,
+					...(baseRed
+						? {
+								warning:
+									"The test suite is already failing at the base commit; the final commit " +
+									"will be refused until the tests pass",
+							}
+						: result.format === "unknown"
+							? { warning: "Test output format not recognised; progress is judged by exit code only" }
+							: {}),
+				}
 
-				// Store baseline (DB or in-memory for testing)
 				if (app.db) {
 					const { setProgressBaseline } = await import("../store.js")
-					await setProgressBaseline(app.db, tx_id, result.passingCount, result.totalCount, body.test_command)
-				} else {
-					// In-memory storage for DB-less mode (testing)
-					if (!app.progressBaselines) {
-						app.progressBaselines = new Map()
-					}
-					app.progressBaselines.set(tx_id, {
-						passing_count: result.passingCount,
-						total_count: result.totalCount,
-						test_command: body.test_command,
-						last_checkpoint_count: result.passingCount,
-					})
+					await setProgressBaseline(app.db, tx_id, basePassing, result.totalCount, testCommand)
 				}
+				// Always keep the in-memory copy (format is not persisted in the DB)
+				app.progressBaselines!.set(tx_id, {
+					passing_count: basePassing,
+					total_count: result.totalCount,
+					test_command: testCommand,
+					last_checkpoint_count: basePassing,
+					format: result.format,
+					exit_code: result.exitCode,
+					failing_at_base: baseRed,
+				})
 			}
 
 			return reply.send({
 				tx_id,
 				base_commit,
 				branch: `tx/${tx_id}`,
+				target_branch: targetBranch,
 				worktree_path,
 				policy: { isolation: body.isolation },
+				test_command_configured: !!testCommand,
 				progress_baseline: progressBaseline,
 			})
 		} catch (e) {
-			console.error(`[tx/begin] Error:`, e)
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
+	})
+
+	// Transaction status (used by the extension to resume a task's transaction)
+	app.get("/tx/:tx_id", async (req, reply) => {
+		HeadersSchema.parse(req.headers as any)
+		const txId = (req.params as any).tx_id
+		const git = new Git({ repoRoot: app.repoRoot })
+		const { existsSync } = await import("node:fs")
+		const { loadTxMeta } = await import("../tx-meta.js")
+		const meta = await loadTxMeta(app, txId)
+		const worktree_path = git.worktreePath(txId)
+		const hasWorktree = existsSync(worktree_path)
+		if (!meta && !hasWorktree) {
+			throw new CPError("TX_NOT_FOUND", `Transaction ${txId} not found`, { tx_id: txId })
+		}
+		// A worktree that vanished means the tx can no longer make progress
+		const status = meta?.status === "active" && !hasWorktree ? "aborted" : (meta?.status ?? "active")
+		let head_commit: string | undefined
+		if (hasWorktree) {
+			try {
+				head_commit = await git.revParse("HEAD", worktree_path)
+			} catch {
+				/* ignore */
+			}
+		}
+		return reply.send({
+			tx_id: txId,
+			status,
+			worktree_path: hasWorktree ? worktree_path : undefined,
+			base_commit: meta?.base_commit,
+			head_commit,
+			target_branch: meta?.target_branch,
+			isolation: meta?.isolation,
+			test_command_configured: !!meta?.test_command,
+		})
+	})
+
+	// Explicit discard of a transaction (idempotent)
+	app.post("/tx/:tx_id/abort", async (req, reply) => {
+		HeadersSchema.parse(req.headers as any)
+		const body = z.object({ reason: z.string().optional() }).parse((req as any).body || {})
+		const txId = (req.params as any).tx_id
+		const git = new Git({ repoRoot: app.repoRoot })
+		const { killTxProcesses } = await import("../exec.js")
+		const processes_killed = await killTxProcesses(app, txId)
+		const sub_txs_removed = await git.cleanupAllSubTxs(txId)
+		await git.removeTx(txId)
+		if (app.db) {
+			try {
+				await finalizeTransaction(app.db, txId, "aborted")
+			} catch {
+				/* unknown tx in DB: still idempotent */
+			}
+		}
+		const { setTxStatus } = await import("../tx-meta.js")
+		setTxStatus(app, txId, "aborted")
+		app.fileReservations.delete(txId)
+		app.mergedSnapshots.delete(txId)
+		app.log.info({ txId, reason: body.reason }, "Transaction aborted")
+		return reply.send({ aborted: true, tx_id: txId, sub_txs_removed, processes_killed })
 	})
 
 	app.post("/tx/:tx_id/apply", async (req, reply) => {
@@ -272,7 +384,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 					file_path: e.details?.file_path || body.file_path,
 				})
 			}
-			return reply.code(400).send(errorResponse(e))
+			return sendError(reply, e, 400)
 		}
 	})
 
@@ -282,27 +394,18 @@ export function registerTxRoutes(app: FastifyInstance) {
 			.object({ file_path: z.string(), content_base64: z.string(), mode: z.string().optional() })
 			.parse((req as any).body || {})
 
-		// R31/R32: Tests are authoritative — block MODIFICATION of existing test files.
-		// Creating NEW test files is allowed (agents need to write tests).
-		// Only modification/weakening of "given" tests is blocked.
+		// R31/R32: Tests are given — agents may neither modify existing tests nor
+		// introduce new ones, unless the path is on the SERVER-SIDE allowlist.
 		if (isTestFile(body.file_path) && !isTestModifyAllowed(body.file_path, app.testModifyAllowlist)) {
-			try {
-				const git = new Git({ repoRoot: app.repoRoot })
-				const wt = git.worktreePath((req.params as any).tx_id)
-				const { existsSync } = await import("node:fs")
-				const { join } = await import("node:path")
-				const fileExists = existsSync(join(wt, body.file_path))
-				if (fileExists) {
-					return reply.code(403).send({
-						code: "TEST_FILE_PROTECTED",
-						message: `R31/R32 violation: Tests are "given". Modifying existing test file "${body.file_path}" is not allowed.`,
-						file_path: body.file_path,
-					})
-				}
-				// File doesn't exist yet → creating a NEW test → allowed
-			} catch {
-				// If we can't determine, fall through and allow the write
-			}
+			const { existsSync } = await import("node:fs")
+			const { join } = await import("node:path")
+			const wt = new Git({ repoRoot: app.repoRoot }).worktreePath((req.params as any).tx_id)
+			const exists = existsSync(join(wt, body.file_path))
+			return reply.code(403).send({
+				code: "TEST_FILE_PROTECTED",
+				message: `R31/R32 violation: Tests are "given". ${exists ? "Modifying the existing" : "Creating a new"} test file "${body.file_path}" is not allowed.`,
+				file_path: body.file_path,
+			})
 		}
 
 		try {
@@ -311,7 +414,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 			await git.writeFile((req.params as any).tx_id, body.file_path, bytesBuf, body.mode)
 			return reply.send({ ok: true, bytes: bytesBuf.byteLength })
 		} catch (e) {
-			return reply.code(400).send(errorResponse(e))
+			return sendError(reply, e, 400)
 		}
 	})
 
@@ -323,7 +426,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 			const { content, mode } = await git.readFile((req.params as any).tx_id, query.file_path)
 			return reply.send({ content_base64: content.toString("base64"), mode })
 		} catch (e) {
-			return reply.code(404).send(errorResponse(e))
+			return sendError(reply, e, 404)
 		}
 	})
 
@@ -331,7 +434,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 		HeadersSchema.parse(req.headers as any)
 		const body = z
 			.object({
-				reason: z.enum(["human", "auto", "manual"]),
+				reason: z.string().min(1).max(64), // e.g. human | auto | manual | plan-group
 				policy_snapshot: z.record(z.any()).optional(),
 				trailers: z.record(z.string()).optional(),
 			})
@@ -345,15 +448,9 @@ export function registerTxRoutes(app: FastifyInstance) {
 
 			// R33: Progress Gate - check if test count is monotonically non-decreasing
 			// Check DB first, then in-memory storage for testing
-			let baseline: {
-				passing_count: number
-				total_count: number
-				test_command: string
-				last_checkpoint_count?: number
-				last_checkpoint_sha?: string
-			} | null = null
+			let baseline: ProgressBaselineState | null = app.progressBaselines?.get(txId) ?? null
 
-			if (app.db) {
+			if (!baseline && app.db) {
 				const { getProgressBaseline, getLastProgressCheckpoint } = await import("../store.js")
 				const dbBaseline = await getProgressBaseline(app.db, txId)
 				if (dbBaseline) {
@@ -366,40 +463,75 @@ export function registerTxRoutes(app: FastifyInstance) {
 						last_checkpoint_sha: lastCp?.checkpoint_sha,
 					}
 				}
-			} else if (app.progressBaselines?.has(txId)) {
-				// In-memory storage for DB-less mode (testing)
-				baseline = app.progressBaselines.get(txId) ?? null
+			}
+
+			const { loadTxMeta } = await import("../tx-meta.js")
+			const meta = await loadTxMeta(app, txId)
+
+			// Last known-good state: the last passing checkpoint, else where the tx began.
+			const lastGoodTarget = async (lastSha?: string) => {
+				if (lastSha) return lastSha
+				if (meta?.base_commit) return meta.base_commit
+				return git.revParse("HEAD", worktreePath)
+			}
+
+			// R4: compile / type-check gate (a broken build is never a valid checkpoint)
+			if (meta?.compile_command) {
+				const { runCommand } = await import("../exec.js")
+				const compile = await runCommand(worktreePath, meta.compile_command, {
+					timeoutMs: app.cpConfig.testTimeoutMs,
+					app,
+					txId,
+				})
+				if (compile.exitCode !== 0) {
+					const rollbackTarget = await lastGoodTarget(baseline?.last_checkpoint_sha)
+					const snap = await git.snapshotAndReset(
+						worktreePath,
+						rollbackTarget,
+						`compile-violation tx:${txId}`,
+					)
+					return reply.code(403).send({
+						code: "PROGRESS_VIOLATION",
+						kind: "compile",
+						message: `Compile check failed (exit ${compile.exitCode}): ${meta.compile_command}`,
+						compile_output: (compile.stdout + "\n" + compile.stderr).slice(-4096),
+						rollback_to: rollbackTarget,
+						backup_ref: snap.backup_ref,
+					})
+				}
 			}
 
 			if (baseline) {
-				const { runTestsAndCount, isProgressValid } = await import("../progress-gate.js")
-				const currentResult = await runTestsAndCount(worktreePath, baseline.test_command)
+				const { runTestsAndCount, isProgressValid, effectivePassing } = await import("../progress-gate.js")
+				const currentResult = await runTestsAndCount(worktreePath, baseline.test_command, {
+					timeoutMs: app.cpConfig.testTimeoutMs,
+					app,
+					txId,
+				})
+				const currentPassing = effectivePassing(currentResult, baseline.format)
 				const lastPassingCount = baseline.last_checkpoint_count ?? baseline.passing_count
 
 				// R33: Enforce monotonic non-decreasing
-				if (!isProgressValid(lastPassingCount, currentResult.passingCount)) {
-					// Rollback to last good checkpoint (use stored SHA if available, otherwise HEAD~1)
-					let rollbackTarget: string
-					if (baseline.last_checkpoint_sha) {
-						rollbackTarget = baseline.last_checkpoint_sha
-					} else {
-						try {
-							rollbackTarget = await git.revParse("HEAD~1", worktreePath)
-						} catch {
-							// If HEAD~1 doesn't exist (first commit), use HEAD
-							rollbackTarget = await git.revParse("HEAD", worktreePath)
-						}
-					}
-
-					await git.resetHard(txId, rollbackTarget)
+				if (!isProgressValid(lastPassingCount, currentPassing)) {
+					const rollbackTarget = await lastGoodTarget(baseline.last_checkpoint_sha)
+					// Keep the rejected work recoverable under a backup ref, then reset
+					const snap = await git.snapshotAndReset(
+						worktreePath,
+						rollbackTarget,
+						`progress-violation tx:${txId}`,
+					)
 
 					return reply.code(403).send({
 						code: "PROGRESS_VIOLATION",
-						message: `Progress gate failed: passing test count decreased from ${lastPassingCount} to ${currentResult.passingCount}`,
+						kind: "tests",
+						message: `Progress gate failed: passing test count decreased from ${lastPassingCount} to ${currentPassing}`,
 						baseline_count: baseline.passing_count,
 						last_checkpoint_count: lastPassingCount,
-						current_count: currentResult.passingCount,
+						current_count: currentPassing,
+						failing_count: currentResult.failingCount,
+						format: currentResult.format,
 						rollback_to: rollbackTarget,
+						backup_ref: snap.backup_ref,
 					})
 				}
 
@@ -412,13 +544,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 				// Update storage
 				if (app.db) {
 					const { recordProgressCheckpoint } = await import("../store.js")
-					await recordProgressCheckpoint(
-						app.db,
-						txId,
-						sha,
-						currentResult.passingCount,
-						currentResult.totalCount,
-					)
+					await recordProgressCheckpoint(app.db, txId, sha, currentPassing, currentResult.totalCount)
 
 					const tx = await getTransaction(app.db, txId)
 					if (tx) {
@@ -432,21 +558,22 @@ export function registerTxRoutes(app: FastifyInstance) {
 							(req as any).body?.policy_snapshot || {},
 						)
 					}
-				} else if (app.progressBaselines) {
-					// Update in-memory last checkpoint count and SHA
-					baseline.last_checkpoint_count = currentResult.passingCount
-					baseline.last_checkpoint_sha = sha
-					app.progressBaselines.set(txId, baseline)
 				}
+				// Keep the in-memory copy current in both modes (it carries the output format)
+				baseline.last_checkpoint_count = currentPassing
+				baseline.last_checkpoint_sha = sha
+				app.progressBaselines!.set(txId, baseline)
 
 				return reply.code(201).send({
 					commit_sha: sha,
 					tag,
 					version_id: randomUUID(),
 					progress: {
-						passing_count: currentResult.passingCount,
+						passing_count: currentPassing,
+						failing_count: currentResult.failingCount,
 						total_count: currentResult.totalCount,
 						baseline_count: baseline.passing_count,
+						format: currentResult.format,
 					},
 				})
 			}
@@ -472,7 +599,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 			}
 			return reply.code(201).send({ commit_sha: sha, tag, version_id: randomUUID() })
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
@@ -480,12 +607,17 @@ export function registerTxRoutes(app: FastifyInstance) {
 		HeadersSchema.parse(req.headers as any)
 		const body = z
 			.object({
-				strategy: z.enum(["fail-fast", "rebase", "hybrid"]),
+				// Defaults to the isolation policy the transaction was begun with
+				strategy: z.enum(["fail-fast", "rebase", "hybrid"]).optional(),
 				maxRebaseMs: z.number().int().optional(),
 				maxConflictFiles: z.number().int().optional(),
 				// Liveness check parameters (optional - can come from persisted state)
 				required_steps: z.array(z.string()).optional(),
 				completed_steps: z.array(z.string()).optional(),
+				// Used only when the transaction has no stored test command
+				test_command: z.string().min(1).optional(),
+				// R6: refuse to commit when no liveness test command is configured
+				require_liveness: z.boolean().default(false),
 			})
 			.parse((req as any).body || {})
 
@@ -494,10 +626,29 @@ export function registerTxRoutes(app: FastifyInstance) {
 		try {
 			const git = new Git({ repoRoot: app.repoRoot })
 			const worktreePath = git.worktreePath(txId)
+			const { loadTxMeta, setTxStatus } = await import("../tx-meta.js")
+			const meta = await loadTxMeta(app, txId)
+			if (meta && meta.status !== "active") {
+				throw new CPError("TX_NOT_ACTIVE", `Transaction ${txId} is already ${meta.status}`, {
+					status: meta.status,
+				})
+			}
+			const strategy = body.strategy ?? meta?.isolation ?? "fail-fast"
+
+			// Commit any uncommitted work in the tx worktree first, so liveness tests
+			// exactly what is published (agents write files directly in the worktree).
+			try {
+				const { stdout } = await (git as any).git(["status", "--porcelain"], worktreePath)
+				if (stdout.trim()) {
+					await git.checkpoint(txId, `[cp] final changes (tx:${txId})`)
+				}
+			} catch {
+				/* nothing to commit */
+			}
 
 			// R6, Slide 68: Liveness MUST run at FINAL commit point
 			// Get test_command from progress baseline (stored "given tests")
-			let testCommand: string | undefined
+			let testCommand: string | undefined = meta?.test_command
 			let baseline: {
 				passing_count: number
 				total_count: number
@@ -530,6 +681,19 @@ export function registerTxRoutes(app: FastifyInstance) {
 				}
 			}
 
+			testCommand = testCommand ?? body.test_command
+			if (!testCommand && body.require_liveness) {
+				throw new CPError(
+					"LIVENESS_UNCONFIGURED",
+					"Liveness is required at the final commit but no test command is configured for this transaction",
+				)
+			}
+
+			let liveness: { ran: boolean; passed?: boolean; reason?: string } = {
+				ran: false,
+				reason: "no test command configured",
+			}
+
 			// Run liveness check if test_command is available (given tests)
 			if (testCommand) {
 				const { checkLiveness, createLivenessEvent } = await import("../liveness.js")
@@ -538,66 +702,81 @@ export function registerTxRoutes(app: FastifyInstance) {
 					testCommand,
 					requiredSteps: body.required_steps,
 					completedSteps: body.completed_steps,
+					timeoutMs: app.cpConfig.testTimeoutMs,
 				})
+				liveness = { ran: true, passed: check.passed, reason: check.details.error }
 
 				const event = createLivenessEvent(check, txId, true)
 
 				app.log.info({ event }, `Liveness check at final commit: ${check.passed ? "PASSED" : "FAILED"}`)
 
 				if (!check.passed) {
-					// R7, Slide 68: Rollback to last good checkpoint SHA on liveness failure
-					let rollbackTarget: string
-					if (baseline?.last_checkpoint_sha) {
-						rollbackTarget = baseline.last_checkpoint_sha
-					} else {
-						try {
-							rollbackTarget = await git.revParse("HEAD~1", worktreePath)
-						} catch {
-							// If HEAD~1 doesn't exist (first commit), use HEAD
-							rollbackTarget = await git.revParse("HEAD", worktreePath)
-						}
-					}
+					// R7, Slide 68: Rollback to last good checkpoint on liveness failure
+					// (last passing progress checkpoint, else where the tx began)
+					const rollbackTarget =
+						baseline?.last_checkpoint_sha ??
+						app.progressBaselines?.get(txId)?.last_checkpoint_sha ??
+						meta?.base_commit ??
+						(await git.revParse("HEAD", worktreePath))
 
-					// Perform rollback
-					await git.resetHard(txId, rollbackTarget)
+					// Perform rollback (rejected work stays recoverable under a backup ref)
+					const snap = await git.snapshotAndReset(
+						worktreePath,
+						rollbackTarget,
+						`liveness-violation tx:${txId}`,
+					)
 
 					return reply.code(403).send({
 						code: "LIVENESS_FAILED",
-						message: `Liveness check failed at final commit: ${check.details.error || "Tests failed or pending steps"}`,
+						message:
+							`Liveness check failed at final commit: ${check.details.error || "Tests failed or pending steps"}` +
+							(app.progressBaselines?.get(txId)?.failing_at_base
+								? " (the test suite was already failing when this transaction began)"
+								: ""),
+						baseline_was_failing: !!app.progressBaselines?.get(txId)?.failing_at_base,
 						passed: false,
 						testsPass: check.testsPass,
 						noPendingSteps: check.noPendingSteps,
 						details: check.details,
 						event,
 						rollback_to: rollbackTarget,
+						backup_ref: snap.backup_ref,
 					})
 				}
 			}
 
 			// Liveness passed (or not configured) - proceed with commit
-			let baseSha = ""
-			if (app.db) {
-				const tx = await getTransaction(app.db, txId)
-				baseSha = tx?.base_commit || ""
-			}
+			const baseSha = meta?.base_commit ?? ""
+			const targetBranch = meta?.target_branch ?? (await git.currentBranch()) ?? "main"
 
-			const res = await git.commitToMain(txId, baseSha, body.strategy)
-			if ((res as any).conflict) {
-				const details = (res as any).conflict.details || {}
-				if (app.db) {
-					try {
-						await finalizeTransaction(app.db, txId, "aborted")
-					} catch {}
-				}
-				return reply.code(409).send({ code: (res as any).conflict.code, details: { ...details } })
+			const res = await git.commitToMain(txId, baseSha, strategy, targetBranch)
+			if ("conflict" in res) {
+				// The transaction stays OPEN: the caller may resolve (e.g. rebase,
+				// clean the workspace) and retry, or abort explicitly.
+				return reply.code(409).send({
+					code: res.conflict.code,
+					message: `Commit refused: ${res.conflict.code}`,
+					details: { ...res.conflict.details },
+					liveness,
+				})
 			}
 
 			if (app.db) {
 				await finalizeTransaction(app.db, txId, "committed")
 			}
-			return reply.send({ merged_sha: (res as any).merged_sha, advanced_head: true })
+			setTxStatus(app, txId, "committed")
+			// R30: Clean up file reservations for this transaction
+			app.fileReservations.delete(txId)
+			app.mergedSnapshots.delete(txId)
+			return reply.send({
+				merged_sha: res.merged_sha,
+				advanced_head: true,
+				target_branch: res.target_branch,
+				strategy,
+				liveness,
+			})
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
@@ -612,18 +791,21 @@ export function registerTxRoutes(app: FastifyInstance) {
 			const git = new Git({ repoRoot: app.repoRoot })
 			const wt = git.worktreePath(txId)
 
-			// Get file count before rollback for metrics
-			let filesAffected = 0
-			try {
-				const { stdout } = await (git as any).git(["diff", "--name-only", body.hash, "HEAD"], wt)
-				filesAffected = stdout.split("\n").filter(Boolean).length
-			} catch {
-				/* ignore */
+			// Only commits that belong to this transaction's history are valid targets
+			const target = await git.verifyCommit(body.hash, wt)
+			if (!(await git.isAncestor(target, "HEAD", wt))) {
+				throw new CPError("VALIDATION_ERROR", `Commit ${body.hash} is not part of transaction ${txId}`, {
+					hash: body.hash,
+				})
 			}
 
-			// Clean untracked files then reset the worktree to the specified commit
-			await (git as any).git(["clean", "-fd"], wt)
-			await (git as any).git(["reset", "--hard", body.hash], wt)
+			// Stop anything the transaction left running (dev servers, watchers, ...)
+			const { killTxProcesses } = await import("../exec.js")
+			const processesKilled = await killTxProcesses(app, txId)
+
+			// Back up the discarded work, then reset + clean (ignored files are kept)
+			const snap = await git.snapshotAndReset(wt, target, `rollback tx:${txId}`)
+			const filesAffected = snap.files_affected
 
 			const durationMs = Date.now() - startTime
 
@@ -635,21 +817,33 @@ export function registerTxRoutes(app: FastifyInstance) {
 						tx_id: txId,
 						duration_ms: durationMs,
 						files_affected: filesAffected,
+						bytes_rolled_back: snap.bytes_rolled_back,
 						rollback_type: "transaction",
 					})
-				} catch {
-					/* ignore metrics errors */
+				} catch (metricErr) {
+					app.log.warn({ err: metricErr }, "Failed to record rollback metric")
 				}
 			}
 
+			// Progress gate: a checkpoint that was rolled away can no longer be "last good"
+			const pb = app.progressBaselines?.get(txId)
+			if (pb && pb.last_checkpoint_sha && !(await git.isAncestor(pb.last_checkpoint_sha, target, wt))) {
+				pb.last_checkpoint_sha = target
+			}
+
+			// R30: Clean up file reservations for this transaction
+			app.fileReservations.delete(txId)
 			return reply.send({
-				rolled_back_to: body.hash,
-				message: `Rolled back to commit ${body.hash}`,
+				rolled_back_to: target,
+				message: `Rolled back to commit ${target}`,
 				duration_ms: durationMs,
 				files_affected: filesAffected,
+				bytes_rolled_back: snap.bytes_rolled_back,
+				backup_ref: snap.backup_ref,
+				processes_killed: processesKilled,
 			})
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
@@ -672,18 +866,24 @@ export function registerTxRoutes(app: FastifyInstance) {
 		try {
 			const git = new Git({ repoRoot: app.repoRoot })
 			const parentTxId = (req.params as any).tx_id
-			const relativeSubTxId = (req.params as any).sub_tx_id
+			const { assertSubTxId, toGlobalSubTxId } = await import("../ids.js")
+			const relativeSubTxId = assertSubTxId(parentTxId, (req.params as any).sub_tx_id)
 			const base = body.base || parentTxId
 
 			// Make sub_tx_id globally unique by prefixing with parent tx_id
 			// This ensures "st1" from tx-abc is different from "st1" from tx-def
-			const globalSubTxId = `${parentTxId}:${relativeSubTxId}`
+			const globalSubTxId = toGlobalSubTxId(parentTxId, relativeSubTxId)
+			const dependsOn = (body.dependsOn ?? []).map((d) => assertSubTxId(parentTxId, d))
 
 			const worktreePath = await git.beginSubTx(parentTxId, relativeSubTxId, base)
+			const baseCommit = await git.revParse("HEAD", worktreePath)
+			subTxDeps.set(globalSubTxId, dependsOn)
+			subTxStatus.set(globalSubTxId, "RUNNING")
+			app.safetyGates.delete(globalSubTxId)
+			if (body.safetyChecks && body.safetyChecks.length > 0) subTxHasChecks.add(globalSubTxId)
 
 			// Persist sub-transaction to database
 			if (app.db) {
-				const baseCommit = await git.revParse("HEAD", git.worktreePath(parentTxId))
 				await insertSubTransaction(app.db, {
 					sub_tx_id: globalSubTxId,
 					tx_id: parentTxId,
@@ -691,7 +891,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 					description: body.description,
 					agent_type: body.agentType,
 					prompt: body.prompt,
-					depends_on: body.dependsOn,
+					depends_on: dependsOn,
 					safety_checks: body.safetyChecks,
 					base_commit: baseCommit,
 					status: "RUNNING",
@@ -702,13 +902,18 @@ export function registerTxRoutes(app: FastifyInstance) {
 			return reply.send({
 				worktree_path: worktreePath,
 				sub_tx_id: globalSubTxId,
+				relative_id: relativeSubTxId,
 				parent_tx_id: parentTxId,
+				base_commit: baseCommit,
 			})
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
+	// Merge ONE sub-transaction (fallback path; prefer /merge-pipeline).
+	// Enforces depends_on, the safety gate, and the strict structural policy
+	// against every sub-tx already merged into the parent.
 	app.post("/tx/:tx_id/sub-tx/:sub_tx_id/merge", async (req, reply) => {
 		HeadersSchema.parse(req.headers as any)
 		const body = z
@@ -723,83 +928,88 @@ export function registerTxRoutes(app: FastifyInstance) {
 					.optional(),
 				// Whether this sub-tx has safety checks defined
 				hasSafetyChecks: z.boolean().default(false),
-				// Force merge without safety gate (for testing/emergency only)
+				// Skip the safety gate (testing/emergency only). Never skips the structural check.
 				forceMerge: z.boolean().default(false),
 			})
 			.parse((req as any).body || {})
 
+		const { requireSubTx } = await import("../guards.js")
+		const sub = await requireSubTx(app, (req.params as any).tx_id, (req.params as any).sub_tx_id)
+		const { parentTxId, rel: relativeSubTxId, global: globalSubTxId, git } = sub
+		const { getDependsOn, getSubTxStatus, hasDeclaredSafetyChecks, getRecordedSafetyGate } = await import(
+			"../subtx-state.js"
+		)
+
 		try {
-			const git = new Git({ repoRoot: app.repoRoot })
-			const parentTxId = (req.params as any).tx_id
-			const relativeSubTxId = (req.params as any).sub_tx_id
-			// Use globally unique sub_tx_id for database operations
-			const globalSubTxId = `${parentTxId}:${relativeSubTxId}`
-
-			// Enforce dependency ordering: all declared depends_on must be COMMITTED before this sub-tx merges
-			if (app.db) {
-				const thisSubTx = await getSubTransaction(app.db, globalSubTxId)
-				if (thisSubTx?.depends_on && thisSubTx.depends_on.length > 0) {
-					for (const depId of thisSubTx.depends_on) {
-						const globalDepId = `${parentTxId}:${depId}`
-						const dep = await getSubTransaction(app.db, globalDepId)
-						if (!dep || dep.status !== "COMMITTED") {
-							return reply.code(409).send({
-								code: "DEPENDENCY_NOT_MET",
-								message: `Cannot merge: dependency "${depId}" has not been committed yet (status: ${dep?.status ?? "NOT_FOUND"})`,
-								dependency: depId,
-								dependencyStatus: dep?.status ?? "NOT_FOUND",
-							})
-						}
-					}
+			// Enforce dependency ordering: every depends_on must be COMMITTED first
+			for (const depId of await getDependsOn(app, parentTxId, relativeSubTxId)) {
+				const depStatus = await getSubTxStatus(app, `${parentTxId}:${depId}`)
+				if (depStatus !== "COMMITTED") {
+					return reply.code(409).send({
+						code: "DEPENDENCY_NOT_MET",
+						message: `Cannot merge: dependency "${depId}" has not been committed yet (status: ${depStatus ?? "NOT_FOUND"})`,
+						dependency: depId,
+						dependencyStatus: depStatus ?? "NOT_FOUND",
+					})
 				}
 			}
 
-			// P0 CRITICAL: Check database for safety checks if not provided in request
-			let hasSafetyChecks = body.hasSafetyChecks
-			if (app.db && !hasSafetyChecks) {
-				const subTx = await getSubTransaction(app.db, globalSubTxId)
-				if (subTx?.safety_checks && subTx.safety_checks.length > 0) {
-					hasSafetyChecks = true
-				}
-			}
-
-			// P0 CRITICAL: Enforce safety gate if checks are defined
+			// Safety gate: required when checks were declared or a gate was run
+			const recorded = await getRecordedSafetyGate(app, globalSubTxId)
+			const gate = body.safetyGate ?? recorded ?? undefined
+			const hasSafetyChecks =
+				body.hasSafetyChecks || recorded !== null || (await hasDeclaredSafetyChecks(app, globalSubTxId))
 			if (hasSafetyChecks && !body.forceMerge) {
-				if (!body.safetyGate) {
+				if (!gate) {
 					return reply.code(403).send({
 						code: "SAFETY_GATE_REQUIRED",
 						message:
 							"Safety checks are defined but no safety gate result was provided. Run safety-gate endpoint first.",
 					})
 				}
-				if (!body.safetyGate.ok) {
-					// Persist the failure
-					if (app.db) {
-						await updateSubTransactionStatus(app.db, globalSubTxId, "ABORTED", undefined, {
-							kind: "SAFETY_FAIL",
-							message: `Failed at: ${body.safetyGate.failedAt}`,
-						})
-					}
+				if (!gate.ok || (recorded && !recorded.ok)) {
+					await setSubTxStatus(app, globalSubTxId, "ABORTED", undefined, {
+						kind: "SAFETY_FAIL",
+						message: `Failed at: ${(body.safetyGate as any)?.failedAt ?? "recorded gate"}`,
+					})
 					return reply.code(403).send({
 						code: "SAFETY_GATE_FAILED",
-						message: `Safety checks failed at: ${body.safetyGate.failedAt}. Merge blocked.`,
-						safetyGate: body.safetyGate,
+						message: `Safety checks failed at: ${(body.safetyGate as any)?.failedAt ?? "recorded gate"}. Merge blocked.`,
+						safetyGate: gate,
 					})
 				}
 			}
 
+			// Strict structural policy (R16/R17): conflicts with an already-merged
+			// sibling roll this sub-tx back even if git could merge it.
+			const { checkAgainstMerged } = await import("../merge-pipeline.js")
+			const check = await checkAgainstMerged(app, parentTxId, relativeSubTxId, sub.worktreePath)
+			if (check.conflicts.length > 0) {
+				await git.rollbackSubTx(parentTxId, relativeSubTxId)
+				const [withId, conflict] = check.conflicts[0]!
+				await setSubTxStatus(app, globalSubTxId, "ABORTED", undefined, {
+					kind: "STRUCTURAL_CONFLICT",
+					message: conflict.message ?? `conflicts with ${withId}`,
+				})
+				return reply.code(409).send({
+					code: "STRUCTURAL_CONFLICT",
+					message: `Structural conflict with already-merged sub-transaction(s): ${check.conflicts.map(([id]) => id).join(", ")}. Rolled back.`,
+					sub_tx_id: globalSubTxId,
+					conflicts_with: check.conflicts.map(([id]) => id),
+					conflict_type: conflict.conflictType,
+					files: conflict.conflictingFiles,
+				})
+			}
+
 			// R15, R17: Detect conflicts at merge time and abort/rollback on failure
-			// Git operations use the relative ID
 			const mergeResult = await git.mergeSubTx(parentTxId, relativeSubTxId)
 
 			if (!mergeResult.merged && mergeResult.conflict) {
 				// R17, R24: Abort and rollback conflicting work
-				if (app.db) {
-					await updateSubTransactionStatus(app.db, globalSubTxId, "ABORTED", undefined, {
-						kind: "MERGE_CONFLICT",
-						message: mergeResult.conflict,
-					})
-				}
+				await setSubTxStatus(app, globalSubTxId, "ABORTED", undefined, {
+					kind: "MERGE_CONFLICT",
+					message: mergeResult.conflict,
+				})
 				return reply.code(409).send({
 					code: "MERGE_CONFLICT",
 					message: `Merge conflict detected: ${mergeResult.conflict}`,
@@ -807,31 +1017,26 @@ export function registerTxRoutes(app: FastifyInstance) {
 				})
 			}
 
-			// Persist successful merge
-			if (app.db && mergeResult.merged) {
-				const endCommit = await git.revParse("HEAD", git.worktreePath(parentTxId))
-				await updateSubTransactionStatus(app.db, globalSubTxId, "COMMITTED", endCommit)
-			}
+			const mergeCommit = await git.revParse("HEAD", git.worktreePath(parentTxId))
+			await setSubTxStatus(app, globalSubTxId, "COMMITTED", mergeCommit)
+			const merged = app.mergedSnapshots.get(parentTxId) ?? []
+			merged.push(check.snapshot)
+			app.mergedSnapshots.set(parentTxId, merged)
 
 			return reply.send({
-				merged: mergeResult.merged,
+				merged: true,
 				sub_tx_id: globalSubTxId,
+				relative_id: relativeSubTxId,
 				parent_tx_id: parentTxId,
-				safetyGatePassed: body.safetyGate?.ok ?? null,
+				merge_commit: mergeCommit,
+				safetyGatePassed: gate?.ok ?? null,
 			})
 		} catch (e) {
-			// Persist failure on error
-			if (app.db) {
-				try {
-					await updateSubTransactionStatus(app.db, (req.params as any).sub_tx_id, "ABORTED", undefined, {
-						kind: "MERGE_CONFLICT",
-						message: String(e),
-					})
-				} catch {
-					/* ignore db errors during error handling */
-				}
-			}
-			return reply.code(500).send(errorResponse(e))
+			await setSubTxStatus(app, globalSubTxId, "ABORTED", undefined, {
+				kind: "MERGE_CONFLICT",
+				message: String(e),
+			})
+			return sendError(reply, e)
 		}
 	})
 
@@ -840,7 +1045,19 @@ export function registerTxRoutes(app: FastifyInstance) {
 		const body = z
 			.object({
 				reason: z.string().optional(),
-				failureKind: z.enum(["MERGE_CONFLICT", "SAFETY_FAIL", "RUNTIME_ERROR", "TIMEOUT"]).optional(),
+				failureKind: z
+					.enum([
+						"MERGE_CONFLICT",
+						"STRUCTURAL_CONFLICT",
+						"SAFETY_FAIL",
+						"RUNTIME_ERROR",
+						"TIMEOUT",
+						"DEPENDENCY_FAILED",
+						"WORKTREE_CREATE_FAILED",
+						"PROGRESS_VIOLATION",
+						"ABORTED",
+					])
+					.optional(),
 			})
 			.parse((req as any).body || {})
 
@@ -849,7 +1066,24 @@ export function registerTxRoutes(app: FastifyInstance) {
 		try {
 			const git = new Git({ repoRoot: app.repoRoot })
 			const parentTxId = (req.params as any).tx_id
-			const subTxId = (req.params as any).sub_tx_id
+			const { assertSubTxId, toGlobalSubTxId } = await import("../ids.js")
+			const subTxId = assertSubTxId(parentTxId, (req.params as any).sub_tx_id)
+			const globalSubTxId = toGlobalSubTxId(parentTxId, subTxId)
+
+			// Measure what is being discarded before it disappears
+			let bytesRolledBack = 0
+			let filesAffected = 0
+			try {
+				const subWt = git.subTxWorktreePath(parentTxId, subTxId)
+				const parentHead = await git.revParse("HEAD", git.worktreePath(parentTxId))
+				const stat = await git.diffSize(subWt, parentHead)
+				bytesRolledBack = stat.bytes
+				filesAffected = stat.files
+			} catch {
+				/* worktree already gone */
+			}
+			const { killTxProcesses } = await import("../exec.js")
+			await killTxProcesses(app, `${parentTxId}_sub_${subTxId}`)
 
 			// Idempotent rollback: don't fail if already cleaned up
 			try {
@@ -870,58 +1104,53 @@ export function registerTxRoutes(app: FastifyInstance) {
 			const durationMs = Date.now() - startTime
 
 			// Persist rollback status and metrics
-			if (app.db) {
-				await updateSubTransactionStatus(app.db, subTxId, "ABORTED", undefined, {
-					kind: body.failureKind || "RUNTIME_ERROR",
-					message: body.reason || "Rolled back",
-				})
-
-				// Record rollback metrics
-				try {
-					const { insertMetricRollback } = await import("../store.js")
-					await insertMetricRollback(app.db, {
-						tx_id: parentTxId,
-						sub_tx_id: subTxId,
-						duration_ms: durationMs,
-						rollback_type: "sub_transaction",
-					})
-				} catch {
-					/* ignore metrics errors */
-				}
-			}
+			app.safetyGates.delete(globalSubTxId)
+			await setSubTxStatus(app, globalSubTxId, "ABORTED", undefined, {
+				kind: body.failureKind || "RUNTIME_ERROR",
+				message: body.reason || "Rolled back",
+			})
+			await recordSubTxRollbackMetric(app, parentTxId, globalSubTxId, durationMs, filesAffected, bytesRolledBack)
 
 			return reply.send({
 				rolled_back: true,
-				sub_tx_id: subTxId,
+				sub_tx_id: globalSubTxId,
+				relative_id: subTxId,
 				parent_tx_id: parentTxId,
 				duration_ms: durationMs,
+				bytes_rolled_back: bytesRolledBack,
+				files_affected: filesAffected,
 			})
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
 	// ============================================================================
-	// Safety Gate Endpoint - P0 CRITICAL
-	// This endpoint runs safety checks and returns structured results.
-	// If any check fails, the sub-transaction should NOT be merged.
+	// Safety Gate Endpoint (R4/R5/R8)
+	// Runs the sub-transaction's safety rules in its worktree. Accepts legacy
+	// shell `checks`, a declarative `clause`, or BOTH (both must pass). The
+	// outcome is recorded and enforced by /merge and /merge-pipeline.
 	// ============================================================================
 	app.post("/tx/:tx_id/sub-tx/:sub_tx_id/safety-gate", async (req, reply) => {
 		HeadersSchema.parse(req.headers as any)
+		const { ClauseSchema } = await import("../clause-schema.js")
 		const body = z
 			.object({
-				checks: z.array(z.string()), // e.g., ["pnpm test", "pnpm lint"]
+				checks: z.array(z.string().trim().min(1)).optional(),
+				clause: ClauseSchema.optional(),
+			})
+			.refine((d) => (d.checks && d.checks.length > 0) || d.clause, {
+				message: "Either checks (non-empty array) or clause is required",
 			})
 			.parse((req as any).body || {})
 
-		const parentTxId = (req.params as any).tx_id
-		const relativeSubTxId = (req.params as any).sub_tx_id
-		// Use globally unique sub_tx_id for database operations
-		const globalSubTxId = `${parentTxId}:${relativeSubTxId}`
-
-		// Get the worktree path for this sub-transaction (uses relative ID)
-		const git = new Git({ repoRoot: app.repoRoot })
-		const subWt = git.subTxWorktreePath(parentTxId, relativeSubTxId)
+		// 404 if the sub-transaction (and therefore its worktree) does not exist —
+		// evaluating checks in a missing directory must never yield ok:true.
+		const { requireSubTx } = await import("../guards.js")
+		const subTx = await requireSubTx(app, (req.params as any).tx_id, (req.params as any).sub_tx_id)
+		const globalSubTxId = subTx.global
+		const subWt = subTx.worktreePath
+		const procKey = `${subTx.parentTxId}_sub_${subTx.rel}`
 
 		interface SafetyCheckResult {
 			cmd: string
@@ -931,70 +1160,80 @@ export function registerTxRoutes(app: FastifyInstance) {
 			stderrTail: string
 			passed: boolean
 		}
-
 		const results: SafetyCheckResult[] = []
-		const { exec } = await import("node:child_process")
-		const { promisify } = await import("node:util")
-		const execAsync = promisify(exec)
+		let ok = true
+		let failedAt: string | undefined
+		let reason: string | undefined
+		let error: string | undefined
 
-		for (const cmd of body.checks) {
+		// ---- Legacy shell checks (each is action-safety checked first) ----
+		const { runCommand } = await import("../exec.js")
+		const { checkActionSafety } = await import("../action-safety.js")
+		for (const cmd of body.checks ?? []) {
 			const start = Date.now()
-			try {
-				// Execute the command in the sub-transaction worktree
-				const { stdout, stderr } = await execAsync(cmd, {
-					cwd: subWt,
-					timeout: 300000, // 5 minute timeout per check
-					maxBuffer: 10 * 1024 * 1024, // 10MB buffer
-					windowsHide: true,
-				})
-
+			const safety = checkActionSafety(
+				"execute_command",
+				{ command: cmd },
+				{ worktreeRoot: subWt, unknownActionPolicy: app.cpConfig.unknownActionPolicy },
+			)
+			if (!safety.allowed) {
 				results.push({
 					cmd,
-					exitCode: 0,
+					exitCode: 126,
 					durationMs: Date.now() - start,
-					stdoutTail: stdout.slice(-2048),
-					stderrTail: stderr.slice(-2048),
-					passed: true,
-				})
-			} catch (err: any) {
-				// Command failed - capture exit code and output
-				const exitCode = typeof err?.code === "number" ? err.code : 1
-				results.push({
-					cmd,
-					exitCode,
-					durationMs: Date.now() - start,
-					stdoutTail: (err?.stdout || "").slice(-2048),
-					stderrTail: (err?.stderr || err?.message || "").slice(-2048),
+					stdoutTail: "",
+					stderrTail: `ACTION_BLOCKED: ${safety.reason}`,
 					passed: false,
 				})
-
-				// Persist results to database (use global sub_tx_id)
-				if (app.db) {
-					await insertSafetyCheckResults(
-						app.db,
-						globalSubTxId,
-						results.map((r) => ({
-							cmd: r.cmd,
-							exit_code: r.exitCode,
-							duration_ms: r.durationMs,
-							stdout_tail: r.stdoutTail,
-							stderr_tail: r.stderrTail,
-							passed: r.passed,
-						})),
-					)
-					await insertSafetyGate(app.db, globalSubTxId, { ok: false, failed_at: cmd })
-				}
-
-				// Stop on first failure - this is the safety gate
-				return reply.send({
-					ok: false,
-					results,
-					failedAt: cmd,
-				})
+				ok = false
+				failedAt = cmd
+				error = `ACTION_BLOCKED: ${safety.reason}`
+				break
+			}
+			const r = await runCommand(subWt, cmd, { timeoutMs: app.cpConfig.testTimeoutMs, app, txId: procKey })
+			const passed = r.exitCode === 0 && !r.spawnError && !r.timedOut
+			results.push({
+				cmd,
+				exitCode: r.exitCode,
+				durationMs: r.durationMs,
+				stdoutTail: r.stdout.slice(-2048),
+				stderrTail: (r.spawnError ? `${r.spawnError}\n` : "") + r.stderr.slice(-2048),
+				passed,
+			})
+			if (!passed) {
+				ok = false
+				failedAt = cmd
+				if (r.spawnError) error = `command could not be started: ${r.spawnError}`
+				break // stop on first failure
 			}
 		}
 
-		// Persist successful results to database (use global sub_tx_id)
+		// ---- Declarative clause (R8) — evaluated even when checks are given ----
+		let clauseLeaves: unknown[] | undefined
+		if (ok && body.clause) {
+			const { evalClause } = await import("../clause-eval.js")
+			const start = Date.now()
+			const clauseResult = await evalClause(body.clause, subWt, { app, txId: procKey })
+			const clauseLabel = `clause:${body.clause.type}`
+			results.push({
+				cmd: clauseLabel,
+				exitCode: clauseResult.ok ? 0 : 1,
+				durationMs: Date.now() - start,
+				stdoutTail: "",
+				stderrTail: clauseResult.error || clauseResult.reason || "",
+				passed: clauseResult.ok,
+			})
+			clauseLeaves = clauseResult.results ?? []
+			if (!clauseResult.ok) {
+				ok = false
+				failedAt = clauseLabel
+				reason = clauseResult.reason
+				error = clauseResult.error
+			}
+		}
+
+		// Record the outcome: in memory (enforced by the merge routes) and in the DB
+		app.safetyGates.set(globalSubTxId, { ok, at: Date.now() })
 		if (app.db) {
 			await insertSafetyCheckResults(
 				app.db,
@@ -1008,213 +1247,85 @@ export function registerTxRoutes(app: FastifyInstance) {
 					passed: r.passed,
 				})),
 			)
-			await insertSafetyGate(app.db, globalSubTxId, { ok: true })
+			await insertSafetyGate(app.db, globalSubTxId, ok ? { ok: true } : { ok: false, failed_at: failedAt })
 		}
 
-		// All checks passed
 		return reply.send({
-			ok: true,
+			ok,
 			results,
+			// per-leaf detail of the clause (cmd_exits_0 / test_suite / file_exists)
+			...(clauseLeaves ? { clause_results: clauseLeaves } : {}),
+			...(failedAt ? { failedAt } : {}),
+			...(reason ? { reason } : {}),
+			...(error ? { error } : {}),
 		})
 	})
 
 	// ============================================================================
-	// Merge Pipeline Endpoint (R16, R22, R23, R24)
-	// Orchestrates merging all sub-transactions with structural conflict detection.
+	// Merge Pipeline Endpoint (R16, R17, R21–R24, R30) — spec-strict
+	// See merge-pipeline.ts for the rules. A structurally conflicting later
+	// sub-tx is rolled back even when git could merge it.
 	// ============================================================================
 	app.post("/tx/:tx_id/merge-pipeline", async (req, reply) => {
 		HeadersSchema.parse(req.headers as any)
 		const body = z
 			.object({
-				sub_tx_ids: z.array(z.string()), // IDs of completed sub-transactions to merge
+				sub_tx_ids: z.array(z.string().min(1)).min(1),
+				depends_on: z.record(z.array(z.string())).optional(),
+				require_safety_gate: z.boolean().optional(),
 			})
 			.parse((req as any).body || {})
-
-		const parentTxId = (req.params as any).tx_id
-		const git = new Git({ repoRoot: app.repoRoot })
-		const parentWt = git.worktreePath(parentTxId)
-
-		try {
-			// Step 1: Gather touched files and lines changed for each subTx
-			const {
-				getTouchedFiles,
-				detectConflicts,
-				detectDependentFileConflicts,
-				partitionByConflicts,
-				orderByModifications,
-			} = await import("../structural-conflict.js")
-
-			const touchedFilesMap = new Map<string, { subTxId: string; files: string[]; linesChanged: number }>()
-
-			for (const subTxId of body.sub_tx_ids) {
-				const subWt = git.subTxWorktreePath(parentTxId, subTxId)
-				const baseRef = await git.revParse("HEAD", parentWt)
-				const touched = await getTouchedFiles(subWt, baseRef)
-				touchedFilesMap.set(subTxId, {
-					subTxId,
-					files: touched.files,
-					linesChanged: touched.linesChanged,
-				})
-			}
-
-			// Step 2: Detect structural conflicts (same-file and dependent-file)
-			const sameFileConflicts = detectConflicts(touchedFilesMap)
-			const dependentFileConflicts = await detectDependentFileConflicts(parentWt, touchedFilesMap)
-			const allConflicts = [...sameFileConflicts, ...dependentFileConflicts]
-
-			// Step 3: Partition into no-conflict and conflicting groups
-			const { noConflict, conflicting } = partitionByConflicts(body.sub_tx_ids, allConflicts)
-
-			// Step 4: Merge no-conflict subTx first
-			const mergeResults: Array<{
-				subTxId: string
-				merged: boolean
-				conflict?: boolean
-				rollback?: boolean
-				error?: string
-			}> = []
-
-			for (const subTxId of noConflict) {
-				try {
-					const result = await git.mergeSubTx(parentTxId, subTxId)
-					mergeResults.push({
-						subTxId,
-						merged: result.merged,
-						conflict: result.conflict ? true : undefined,
-						error: result.conflict,
-					})
-				} catch (e) {
-					mergeResults.push({
-						subTxId,
-						merged: false,
-						error: String(e),
-					})
-				}
-			}
-
-			// Step 5: Order conflicting subTx by lines changed (descending) and merge sequentially
-			const orderedConflicting = orderByModifications(
-				new Map(conflicting.map((id) => [id, touchedFilesMap.get(id)!])),
-			)
-
-			for (const subTxId of orderedConflicting) {
-				try {
-					const result = await git.mergeSubTx(parentTxId, subTxId)
-					if (result.merged) {
-						mergeResults.push({ subTxId, merged: true })
-					} else {
-						// Merge failed - rollback this branch
-						try {
-							await git.rollbackSubTx(parentTxId, subTxId)
-							mergeResults.push({
-								subTxId,
-								merged: false,
-								rollback: true,
-								error: result.conflict || "Merge failed, rolled back",
-							})
-
-							// Persist rollback status
-							if (app.db) {
-								await updateSubTransactionStatus(app.db, subTxId, "ABORTED", undefined, {
-									kind: "MERGE_CONFLICT",
-									message: result.conflict || "Merge failed in pipeline",
-								})
-							}
-						} catch (rollbackErr) {
-							mergeResults.push({
-								subTxId,
-								merged: false,
-								rollback: false,
-								error: `Merge failed and rollback failed: ${rollbackErr}`,
-							})
-						}
-					}
-				} catch (e) {
-					// Merge threw exception - attempt rollback
-					try {
-						await git.rollbackSubTx(parentTxId, subTxId)
-						mergeResults.push({
-							subTxId,
-							merged: false,
-							rollback: true,
-							error: String(e),
-						})
-					} catch {
-						mergeResults.push({
-							subTxId,
-							merged: false,
-							rollback: false,
-							error: String(e),
-						})
-					}
-				}
-			}
-
-			const successCount = mergeResults.filter((r) => r.merged).length
-			const failedCount = mergeResults.filter((r) => !r.merged).length
-			const rolledBackCount = mergeResults.filter((r) => r.rollback).length
-
-			return reply.send({
-				success: failedCount === 0,
-				total: body.sub_tx_ids.length,
-				merged: successCount,
-				failed: failedCount,
-				rolled_back: rolledBackCount,
-				conflicts_detected: allConflicts.length,
-				results: mergeResults,
-				conflicts: allConflicts,
-			})
-		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
-		}
+		const { runMergePipeline } = await import("../merge-pipeline.js")
+		const result = await runMergePipeline(app, (req.params as any).tx_id, body)
+		app.log.info(
+			{
+				txId: (req.params as any).tx_id,
+				merged: result.merged_ids,
+				rolled_back: result.rolled_back_ids,
+				failed: result.failed_ids,
+			},
+			"merge-pipeline finished",
+		)
+		return reply.send(result)
 	})
 
 	// ============================================================================
-	// Structural Conflict Check Endpoint (R16)
-	// Checks for structural conflicts without merging.
+	// Structural Conflict Check Endpoint (R16) — analysis only, no merging
 	// ============================================================================
 	app.post("/tx/:tx_id/structural-check", async (req, reply) => {
 		HeadersSchema.parse(req.headers as any)
-		const body = z
-			.object({
-				sub_tx_ids: z.array(z.string()),
-			})
-			.parse((req as any).body || {})
-
+		const body = z.object({ sub_tx_ids: z.array(z.string().min(1)).min(1) }).parse((req as any).body || {})
 		const parentTxId = (req.params as any).tx_id
 		const git = new Git({ repoRoot: app.repoRoot })
 		const parentWt = git.worktreePath(parentTxId)
+		const { requireSubTx } = await import("../guards.js")
+		const { snapshotSubTx, analyzeStructuralConflicts } = await import("../structural-conflict.js")
 
-		try {
-			const { getTouchedFiles, detectConflicts, detectDependentFileConflicts } = await import(
-				"../structural-conflict.js"
-			)
-
-			const touchedFilesMap = new Map<string, { subTxId: string; files: string[]; linesChanged: number }>()
-
-			for (const subTxId of body.sub_tx_ids) {
-				const subWt = git.subTxWorktreePath(parentTxId, subTxId)
-				const baseRef = await git.revParse("HEAD", parentWt)
-				const touched = await getTouchedFiles(subWt, baseRef)
-				touchedFilesMap.set(subTxId, {
-					subTxId,
-					files: touched.files,
-					linesChanged: touched.linesChanged,
-				})
-			}
-
-			const sameFileConflicts = detectConflicts(touchedFilesMap)
-			const dependentFileConflicts = await detectDependentFileConflicts(parentWt, touchedFilesMap)
-
-			return reply.send({
-				hasConflicts: sameFileConflicts.length > 0 || dependentFileConflicts.length > 0,
-				sameFileConflicts,
-				dependentFileConflicts,
-				touchedFiles: Object.fromEntries(touchedFilesMap),
-			})
-		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+		const snapshots = []
+		for (const id of body.sub_tx_ids) {
+			const sub = await requireSubTx(app, parentTxId, id)
+			snapshots.push(await snapshotSubTx(git, sub.rel, sub.worktreePath, parentWt))
 		}
+		const analysis = await analyzeStructuralConflicts(
+			git,
+			parentWt,
+			snapshots,
+			app.mergedSnapshots.get(parentTxId) ?? [],
+		)
+		const sameFileConflicts = analysis.conflicts.filter((c) => c.conflictType === "same-file")
+		const dependentFileConflicts = analysis.conflicts.filter((c) => c.conflictType === "dependent-file")
+		return reply.send({
+			hasConflicts: analysis.conflicts.length > 0,
+			sameFileConflicts,
+			dependentFileConflicts,
+			dismissedByAst: analysis.dismissed,
+			touchedFiles: Object.fromEntries(
+				snapshots.map((s) => [s.rel, { subTxId: s.rel, files: s.files, linesChanged: s.linesChanged }]),
+			),
+			snapshots: Object.fromEntries(
+				snapshots.map((s) => [s.rel, { base: s.base, head: s.head, added: s.added }]),
+			),
+		})
 	})
 
 	// ============================================================================
@@ -1235,9 +1346,28 @@ export function registerTxRoutes(app: FastifyInstance) {
 
 		try {
 			const { checkActionSafety, createActionSafetyEvent } = await import("../action-safety.js")
+			const { existsSync } = await import("node:fs")
+			const git = new Git({ repoRoot: app.repoRoot })
+
+			// Containment is checked against the worktree the action runs in:
+			// the sub-tx worktree when it exists, otherwise the parent's.
+			let worktreeRoot = git.worktreePath(txId)
+			if (body.sub_tx_id) {
+				try {
+					const { assertSubTxId } = await import("../ids.js")
+					const subWt = git.subTxWorktreePath(txId, assertSubTxId(txId, body.sub_tx_id))
+					if (existsSync(subWt)) worktreeRoot = subWt
+				} catch {
+					/* unknown sub-tx id: fall back to the parent worktree */
+				}
+			}
 
 			// Perform action-safety check
-			const check = checkActionSafety(body.action, body.args)
+			const check = checkActionSafety(body.action, body.args, {
+				worktreeRoot,
+				unknownActionPolicy: app.cpConfig.unknownActionPolicy,
+				testModifyAllowlist: app.testModifyAllowlist,
+			})
 
 			// Create structured log event
 			const event = createActionSafetyEvent(check, txId, body.sub_tx_id)
@@ -1263,10 +1393,11 @@ export function registerTxRoutes(app: FastifyInstance) {
 				allowed: true,
 				action: body.action,
 				actionType: check.actionType,
+				normalized_paths: check.normalized_paths,
 				event,
 			})
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
@@ -1327,7 +1458,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 				event,
 			})
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
@@ -1354,14 +1485,16 @@ export function registerTxRoutes(app: FastifyInstance) {
 			}
 
 			const { insertToolCall } = await import("../store.js")
+			const txId = (req.params as any).tx_id
 			const callId = await insertToolCall(app.db, {
-				tx_id: (req.params as any).tx_id,
+				tx_id: txId,
 				...body,
+				sub_tx_id: await resolveSubTxFk(app, txId, body.sub_tx_id),
 			})
 
 			return reply.code(201).send({ call_id: callId })
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
@@ -1379,13 +1512,15 @@ export function registerTxRoutes(app: FastifyInstance) {
 			}
 
 			const { getToolCallsForTx, getToolCallsForSubTx } = await import("../store.js")
+			const txId = (req.params as any).tx_id
+			const { toGlobalSubTxId } = await import("../ids.js")
 			const calls = query.sub_tx_id
-				? await getToolCallsForSubTx(app.db, query.sub_tx_id)
-				: await getToolCallsForTx(app.db, (req.params as any).tx_id)
+				? await getToolCallsForSubTx(app.db, toGlobalSubTxId(txId, query.sub_tx_id))
+				: await getToolCallsForTx(app.db, txId)
 
 			return reply.send({ tool_calls: calls })
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
@@ -1411,14 +1546,16 @@ export function registerTxRoutes(app: FastifyInstance) {
 			}
 
 			const { insertModelCall } = await import("../store.js")
+			const txId = (req.params as any).tx_id
 			const callId = await insertModelCall(app.db, {
-				tx_id: (req.params as any).tx_id,
+				tx_id: txId,
 				...body,
+				sub_tx_id: await resolveSubTxFk(app, txId, body.sub_tx_id),
 			})
 
 			return reply.code(201).send({ call_id: callId })
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
@@ -1435,92 +1572,188 @@ export function registerTxRoutes(app: FastifyInstance) {
 
 			return reply.send({ model_calls: calls })
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
 	// ============================================================================
-	// Replay Endpoint (P3 Deterministic Replay)
+	// Replay Endpoint (P3) — honest, file-level replay
+	//
+	// Re-applies the FILE effects of recorded tool calls on top of a checkpoint.
+	// Only calls whose effect is fully determined by their arguments can be
+	// replayed (write_to_file / write with full content, apply with a patch,
+	// delete_file). Commands and model calls are not replayable deterministically
+	// (their output is not recorded), so they are reported as "unsupported" and
+	// the replay is refused unless allow_partial is set. Nothing is reset when the
+	// replay is refused.
 	// ============================================================================
 	app.post("/tx/:tx_id/replay", async (req, reply) => {
 		HeadersSchema.parse(req.headers as any)
 		const body = z
 			.object({
-				from_checkpoint: z.string(),
+				from_checkpoint: z.string().min(1),
 				tool_calls: z
-					.array(
-						z.object({
-							tool_name: z.string(),
-							args_json: z.record(z.any()),
-						}),
-					)
+					.array(z.object({ tool_name: z.string().min(1), args_json: z.record(z.any()) }))
 					.optional(),
+				// "log": replay the tool_call rows recorded for this tx (optionally one sub-tx)
+				source: z.enum(["request", "log"]).default("request"),
+				sub_tx_id: z.string().optional(),
 				dry_run: z.boolean().default(false),
+				allow_partial: z.boolean().default(false),
 			})
 			.parse((req as any).body || {})
 
 		const startTime = Date.now()
 		const txId = (req.params as any).tx_id
+		const git = new Git({ repoRoot: app.repoRoot })
+		const wt = git.worktreePath(txId)
+		const from = await git.verifyCommit(body.from_checkpoint, wt)
 
-		try {
-			const git = new Git({ repoRoot: app.repoRoot })
-			const wt = git.worktreePath(txId)
-
-			// Reset to the specified checkpoint
-			await (git as any).git(["reset", "--hard", body.from_checkpoint], wt)
-
-			let toolsReplayed = 0
-			const replayResults: { tool_name: string; success: boolean; error?: string }[] = []
-
-			// If tool calls provided, we could re-execute them here
-			// For now, we just reset and return the state
-			if (body.tool_calls && !body.dry_run) {
-				// Future: Execute tool calls deterministically
-				// For research purposes, the reset is the critical feature
-				toolsReplayed = body.tool_calls.length
-				for (const call of body.tool_calls) {
-					replayResults.push({ tool_name: call.tool_name, success: true })
-				}
-			}
-
-			const finalCommit = await git.revParse("HEAD", wt)
-			const durationMs = Date.now() - startTime
-
-			// Log the replay
-			if (app.db) {
-				await app.db.query(
-					`INSERT INTO replay_log (tx_id, from_checkpoint, to_checkpoint, tool_calls_replayed, success, duration_ms)
-					 VALUES ($1, $2, $3, $4, $5, $6)`,
-					[txId, body.from_checkpoint, finalCommit, toolsReplayed, true, durationMs],
-				)
-			}
-
-			return reply.send({
-				replayed_from: body.from_checkpoint,
-				final_commit: finalCommit,
-				tools_replayed: toolsReplayed,
-				replay_results: replayResults,
-				duration_ms: durationMs,
-				dry_run: body.dry_run,
-			})
-		} catch (e) {
-			const durationMs = Date.now() - startTime
-
-			// Log failed replay
-			if (app.db) {
-				try {
-					await app.db.query(
-						`INSERT INTO replay_log (tx_id, from_checkpoint, tool_calls_replayed, success, error_message, duration_ms)
-						 VALUES ($1, $2, $3, $4, $5, $6)`,
-						[txId, body.from_checkpoint, 0, false, String(e), durationMs],
-					)
-				} catch {
-					/* ignore db errors */
-				}
-			}
-
-			return reply.code(500).send(errorResponse(e))
+		let calls: Array<{ tool_name: string; args_json: Record<string, unknown> }> = body.tool_calls ?? []
+		if (body.source === "log") {
+			if (!app.db) throw new CPError("NOT_IMPLEMENTED", "source=log requires the database")
+			const { getToolCallsForTx, getToolCallsForSubTx } = await import("../store.js")
+			const { toGlobalSubTxId } = await import("../ids.js")
+			const rows = body.sub_tx_id
+				? await getToolCallsForSubTx(app.db, toGlobalSubTxId(txId, body.sub_tx_id))
+				: await getToolCallsForTx(app.db, txId)
+			// Only calls recorded after the checkpoint we replay from
+			const idx = rows.findIndex((r: any) => r.checkpoint_before && from.startsWith(String(r.checkpoint_before)))
+			calls = (idx >= 0 ? rows.slice(idx) : rows).map((r: any) => ({
+				tool_name: r.tool_name,
+				args_json: typeof r.args_json === "string" ? JSON.parse(r.args_json) : r.args_json,
+			}))
 		}
+
+		type Plan =
+			| { kind: "write"; path: string; content: string }
+			| { kind: "apply"; path: string; patch: string }
+			| { kind: "delete"; path: string }
+		const classify = (c: { tool_name: string; args_json: Record<string, unknown> }): Plan | null => {
+			const a = c.args_json ?? {}
+			const p = (a.path ?? a.file_path) as string | undefined
+			switch (c.tool_name) {
+				case "write_to_file":
+				case "write":
+					if (typeof p === "string" && typeof a.content === "string")
+						return { kind: "write", path: p, content: a.content }
+					if (typeof p === "string" && typeof a.content_base64 === "string")
+						return {
+							kind: "write",
+							path: p,
+							content: Buffer.from(a.content_base64, "base64").toString("utf8"),
+						}
+					return null
+				case "apply":
+					if (typeof p === "string" && typeof a.patch === "string")
+						return { kind: "apply", path: p, patch: a.patch }
+					return null
+				case "delete_file":
+					return typeof p === "string" ? { kind: "delete", path: p } : null
+				default:
+					return null
+			}
+		}
+		const plans = calls.map((c) => ({ call: c, plan: classify(c) }))
+		const unsupported = plans.filter((p) => !p.plan).map((p) => p.call.tool_name)
+		const replayable = plans.filter((p) => p.plan)
+
+		if (calls.length > 0 && replayable.length === 0) {
+			throw new CPError("REPLAY_UNSUPPORTED", "None of the tool calls can be replayed deterministically", {
+				unsupported,
+			})
+		}
+		if (unsupported.length > 0 && !body.allow_partial) {
+			throw new CPError(
+				"REPLAY_PARTIAL",
+				`${unsupported.length} tool call(s) cannot be replayed deterministically; pass allow_partial to replay the rest`,
+				{ unsupported },
+			)
+		}
+
+		const results: Array<{
+			tool_name: string
+			status: "applied" | "would_apply" | "unsupported" | "failed"
+			error?: string
+		}> = []
+		let backup_ref: string | undefined
+		let failed = false
+		if (!body.dry_run) {
+			backup_ref = (await git.snapshotAndReset(wt, from, `replay tx:${txId}`)).backup_ref
+		}
+		for (const { call, plan } of plans) {
+			if (!plan) {
+				results.push({ tool_name: call.tool_name, status: "unsupported" })
+				continue
+			}
+			if (body.dry_run) {
+				results.push({ tool_name: call.tool_name, status: "would_apply" })
+				continue
+			}
+			if (failed) {
+				results.push({ tool_name: call.tool_name, status: "failed", error: "skipped after an earlier failure" })
+				continue
+			}
+			try {
+				if (plan.kind === "write") await git.writeFile(txId, plan.path, Buffer.from(plan.content, "utf8"))
+				else if (plan.kind === "apply") await git.applyPatch(txId, plan.path, plan.patch)
+				else await git.run(["rm", "-f", "--", plan.path], wt)
+				results.push({ tool_name: call.tool_name, status: "applied" })
+			} catch (e) {
+				failed = true
+				results.push({ tool_name: call.tool_name, status: "failed", error: String((e as any)?.message ?? e) })
+			}
+		}
+
+		let finalCommit = await git.revParse("HEAD", wt)
+		const applied = results.filter((r) => r.status === "applied").length
+		if (!body.dry_run && applied > 0) {
+			finalCommit = (
+				await git.checkpoint(
+					txId,
+					`[cp] replay of ${applied} tool call(s) from ${from.slice(0, 7)} (tx:${txId})`,
+				)
+			).sha
+		}
+		const complete = !failed && unsupported.length === 0
+		const durationMs = Date.now() - startTime
+
+		if (app.db && !body.dry_run) {
+			try {
+				await app.db.query(
+					`INSERT INTO replay_log (tx_id, from_checkpoint, to_checkpoint, tool_calls_replayed, success, error_message, duration_ms)
+					 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+					[
+						txId,
+						from,
+						finalCommit,
+						applied,
+						complete,
+						complete
+							? null
+							: results
+									.filter((r) => r.status !== "applied")
+									.map((r) => `${r.tool_name}:${r.status}`)
+									.join(", "),
+						durationMs,
+					],
+				)
+			} catch (e) {
+				app.log.warn({ err: e }, "Failed to record replay_log row")
+			}
+		}
+
+		return reply.send({
+			replayed_from: from,
+			final_commit: finalCommit,
+			complete,
+			tools_replayed: applied,
+			results,
+			unsupported,
+			backup_ref,
+			dry_run: body.dry_run,
+			duration_ms: durationMs,
+		})
 	})
 
 	// ============================================================================
@@ -1553,7 +1786,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 
 			return reply.code(201).send({ id })
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
@@ -1582,7 +1815,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 
 			return reply.code(201).send({ id })
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
@@ -1604,7 +1837,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 
 			return reply.send(stats)
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
@@ -1619,7 +1852,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 
 			return reply.send(stats)
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
@@ -1655,7 +1888,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 				},
 			})
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
@@ -1697,7 +1930,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 				message: "Plan persisted successfully",
 			})
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
@@ -1728,7 +1961,7 @@ export function registerTxRoutes(app: FastifyInstance) {
 				created_at: plan.created_at,
 			})
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
 	})
 
@@ -1759,7 +1992,66 @@ export function registerTxRoutes(app: FastifyInstance) {
 				total: plans.length,
 			})
 		} catch (e) {
-			return reply.code(500).send(errorResponse(e))
+			return sendError(reply, e)
 		}
+	})
+
+	// -----------------------------------------------------------------------
+	// R30: New-file reservation (scoped to a PARENT transaction, so sibling
+	// sub-transactions cannot both create the same new file). Enforced again
+	// at merge time by /merge-pipeline (R30_FILE_RESERVED).
+	// -----------------------------------------------------------------------
+	app.post("/tx/:tx_id/reserve-file", async (req, reply) => {
+		HeadersSchema.parse(req.headers as any)
+		const body = z
+			.object({
+				file_path: z.string().min(1),
+				claimer_id: z.string().min(1),
+			})
+			.parse((req as any).body || {})
+
+		const txId = (req.params as any).tx_id
+		const { normalizeTargetPath } = await import("../action-safety.js")
+		const { normalizeReservedPath } = await import("../merge-pipeline.js")
+		const { toRelativeSubTxId } = await import("../ids.js")
+		const git = new Git({ repoRoot: app.repoRoot })
+		const wt = git.worktreePath(txId)
+
+		const v = normalizeTargetPath(body.file_path, wt)
+		if (!v.ok) {
+			throw new CPError("VALIDATION_ERROR", `file_path ${v.reason}`, { file_path: body.file_path })
+		}
+		const key = normalizeReservedPath(v.rel)
+		const claimer = toRelativeSubTxId(txId, body.claimer_id)
+
+		// R30 is about NEW files: a path that already exists in the parent cannot be reserved
+		const { existsSync } = await import("node:fs")
+		const { join } = await import("node:path")
+		if (existsSync(join(wt, v.rel))) {
+			return reply.code(409).send({
+				code: "FILE_EXISTS",
+				message: `${v.rel} already exists in the transaction; reservation is only for new files`,
+				file_path: v.rel,
+			})
+		}
+
+		let txReservations = app.fileReservations.get(txId)
+		if (!txReservations) {
+			txReservations = new Map<string, string>()
+			app.fileReservations.set(txId, txReservations)
+		}
+		const existingClaimer = txReservations.get(key)
+		if (existingClaimer && existingClaimer !== claimer) {
+			return reply.code(409).send({
+				code: "FILE_ALREADY_RESERVED",
+				message: `${v.rel} is already reserved by ${existingClaimer}`,
+				file_path: v.rel,
+				by: existingClaimer,
+			})
+		}
+
+		// First reservation or idempotent re-reservation by same claimer
+		txReservations.set(key, claimer)
+		return reply.send({ reserved: true, file_path: v.rel, by: claimer })
 	})
 }

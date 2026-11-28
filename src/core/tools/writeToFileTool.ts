@@ -1,3 +1,4 @@
+import { reserveNewFile } from "../control-plane/actionSafety"
 import path from "path"
 import delay from "delay"
 import * as vscode from "vscode"
@@ -95,6 +96,20 @@ export async function writeToFileTool(
 		const absolutePath = path.resolve(cline.cwd, relPath)
 		fileExists = await fileExistsAtPath(absolutePath)
 		cline.diffViewProvider.editType = fileExists ? "modify" : "create"
+	}
+
+	// R30: reserve a new file path across the task tree (parent tx, so concurrent
+	// siblings collide) before creating it. Test-file creation (R32) is enforced
+	// by the Control-Plane action-safety check, not here.
+	if (!block.partial && !fileExists && cline.rootTxId) {
+		const reservation = await reserveNewFile(cline, relPath)
+		if (!reservation.ok) {
+			cline.consecutiveMistakeCount++
+			cline.recordToolError("write_to_file", reservation.reason)
+			pushToolResult(formatResponse.toolError(`R30: cannot create "${relPath}": ${reservation.reason}`))
+			await cline.diffViewProvider.reset()
+			return
+		}
 	}
 
 	// pre-processing newContent for cases where weaker models might add artifacts like markdown codeblock markers (deepseek/llama) or extra escape characters (gemini)

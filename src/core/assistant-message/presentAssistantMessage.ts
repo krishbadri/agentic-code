@@ -41,7 +41,9 @@ import { Task } from "../task/Task"
 import { codebaseSearchTool } from "../tools/codebaseSearchTool"
 import { experiments, EXPERIMENT_IDS } from "../../shared/experiments"
 import { applyDiffToolLegacy } from "../tools/applyDiffTool"
-import { evaluateQualityGate, executeQualityGateRollback, recordCheckpointSaved } from "../checkpoints/QualityGate"
+import { capturePreEditBaseline, runPostEditQualityGate } from "../checkpoints/QualityGate"
+import { ACTION_SAFETY_TOOLS, checkActionSafety } from "../control-plane/actionSafety"
+import { unwrapArgsParam } from "./unwrapArgs"
 
 /**
  * Processes and presents assistant message content to the user interface.
@@ -567,6 +569,37 @@ export async function presentAssistantMessage(cline: Task) {
 				provider.log(`[presentAssistantMessage] Executing tool: ${block.name}, Partial: ${block.partial}`)
 			}
 
+			// Some models wrap every tool's parameters in <args> (the read_file shape).
+			if (!block.partial && unwrapArgsParam(block) && provider && process.env.ROO_DEBUG_TOOL_EXECUTION) {
+				provider.log(`[presentAssistantMessage] Unwrapped <args> for ${block.name}`)
+			}
+
+			// R9: action-safety is checked by the Control-Plane BEFORE a mutating tool
+			// executes (distinct from state-safety, which is checked at commit points).
+			if (!block.partial && ACTION_SAFETY_TOOLS.has(block.name)) {
+				const verdict = await checkActionSafety(cline, block)
+				if (!verdict.allowed) {
+					// Partial streaming may already have opened/edited a diff view: undo it.
+					try {
+						if (cline.diffViewProvider.isEditing) {
+							await cline.diffViewProvider.revertChanges()
+						}
+						await cline.diffViewProvider.reset()
+					} catch (error) {
+						provider?.log(`[presentAssistantMessage] Failed to revert blocked edit: ${error}`)
+					}
+					cline.consecutiveMistakeCount++
+					cline.recordToolError(block.name as ToolName, verdict.reason)
+					pushToolResult(
+						formatResponse.toolError(
+							`Action blocked by safety policy: ${verdict.reason}\n` +
+								"This action was prevented before execution. Try a different approach.",
+						),
+					)
+					break
+				}
+			}
+
 			switch (block.name) {
 				case "write_to_file":
 					await checkpointSaveAndMark(cline)
@@ -788,72 +821,26 @@ export async function presentAssistantMessage(cline: Task) {
 }
 
 /**
- * save checkpoint and mark done in the current streaming task.
- * @param task The Task instance to checkpoint save and mark.
- * @returns
+ * Pre-edit checkpoint for the current streaming turn.
+ *
+ * In Control-Plane mode this is skipped: the post-edit CP checkpoint (with its
+ * progress gate) is the commit point. In local mode it saves a shadow
+ * checkpoint and, on the first edit, records it as the quality-gate baseline.
  */
 async function checkpointSaveAndMark(task: Task) {
 	if (task.currentStreamingDidCheckpoint) {
 		return
 	}
-	try {
-		await task.checkpointSave(true)
-		task.currentStreamingDidCheckpoint = true
-	} catch (error) {
-		console.error(`[Task#presentAssistantMessage] Error saving checkpoint: ${error.message}`, error)
+	if (task.worktreeTxId) {
+		return
 	}
-}
-
-/**
- * After a file-mutating tool completes, run quality gate.
- * If tests pass: record as verified safe checkpoint.
- * If tests regress: rollback to last safe checkpoint and inform LLM.
- */
-async function runPostEditQualityGate(task: Task): Promise<void> {
-	if (!task.enableCheckpoints) return
-
 	try {
-		const verdict = await evaluateQualityGate(task, "auto")
-
-		if (verdict.action === "rollback") {
-			task.taskLogger?.logQualityGate(
-				"rollback",
-				verdict.score.testsPassing,
-				verdict.score.testsTotal,
-				verdict.score.compileClean,
-				verdict.reason,
-			)
-			const message = await executeQualityGateRollback(task, verdict)
-			// Reset checkpoint flag — state was rolled back, next edit needs a fresh snapshot
-			task.currentStreamingDidCheckpoint = false
-			// Append rollback notice to user message so LLM sees it
-			task.userMessageContent.push({
-				type: "text",
-				text: `\n\n⚠️ POST-EDIT QUALITY GATE FAILED — AUTOMATIC ROLLBACK\n${message}`,
-			})
-		} else if (verdict.action === "save") {
-			task.taskLogger?.logQualityGate(
-				"save",
-				verdict.score.testsPassing,
-				verdict.score.testsTotal,
-				verdict.score.compileClean,
-			)
-			// Get the shadow checkpoint hash from the last checkpoint_saved message.
-			// ShadowCheckpointService.saveCheckpoint emits the "checkpoint" event synchronously
-			// before the saveCheckpoint promise resolves, and the event handler pushes to
-			// task.clineMessages synchronously (before its first await in addToClineMessages).
-			// So by the time checkpointSaveAndMark returns, the shadow hash is already in
-			// clineMessages — no race condition.
-			const shadowHashMsg = task.clineMessages.filter((m) => m.say === "checkpoint_saved").at(-1)
-			if (shadowHashMsg?.text) {
-				recordCheckpointSaved(task, `auto-${Date.now()}`, shadowHashMsg.text, verdict.score)
-			}
-		} else {
-			// "skip": no test framework detectable — cannot validate, do nothing
-			task.taskLogger?.logQualityGate("skip", 0, 0, true, verdict.reason)
-		}
-	} catch (error: unknown) {
-		// Non-fatal: quality gate errors must never break tool execution
-		console.error("[PostEditQualityGate] Error (non-fatal):", error)
+		const result = await task.checkpointSave(true)
+		task.currentStreamingDidCheckpoint = true
+		await capturePreEditBaseline(task, result?.hash)
+	} catch (error) {
+		task.providerRef
+			.deref()
+			?.log(`[Task#presentAssistantMessage] Error saving checkpoint: ${error?.message ?? error}`)
 	}
 }

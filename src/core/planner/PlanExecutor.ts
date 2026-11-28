@@ -1,15 +1,50 @@
-import type { Plan, SubTransaction, ChildResult, ExecutionResult } from "./types"
-import type { Task } from "../task/Task"
-import type { SafetyGate, SafetyCheckResult } from "@roo-code/types"
-import delay from "delay"
-import * as vscode from "vscode"
-import * as path from "path"
+import type { Clause } from "@roo-code/types"
 
+import type { Plan, SubTransaction, ExecutionResult } from "./types"
+import type { Task } from "../task/Task"
+
+import {
+	ControlPlaneUnavailableError,
+	cpErrorMessage,
+	getCpPort,
+	isControlPlaneUnavailableError,
+} from "../control-plane/client"
+import * as cpTx from "../control-plane/tx"
+import { detectProjectCommands } from "../checkpoints/QualityGate"
+
+/** A pre-created sub-transaction worktree. `txId` is the `<parent>_sub_<rel>` id addressing it. */
+export interface SubTxWorktree {
+	path: string
+	txId: string
+}
+
+const MAX_SUB_TRANSACTIONS = 10
+
+/**
+ * Executes a plan inside the parent task's transaction.
+ *
+ * Every dependency group runs the same pipeline (E2E mode is the same path
+ * with concurrency 1):
+ *
+ *   begin worktrees → spawn children → wait → safety gate → merge-pipeline
+ *   → progress checkpoint on the parent
+ *
+ * Any failure (worktree creation, runtime, safety gate, merge rejection,
+ * progress violation) fails the group; remaining groups are skipped, every
+ * sub-transaction is rolled back and the parent is reset to its base. The
+ * caller (Task) then aborts the transaction and reports the failures.
+ */
 export class PlanExecutor {
 	private parentBaseCommit: string | undefined
 	private parentTxId: string | undefined
+	private port: number | undefined
+	private warnedNoDefaultClause = false
 
 	constructor(private parentTask: Task) {}
+
+	private log(msg: string) {
+		this.parentTask.providerRef.deref()?.log(`[PlanExecutor] ${msg}`)
+	}
 
 	async executePlan(plan: Plan): Promise<ExecutionResult> {
 		const provider = this.parentTask.providerRef.deref()
@@ -17,516 +52,198 @@ export class PlanExecutor {
 			throw new Error("Provider not available")
 		}
 
-		// Validate plan has sub-transactions
 		if (!plan.subTransactions || plan.subTransactions.length === 0) {
-			provider.log("[PlanExecutor] Plan has no sub-transactions")
+			this.log("Plan has no sub-transactions")
 			return { success: true, parentTxId: undefined }
 		}
 
-		// Limit maximum number of sub-transactions to prevent excessive API calls
-		const MAX_SUB_TRANSACTIONS = 10
 		if (plan.subTransactions.length > MAX_SUB_TRANSACTIONS) {
-			provider.log(
-				`[PlanExecutor] Plan has ${plan.subTransactions.length} sub-transactions, limiting to ${MAX_SUB_TRANSACTIONS} to prevent excessive API calls`,
+			this.log(
+				`Plan has ${plan.subTransactions.length} sub-transactions, limiting to ${MAX_SUB_TRANSACTIONS} to prevent excessive API calls`,
 			)
 			plan.subTransactions = plan.subTransactions.slice(0, MAX_SUB_TRANSACTIONS)
 		}
 
-		// 1. Create Control-Plane transaction for parent
-		// CRITICAL: Control-Plane is REQUIRED for planner mode
-		// Without it, we cannot provide safety checks, rollback, or audit trail
-		const parentTxId = await this.beginParentTransaction()
+		// The plan runs inside the parent task's own transaction.
+		const parentTxId = this.parentTask.txId
 		if (!parentTxId) {
-			// P0 FIX: Fail fast - do NOT fall back to unsafe sequential execution
-			const errorMessage =
-				"Planner execution requires Control-Plane. " +
-				"Falling back to unsafe sequential mode is disabled. " +
-				"Please ensure Control-Plane is running (check 'roo.cpPort' in VS Code settings)."
-			provider.log(`[PlanExecutor] CRITICAL: ${errorMessage}`)
-			throw new Error(errorMessage)
+			throw new ControlPlaneUnavailableError(
+				"Planner execution requires the parent task's Control-Plane transaction",
+			)
 		}
+		const port = getCpPort(provider.context)
+		if (!port) {
+			throw new ControlPlaneUnavailableError("Planner execution requires the Control-Plane, which is unavailable")
+		}
+		this.parentTxId = parentTxId
+		this.parentBaseCommit = this.parentTask.txBaseCommit
+		this.port = port
+		this.parentTask.worktreePath = this.parentTask.cwd
 
-		// P1 FIX: Persist the plan for auditability
-		// Plans must survive restarts and be queryable
 		await this.persistPlan(parentTxId, plan)
 
-		// Start timing for parallel execution metrics
-		const parallelStartTime = Date.now()
-
-		// 2. Group sub-transactions by dependency level (for parallel execution)
-		const executionGroups = this.groupByDependencies(plan.subTransactions)
-
-		const failedSubTransactions: string[] = []
-
-		// E2E mode: Execute subtasks sequentially to avoid overwhelming extension host
 		const isE2EMode = !!(process.env.TEST_TORTURE_REPO || process.env.TEST_TORTURE_REPO_WORKSPACE)
-		if (isE2EMode) {
-			provider.log(`[PlanExecutor] E2E mode detected - executing subtasks sequentially`)
-		}
+		const concurrency = isE2EMode ? 1 : Number.POSITIVE_INFINITY
+		const failures = new Map<string, string>()
+		const durations: number[] = []
+		const wallStart = Date.now()
 
-		// Track shared worktree for sequential chains (consecutive single-task dependency groups).
-		// Sequential tasks reuse the same worktree so each task sees the previous task's files
-		// without a merge round-trip. Parallel groups still get isolated worktrees.
-		let chainWorktree: { path: string; firstSubTxId: string; lastChild: Task } | undefined
-
-		// 3. Execute each group; consecutive single-task groups share a worktree (chain)
-		for (let gi = 0; gi < executionGroups.length; gi++) {
-			const group = executionGroups[gi]
-			const groupChildTasks: Task[] = []
+		const groups = this.groupByDependencies(plan.subTransactions)
+		for (const group of groups) {
+			if (failures.size > 0) {
+				// Fail fast: never run a later group on top of a failed one.
+				for (const stx of group) {
+					if (!failures.has(stx.id)) failures.set(stx.id, "SKIPPED: an earlier group failed")
+				}
+				continue
+			}
 			try {
-				// --- Sequential chain: single-task groups share a worktree ---
-				if (group.length === 1) {
-					const subTx = group[0]
-					provider.log(`[PlanExecutor] Sequential: Starting subtask ${subTx.id}`)
-
-					// Determine the worktree path BEFORE spawning the task.
-					// Chain continuations reuse the existing worktree; the first
-					// task in a chain gets a fresh one from Control-Plane.
-					let worktreePath: string | undefined
-					let worktreeTxId: string | undefined
-
-					if (chainWorktree) {
-						// Reuse the shared worktree from the previous task
-						worktreePath = chainWorktree.path
-						worktreeTxId = chainWorktree.lastChild.transactionalTxId
-						provider.log(
-							`[PlanExecutor] Sequential chain: ${subTx.id} reusing worktree from ${chainWorktree.firstSubTxId}`,
-						)
-					} else {
-						// First in chain — pre-create a fresh worktree
-						const wt = await this.createSubTxWorktree(subTx.id, parentTxId)
-						if (wt) {
-							worktreePath = wt.path
-							worktreeTxId = wt.txId
-						}
-					}
-
-					// Build worktree paths map so spawnChildTasks injects the path
-					// into the prompt and sets the cwd in the constructor.
-					const worktreePaths = new Map<string, string>()
-					if (worktreePath) {
-						worktreePaths.set(subTx.id, worktreePath)
-					}
-
-					const childTasks = await this.parentTask.spawnChildTasks({
-						subTransactions: [subTx],
-						worktreePaths: worktreePaths.size > 0 ? worktreePaths : undefined,
-					})
-					if (childTasks.length === 0) {
-						provider.log(`[PlanExecutor] Sequential: No child spawned for ${subTx.id}`)
-						failedSubTransactions.push(subTx.id)
-						// Flush chain on spawn failure
-						if (chainWorktree) {
-							try {
-								await this.mergeChainWorktree(chainWorktree.firstSubTxId, parentTxId)
-							} catch {}
-							chainWorktree = undefined
-						}
-						continue
-					}
-					const child = childTasks[0]
-					groupChildTasks.push(child)
-
-					// Set transactional properties on the child (these are only
-					// checked during tool execution, well after the task starts).
-					if (worktreePath) {
-						child.worktreePath = worktreePath
-						child.transactionalTxId = worktreeTxId
-						child.skipTransactionalWrites = true
-					}
-
-					// Wait for completion
-					const childRefs = new Map<string, Task>([[child.taskId, child]])
-					const results = await this.parentTask.waitForChildren([child.taskId], childRefs)
-					const result = results.get(child.taskId)
-
-					if (!result?.success) {
-						provider.log(`[PlanExecutor] Sequential: Subtask ${subTx.id} failed: ${result?.error}`)
-						failedSubTransactions.push(subTx.id)
-						this.parentTask.removeChildTaskId(child.taskId)
-						chainWorktree = undefined // Discard chain on failure
-						continue
-					}
-
-					provider.log(`[PlanExecutor] Sequential: Subtask ${subTx.id} completed successfully`)
-
-					// Run safety check
-					const safetyResult = await this.runSafetyChecks(
-						[subTx],
-						new Map([[subTx.id, result]]),
-						[child],
-						parentTxId,
-					)
-					const gate = safetyResult.get(subTx.id)
-					if (gate && !gate.ok) {
-						provider.log(`[PlanExecutor] Sequential: Safety gate failed for ${subTx.id}`)
-						failedSubTransactions.push(subTx.id)
-						await this.rollbackFailedSubTransactions([subTx], new Map([[subTx.id, result]]), parentTxId)
-						chainWorktree = undefined
-						continue
-					}
-
-					// Auto-commit work in the shared worktree
-					await this.autoCommitWorktree(child)
-
-					// Check if chain continues (next group is also single-task)
-					const nextGroup = gi + 1 < executionGroups.length ? executionGroups[gi + 1] : undefined
-					const chainContinues = nextGroup && nextGroup.length === 1
-
-					if (chainContinues) {
-						// Chain continues — defer merge, next task will reuse this worktree
-						chainWorktree = {
-							path: child.cwd || child.worktreePath || "",
-							firstSubTxId: chainWorktree?.firstSubTxId || subTx.id,
-							lastChild: child,
-						}
-						this.parentTask.removeChildTaskId(child.taskId)
-						provider.log(`[PlanExecutor] Sequential chain: deferring merge for ${subTx.id}`)
-					} else {
-						// Chain ends — merge the shared worktree into parent
-						const mergeId = chainWorktree?.firstSubTxId || subTx.id
-						await this.mergeChainWorktree(mergeId, parentTxId)
-						chainWorktree = undefined
-						this.parentTask.removeChildTaskId(child.taskId)
-					}
-					continue
-				}
-
-				// --- Multi-task group (parallel or E2E sequential) ---
-				// Flush any active sequential chain before starting parallel execution
-				if (chainWorktree) {
-					await this.mergeChainWorktree(chainWorktree.firstSubTxId, parentTxId)
-					chainWorktree = undefined
-				}
-
-				if (isE2EMode) {
-					// E2E mode: process multi-task group one at a time
-					for (const subTx of group) {
-						provider.log(`[PlanExecutor] E2E: Starting subtask ${subTx.id}`)
-
-						// Pre-create worktree BEFORE spawning the task
-						const wt = await this.createSubTxWorktree(subTx.id, parentTxId)
-						const worktreePaths = new Map<string, string>()
-						if (wt) {
-							worktreePaths.set(subTx.id, wt.path)
-						}
-
-						const childTasks = await this.parentTask.spawnChildTasks({
-							subTransactions: [subTx],
-							worktreePaths: worktreePaths.size > 0 ? worktreePaths : undefined,
-						})
-						if (childTasks.length === 0) {
-							provider.log(`[PlanExecutor] E2E: No child spawned for ${subTx.id}`)
-							failedSubTransactions.push(subTx.id)
-							continue
-						}
-						const child = childTasks[0]
-						groupChildTasks.push(child)
-
-						// Set transactional properties (checked during tool execution)
-						if (wt) {
-							child.worktreePath = wt.path
-							child.transactionalTxId = wt.txId
-							child.skipTransactionalWrites = true
-						}
-
-						const childRefs = new Map<string, Task>([[child.taskId, child]])
-						const results = await this.parentTask.waitForChildren([child.taskId], childRefs)
-						const result = results.get(child.taskId)
-
-						if (!result?.success) {
-							provider.log(`[PlanExecutor] E2E: Subtask ${subTx.id} failed: ${result?.error}`)
-							failedSubTransactions.push(subTx.id)
-							this.parentTask.removeChildTaskId(child.taskId)
-						} else {
-							provider.log(`[PlanExecutor] E2E: Subtask ${subTx.id} completed successfully`)
-							const safetyResult = await this.runSafetyChecks(
-								[subTx],
-								new Map([[subTx.id, result]]),
-								[child],
-								parentTxId,
-							)
-							const gate = safetyResult.get(subTx.id)
-							if (gate && !gate.ok) {
-								provider.log(`[PlanExecutor] E2E: Safety gate failed for ${subTx.id}`)
-								failedSubTransactions.push(subTx.id)
-								await this.rollbackFailedSubTransactions(
-									[subTx],
-									new Map([[subTx.id, result]]),
-									parentTxId,
-								)
-							} else {
-								await this.autoCommitWorktree(child)
-								await this.mergeWorktrees(
-									[subTx],
-									new Map([[subTx.id, result]]),
-									parentTxId,
-									safetyResult,
-								)
-								this.parentTask.removeChildTaskId(child.taskId)
-							}
-						}
-					}
-					continue
-				}
-
-				// Pre-create ALL worktrees for this parallel group BEFORE spawning any tasks
-				const worktreePaths = new Map<string, string>()
-				const worktreeInfos = new Map<string, { path: string; txId: string }>()
-				await Promise.all(
-					group.map(async (subTx) => {
-						const wt = await this.createSubTxWorktree(subTx.id, parentTxId)
-						if (wt) {
-							worktreePaths.set(subTx.id, wt.path)
-							worktreeInfos.set(subTx.id, wt)
-						}
-					}),
-				)
-
-				// Spawn all tasks in this group (parallel mode)
-				const childTasks = await this.parentTask.spawnChildTasks({
-					subTransactions: group,
-					worktreePaths: worktreePaths.size > 0 ? worktreePaths : undefined,
-				})
-				groupChildTasks.push(...childTasks)
-
-				// Check if any children spawned
-				if (childTasks.length === 0) {
-					provider.log(
-						`[PlanExecutor] Warning: No children spawned for group: ${group.map((stx) => stx.id).join(", ")}`,
-					)
-					failedSubTransactions.push(...group.map((stx) => stx.id))
-					continue // Skip to next group
-				}
-
-				// Store mapping of child task ID to sub-transaction ID
-				const childToSubTxMap = new Map<string, string>()
-				childTasks.forEach((child) => {
-					if (child.subTransactionId) {
-						childToSubTxMap.set(child.taskId, child.subTransactionId)
-					}
-				})
-
-				// Set transactional properties on each child (checked during tool execution)
-				for (const child of childTasks) {
-					const subTxId = child.subTransactionId || childToSubTxMap.get(child.taskId)
-					if (subTxId) {
-						const wt = worktreeInfos.get(subTxId)
-						if (wt) {
-							child.worktreePath = wt.path
-							child.transactionalTxId = wt.txId
-							child.skipTransactionalWrites = true
-						}
-					}
-				}
-
-				// Wait for only the children in this group — pass direct references
-				// to avoid clineStack lookup race (finishSubTask pops children).
-				const groupChildIds = childTasks.map((t) => t.taskId)
-				const childRefs = new Map<string, Task>(childTasks.map((t) => [t.taskId, t]))
-				const taskResults = await this.parentTask.waitForChildren(groupChildIds, childRefs)
-
-				// Convert results map from task ID keys to sub-transaction ID keys
-				const results = new Map<string, ChildResult>()
-				for (const [taskId, result] of taskResults) {
-					const subTxId = childToSubTxMap.get(taskId)
-					if (subTxId) {
-						results.set(subTxId, result)
-					} else {
-						provider.log(
-							`[PlanExecutor] Warning: No sub-transaction ID found for task ${taskId}, using task ID as fallback`,
-						)
-						results.set(taskId, result) // Fallback to task ID
-					}
-				}
-
-				// Clean up failed children from parent's tracking
-				for (const [taskId, result] of taskResults) {
-					if (!result.success) {
-						this.parentTask.removeChildTaskId(taskId)
-					}
-				}
-
-				// Run safety checks for this group via Control-Plane safety-gate
-				const safetyResults = await this.runSafetyChecks(group, results, childTasks, parentTxId)
-
-				// Check if any safety gates failed
-				const failedGates: string[] = []
-				for (const [subTxId, gate] of safetyResults) {
-					if (!gate.ok) {
-						failedGates.push(subTxId)
-						provider.log(`[PlanExecutor] Safety gate FAILED for ${subTxId}: ${gate.failedAt}`)
-					}
-				}
-
-				if (failedGates.length > 0) {
-					// Rollback failed sub-transactions
-					await this.rollbackFailedSubTransactions(group, results, parentTxId)
-					failedSubTransactions.push(...failedGates)
-					// Don't clean up parent transaction yet - allow subsequent groups to execute
-					// Parent transaction will be cleaned up at the end if there are any failures
-					throw new Error(`Safety checks failed for: ${failedGates.join(", ")}`)
-				}
-
-				// Auto-commit worktrees for successful children only, then merge into parent.
-				// Failed children are skipped - mergeWorktrees will also skip them.
-				for (const child of groupChildTasks) {
-					const subTxId = child.subTransactionId || childToSubTxMap.get(child.taskId)
-					const result = subTxId ? results.get(subTxId) : undefined
-					if (result?.success) {
-						await this.autoCommitWorktree(child)
-					}
-				}
-				await this.mergeWorktrees(group, results, parentTxId, safetyResults)
-
-				// Clean up successful children from tracking
-				for (const child of groupChildTasks) {
-					const subTxId = child.subTransactionId || childToSubTxMap.get(child.taskId)
-					if (subTxId && results.get(subTxId)?.success) {
-						this.parentTask.removeChildTaskId(child.taskId)
-					}
-				}
+				await this.executeGroup(group, failures, durations, concurrency)
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : String(error)
-				provider.log(`[PlanExecutor] Error executing group: ${errorMessage}`)
+				this.log(`Error executing group: ${errorMessage}`)
 
-				// E2E mode: If error is due to blocked Task#ask in child, abort parent immediately
-				const isE2EMode = !!(process.env.TEST_TORTURE_REPO || process.env.TEST_TORTURE_REPO_WORKSPACE)
 				if (isE2EMode && errorMessage.includes("Blocked Task#ask in e2e mode")) {
-					provider.log(
-						`[PlanExecutor] E2E mode: Child blocked Task#ask detected - Aborting parent task ${this.parentTask.taskId}`,
-					)
-					// Abort the parent task immediately
 					await this.parentTask.abortTask()
-					// Re-throw to propagate the error
 					throw error
 				}
-
-				// Clean up failed children from tracking
-				for (const child of groupChildTasks) {
-					this.parentTask.removeChildTaskId(child.taskId)
+				if (isControlPlaneUnavailableError(error)) {
+					await this.rollbackAllSubTransactions(plan, parentTxId)
+					throw error
 				}
-				// Track failures but don't clean up parent transaction yet - allow subsequent groups to execute
-				// Parent transaction will be cleaned up at the end if there are any failures
-				chainWorktree = undefined // Discard chain on error
+				for (const stx of group) {
+					if (!failures.has(stx.id)) failures.set(stx.id, `ERROR: ${errorMessage}`)
+				}
+				await this.rollbackFailedSubTransactions(
+					group.map((s) => s.id),
+					"RUNTIME_ERROR",
+				)
 			}
 		}
 
-		// Flush any remaining sequential chain worktree after the loop
-		if (chainWorktree) {
-			try {
-				await this.mergeChainWorktree(chainWorktree.firstSubTxId, parentTxId)
-			} catch (err) {
-				const errMsg = err instanceof Error ? err.message : String(err)
-				provider.log(`[PlanExecutor] Failed to merge final chain worktree: ${errMsg}`)
-			}
-			chainWorktree = undefined
-		}
-
-		// If execution failed completely, clean up parent transaction
-		if (failedSubTransactions.length > 0 && parentTxId) {
+		if (failures.size > 0) {
+			await this.rollbackAllSubTransactions(plan, parentTxId)
 			await this.cleanupParentTransaction(parentTxId)
 		}
 
-		// Record execution metrics for parallel speedup analysis
-		const wallClockMs = Date.now() - parallelStartTime
-		await this.recordExecutionMetrics(parentTxId, "parallel", plan.subTransactions.length, wallClockMs)
-
-		return {
-			success: failedSubTransactions.length === 0,
+		const wallClockMs = Date.now() - wallStart
+		await this.recordExecutionMetrics(
 			parentTxId,
-			failedSubTransactions: failedSubTransactions.length > 0 ? failedSubTransactions : undefined,
-		}
-	}
-
-	/**
-	 * Sequential execution is DISABLED for planner mode.
-	 *
-	 * Design constraints (non-negotiable):
-	 * - Do not silently degrade to unsafe execution
-	 * - Fail fast is always preferred over best-effort
-	 * - Safety + rollback + auditability are invariants
-	 *
-	 * This method exists only for documentation purposes and always throws.
-	 * @deprecated Sequential fallback is disabled - use Control-Plane
-	 */
-	private async executePlanSequential(_plan: Plan): Promise<ExecutionResult> {
-		// P0 FIX: This method should NEVER be called
-		// It violates core safety guarantees:
-		// 1. No safety checks are executed
-		// 2. No rollback mechanism exists
-		// 3. No audit trail is produced
-		throw new Error(
-			"CRITICAL: Sequential fallback for planner mode is disabled. " +
-				"Planner execution requires Control-Plane for: " +
-				"(1) safety checks, (2) rollback, (3) audit trail. " +
-				"This is a design invariant - do not remove this check.",
+			isE2EMode ? "serial" : "parallel",
+			plan.subTransactions.length,
+			durations.reduce((a, b) => a + b, 0),
+			wallClockMs,
 		)
+
+		const failed = [...failures.keys()]
+		return {
+			success: failed.length === 0,
+			parentTxId,
+			failedSubTransactions: failed.length > 0 ? failed : undefined,
+			failures: failed.length > 0 ? failed.map((id) => ({ subTxId: id, reason: failures.get(id)! })) : undefined,
+		}
 	}
 
-	/**
-	 * Begin a parent transaction in Control-Plane
-	 */
-	private async beginParentTransaction(): Promise<string | undefined> {
-		const provider = this.parentTask.providerRef.deref()
+	/** One dependency group through the full pipeline. Records failures in `failures`. */
+	private async executeGroup(
+		group: SubTransaction[],
+		failures: Map<string, string>,
+		durations: number[],
+		concurrency: number,
+	): Promise<void> {
+		// 1. Begin a worktree for every sub-transaction. No worktree → never spawned.
+		const worktrees = new Map<string, SubTxWorktree>()
+		await Promise.all(
+			group.map(async (stx) => {
+				try {
+					worktrees.set(stx.id, await this.createSubTxWorktree(stx))
+				} catch (error) {
+					if (isControlPlaneUnavailableError(error)) throw error
+					failures.set(
+						stx.id,
+						`WORKTREE_CREATE_FAILED: ${error instanceof Error ? error.message : String(error)}`,
+					)
+				}
+			}),
+		)
 
-		// Debug: check context availability
-		console.log(`[PlanExecutor#beginParentTransaction] Provider available: ${!!provider}`)
-		console.log(`[PlanExecutor#beginParentTransaction] Context available: ${!!provider?.context}`)
-		console.log(`[PlanExecutor#beginParentTransaction] GlobalState available: ${!!provider?.context?.globalState}`)
+		// 2./3. Spawn and wait (concurrency 1 in E2E mode).
+		const runnable = group.filter((stx) => worktrees.has(stx.id))
+		const children = new Map<string, Task>()
+		const succeeded: SubTransaction[] = []
 
-		// Wait for cpPort to be set (handles race with extension activation)
-		// This gives the extension IIFE up to 5 seconds to complete
-		let cpPort: number | undefined
-		for (let i = 0; i < 10; i++) {
-			cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
-			console.log(`[PlanExecutor#beginParentTransaction] Attempt ${i + 1}: cpPort = ${cpPort}`)
-			if (cpPort) break
-			await new Promise((r) => setTimeout(r, 500))
-			provider?.log(`[PlanExecutor] Waiting for Control-Plane port (attempt ${i + 1}/10)...`)
-		}
-
-		if (!cpPort) {
-			provider?.log(`[PlanExecutor] Control-Plane port not found after waiting`)
-			return undefined
+		const runBatch = async (batch: SubTransaction[]) => {
+			const start = Date.now()
+			const spawned = await this.parentTask.spawnChildTasks({ subTransactions: batch, worktrees })
+			for (const child of spawned) {
+				if (child.subTransactionId) children.set(child.subTransactionId, child)
+			}
+			await Promise.all(
+				batch.map(async (stx) => {
+					const child = children.get(stx.id)
+					if (!child) {
+						failures.set(stx.id, "SPAWN_FAILED: child task was not created")
+						return
+					}
+					const results = await this.parentTask.waitForChildren(
+						[child.taskId],
+						new Map([[child.taskId, child]]),
+					)
+					const result = results.get(child.taskId)
+					const durationMs = Date.now() - start
+					durations.push(durationMs)
+					if (result?.success) {
+						succeeded.push(stx)
+					} else {
+						failures.set(stx.id, `RUNTIME_FAILED: ${result?.error ?? "task failed or was aborted"}`)
+					}
+				}),
+			)
 		}
 
 		try {
-			// Use HEAD as base instead of a specific branch name
-			// This works regardless of whether the repo uses 'main' or 'master'
-			const res = await fetch(`http://127.0.0.1:${cpPort}/tx/begin`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"x-actor-id": "human",
-				},
-				body: JSON.stringify({
-					isolation: "hybrid",
-					base: "HEAD",
-				}),
-			})
-
-			if (!res.ok) {
-				throw new Error(`Failed to begin transaction: ${res.status}`)
+			if (concurrency <= 1) {
+				for (const stx of runnable) await runBatch([stx])
+			} else if (runnable.length > 0) {
+				await runBatch(runnable)
 			}
 
-			const data = await res.json()
-			const txId = data.tx_id
-			const baseCommit = data.base_commit
+			// Commit each child's work in its worktree so the merge sees it.
+			for (const stx of succeeded) {
+				const child = children.get(stx.id)
+				if (child) await this.autoCommitWorktree(child)
+			}
 
-			// Store transaction ID in global state
-			await provider?.context?.globalState.update("roo.current_tx_id", txId)
-			this.parentTask.worktreePath = data.worktree_path
+			// 4. Safety gate (default clause when the LLM gave none).
+			const gated: SubTransaction[] = []
+			for (const stx of succeeded) {
+				const gate = await this.runSafetyGate(stx)
+				if (gate.ok) gated.push(stx)
+				else failures.set(stx.id, `SAFETY_GATE_FAILED: ${gate.reason}`)
+			}
 
-			// Store base commit and tx ID for cleanup/merge on failure or completion
-			this.parentBaseCommit = baseCommit
-			this.parentTxId = txId
+			// Roll back everything in this group that failed so far.
+			const failedNow = group.map((s) => s.id).filter((id) => failures.has(id) && worktrees.has(id))
+			if (failedNow.length > 0) await this.rollbackFailedSubTransactions(failedNow, "RUNTIME_ERROR")
 
-			return txId
-		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : String(error)
-			provider?.log(`[PlanExecutor] Failed to begin parent transaction: ${errorMessage}`)
-			return undefined
+			// 5. Merge through the pipeline; every non-merged entry is a failure.
+			if (gated.length > 0) {
+				const merged = await this.mergeWorktrees(gated, failures)
+
+				// 6. Progress checkpoint on the parent after a merged group (R4/R5/R7).
+				if (merged.length > 0) {
+					const res = await cpTx.checkpoint(this.port!, this.parentTxId!, { reason: "plan-group" })
+					if (!res.ok) {
+						const reason =
+							res.status === 403
+								? `PROGRESS_VIOLATION: ${cpErrorMessage(res)}`
+								: `CHECKPOINT_FAILED: ${cpErrorMessage(res)}`
+						for (const id of merged) failures.set(id, reason)
+					}
+				}
+			}
+		} finally {
+			for (const child of children.values()) this.parentTask.removeChildTaskId(child.taskId)
 		}
 	}
 
@@ -536,36 +253,20 @@ export class PlanExecutor {
 	groupByDependencies(subTxs: SubTransaction[]): SubTransaction[][] {
 		const groups: SubTransaction[][] = []
 		const processed = new Set<string>()
-		const subTxMap = new Map<string, SubTransaction>()
 
-		// Create map for quick lookup
-		for (const subTx of subTxs) {
-			subTxMap.set(subTx.id, subTx)
-		}
-
-		// Topological sort: process levels until all are processed
 		while (processed.size < subTxs.length) {
 			const currentLevel = subTxs.filter((stx) => {
-				// Already processed
-				if (processed.has(stx.id)) {
-					return false
-				}
-
-				// No dependencies, or all dependencies are processed
-				if (!stx.dependsOn || stx.dependsOn.length === 0) {
-					return true
-				}
-
+				if (processed.has(stx.id)) return false
+				if (!stx.dependsOn || stx.dependsOn.length === 0) return true
 				return stx.dependsOn.every((dep) => processed.has(dep))
 			})
 
 			if (currentLevel.length === 0) {
-				// Circular dependency or missing dependency - add remaining items
+				// Circular or missing dependency - add remaining items as one last group
 				const remaining = subTxs.filter((stx) => !processed.has(stx.id))
 				if (remaining.length > 0) {
-					const provider = this.parentTask.providerRef.deref()
-					provider?.log(
-						`[PlanExecutor] Warning: Circular dependency or missing dependency detected. Remaining sub-transactions: ${remaining.map((stx) => stx.id).join(", ")}`,
+					this.log(
+						`Warning: Circular dependency or missing dependency detected. Remaining sub-transactions: ${remaining.map((stx) => stx.id).join(", ")}`,
 					)
 					groups.push(remaining)
 					remaining.forEach((stx) => processed.add(stx.id))
@@ -581,8 +282,7 @@ export class PlanExecutor {
 	}
 
 	/**
-	 * Auto-commit any uncommitted changes in a child's worktree before merge.
-	 * This ensures git merge can see all the child's file edits.
+	 * Commit any uncommitted changes in a child's worktree before merge.
 	 */
 	private async autoCommitWorktree(child: Task): Promise<void> {
 		if (!child.cwd) return
@@ -597,540 +297,217 @@ export class PlanExecutor {
 	}
 
 	/**
-	 * Merge parent transaction worktree changes back to workspace.
-	 * Called after all sub-transactions succeed and are merged into the parent.
+	 * Pre-create the CP worktree for a sub-transaction BEFORE spawning the child,
+	 * sending its planning metadata. Throws on failure.
 	 */
-	async mergeParentToWorkspace(): Promise<void> {
-		const provider = this.parentTask.providerRef.deref()
-		const workspaceDir = this.parentTask.cwd
-		const parentWt = this.parentTask.worktreePath
-		if (!workspaceDir || !parentWt) {
-			provider?.log("[PlanExecutor] Cannot merge to workspace: missing paths")
-			return
-		}
-		try {
-			const simpleGit = (await import("simple-git")).default
-			const wsGit = simpleGit(workspaceDir, { binary: "git" })
+	private async createSubTxWorktree(stx: SubTransaction): Promise<SubTxWorktree> {
+		const parentTxId = this.parentTxId!
+		const res = await cpTx.subTxBegin(this.port!, parentTxId, stx.id, {
+			base: parentTxId,
+			title: stx.title,
+			description: stx.description,
+			agentType: stx.agentType,
+			prompt: stx.prompt,
+			dependsOn: stx.dependsOn,
+			safetyChecks: stx.safetyChecks,
+		})
+		if (!res.ok) throw new Error(cpErrorMessage(res))
+		if (!res.data?.worktree_path) throw new Error("Control-Plane returned no worktree_path")
+		this.log(`Pre-created worktree for ${stx.id}: ${res.data.worktree_path}`)
+		this.parentTask.taskLogger?.logSubTxCreated(stx.id, String(res.data.base_commit ?? parentTxId))
+		return { path: res.data.worktree_path, txId: `${parentTxId}_sub_${stx.id}` }
+	}
 
-			// Commit any uncommitted workspace changes so git merge won't refuse to run
-			try {
-				await wsGit.add(["-A"])
-				await wsGit.commit("Pre-merge: snapshot workspace state", { "--allow-empty": null })
-			} catch {
-				// Ignore - workspace may already be clean
-			}
-
-			// Proper three-way merge of the parent transaction branch into workspace.
-			// Uses the branch name rather than a SHA so git can find the common ancestor.
-			const branch = `tx/${this.parentTxId}`
-			await wsGit.merge([branch, "--no-ff", "-m", "Planner: merge all sub-transaction changes"])
-
-			provider?.log(`[PlanExecutor] Merged branch ${branch} → workspace`)
-		} catch (err: any) {
-			provider?.log(`[PlanExecutor] Failed to merge parent worktree to workspace: ${err.message || err}`)
-			throw err
-		}
+	/** The clause used when the planner gave no checks: compile, else test; undefined if neither is known. */
+	private defaultSafetyClause(): Clause | undefined {
+		const { compileCommand, testCommand } = detectProjectCommands(this.parentTask.cwd)
+		if (compileCommand) return { type: "cmd_exits_0", cmd: compileCommand }
+		if (testCommand) return { type: "cmd_exits_0", cmd: testCommand }
+		return undefined
 	}
 
 	/**
-	 * Pre-create a Control-Plane worktree for a sub-transaction BEFORE spawning
-	 * the child task.  Returns the worktree path so it can be passed into the
-	 * Task constructor (guaranteeing the correct cwd from the first tool call).
+	 * Run the CP safety gate for one sub-transaction (fail-closed). A planner
+	 * clause and checks are sent together (the CP evaluates both).
 	 */
-	private async createSubTxWorktree(
-		subTxId: string,
-		parentTxId: string,
-	): Promise<{ path: string; txId: string } | undefined> {
-		const provider = this.parentTask.providerRef.deref()
-		const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
-
-		if (!cpPort) {
-			return undefined
-		}
-
-		try {
-			const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${parentTxId}/sub-tx/${subTxId}/begin`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"X-Actor-Id": "human",
-				},
-				body: JSON.stringify({
-					base: parentTxId,
-				}),
-			})
-
-			if (!res.ok) {
-				const errorText = await res.text()
-				throw new Error(`Failed to create sub-transaction worktree: ${errorText}`)
-			}
-
-			const data = await res.json()
-			if (data.worktree_path) {
-				const compositeTxId = `${parentTxId}_sub_${subTxId}`
-				provider?.log(`[PlanExecutor] Pre-created worktree for ${subTxId}: ${data.worktree_path}`)
-				return { path: data.worktree_path, txId: compositeTxId }
-			}
-			return undefined
-		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : String(error)
-			provider?.log(`[PlanExecutor] Failed to pre-create worktree for ${subTxId}: ${errorMessage}`)
-			return undefined
-		}
-	}
-
-	/**
-	 * Assign a Control-Plane worktree to a child task
-	 * @deprecated Use createSubTxWorktree + worktreePaths map instead
-	 */
-	private async assignWorktree(childTask: Task, subTxId: string, parentTxId: string): Promise<void> {
-		const provider = this.parentTask.providerRef.deref()
-		const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
-
-		if (!cpPort) {
-			return
-		}
-
-		try {
-			const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${parentTxId}/sub-tx/${subTxId}/begin`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"X-Actor-Id": "human",
-				},
-				body: JSON.stringify({
-					base: parentTxId,
-				}),
-			})
-
-			if (!res.ok) {
-				const errorText = await res.text()
-				throw new Error(`Failed to create sub-transaction worktree: ${errorText}`)
-			}
-
-			const data = await res.json()
-			childTask.worktreePath = data.worktree_path
-
-			// CRITICAL: Update the child task's cwd and diffViewProvider.cwd to the worktree path.
-			// This ensures file writes go to the subtask's worktree, not the workspace root.
-			// The worktree will later be merged into the parent transaction via the merge endpoint.
-			if (data.worktree_path) {
-				childTask.cwd = data.worktree_path
-				if (childTask.diffViewProvider) {
-					childTask.diffViewProvider.cwd = data.worktree_path
-				}
-				// Composite tx_id routes DiffViewProvider writes to this sub-tx's
-				// CP worktree instead of the parent transaction's worktree.
-				childTask.transactionalTxId = `${parentTxId}_sub_${subTxId}`
-				// Skip CP shell routing — commands run locally at cwd (the worktree)
-				childTask.skipTransactionalWrites = true
-				provider?.log(
-					`[PlanExecutor] Subtask ${subTxId} cwd updated to worktree: ${data.worktree_path}, txId: ${childTask.transactionalTxId}`,
-				)
-			}
-		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : String(error)
-			provider?.log(`[PlanExecutor] Failed to assign worktree to ${subTxId}: ${errorMessage}`)
-			// Don't throw - allow task to continue without worktree isolation
-		}
-	}
-
-	/**
-	 * Run safety checks for a group of sub-transactions via Control-Plane safety-gate
-	 *
-	 * This is a CRITICAL gate - if safetyChecks are defined and they fail,
-	 * the sub-transaction CANNOT be merged.
-	 *
-	 * @returns Map of sub-transaction ID to SafetyGate result
-	 */
-	private async runSafetyChecks(
-		group: SubTransaction[],
-		results: Map<string, ChildResult>,
-		childTasks: Task[],
-		parentTxId: string,
-	): Promise<Map<string, SafetyGate>> {
-		const safetyResults = new Map<string, SafetyGate>()
-		const provider = this.parentTask.providerRef.deref()
-
-		if (!provider) {
-			// No provider - mark all with checks as failed
-			for (const subTx of group) {
-				if (subTx.safetyChecks?.length) {
-					safetyResults.set(subTx.id, {
-						ok: false,
-						results: [],
-						failedAt: "NO_PROVIDER",
-					})
-				} else {
-					safetyResults.set(subTx.id, { ok: true, results: [] })
-				}
-			}
-			return safetyResults
-		}
-
-		const cpPort = provider.context?.globalState.get<number>("roo.cpPort")
-
-		// Run safety checks for each sub-transaction by calling CP /safety-gate.
-		// safetyChecks are literal shell commands generated by the planner.
-		for (const subTx of group) {
-			if (!subTx.safetyChecks || subTx.safetyChecks.length === 0) {
-				safetyResults.set(subTx.id, { ok: true, results: [] })
-				continue
-			}
-
-			if (!cpPort) {
-				provider?.log(`[PlanExecutor] CRITICAL: No CP port - cannot run safety checks for ${subTx.id}`)
-				safetyResults.set(subTx.id, { ok: false, results: [], failedAt: "NO_CP_PORT" })
-				continue
-			}
-
-			try {
-				const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${parentTxId}/sub-tx/${subTx.id}/safety-gate`, {
-					method: "POST",
-					headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
-					body: JSON.stringify({ checks: subTx.safetyChecks }),
-					signal: AbortSignal.timeout(300_000), // 5 min per sub-tx gate
-				})
-				if (!res.ok) {
-					const text = await res.text()
-					provider?.log(`[PlanExecutor] Safety-gate HTTP error for ${subTx.id}: ${text}`)
-					safetyResults.set(subTx.id, { ok: false, results: [], failedAt: `HTTP_${res.status}` })
-				} else {
-					const gate = await res.json()
-					provider?.log(
-						`[PlanExecutor] Safety gate for ${subTx.id}: ${gate.ok ? "PASSED" : `FAILED at ${gate.failedAt}`}`,
+	private async runSafetyGate(stx: SubTransaction): Promise<{ ok: boolean; reason?: string }> {
+		const body: { checks?: string[]; clause?: Clause } = {}
+		if (stx.safetyChecks && stx.safetyChecks.length > 0) body.checks = stx.safetyChecks
+		if (stx.safetyClause) body.clause = stx.safetyClause
+		if (!body.checks && !body.clause) {
+			const clause = this.defaultSafetyClause()
+			if (!clause) {
+				if (!this.warnedNoDefaultClause) {
+					this.warnedNoDefaultClause = true
+					await this.parentTask.say(
+						"text",
+						"⚠ No safety checks were planned and no compile/test command was detected; sub-transactions are merged without a safety gate.",
 					)
-					safetyResults.set(subTx.id, gate)
 				}
-			} catch (err) {
-				const msg = err instanceof Error ? err.message : String(err)
-				provider?.log(`[PlanExecutor] Safety-gate error for ${subTx.id}: ${msg}`)
-				safetyResults.set(subTx.id, { ok: false, results: [], failedAt: `ERROR: ${msg}` })
+				return { ok: true }
 			}
+			body.clause = clause
 		}
 
-		return safetyResults
+		const res = await cpTx.subTxSafetyGate(this.port!, this.parentTxId!, stx.id, body)
+		if (!res.ok) return { ok: false, reason: `HTTP ${res.status}: ${cpErrorMessage(res)}` }
+		const gate = res.data
+		this.log(`Safety gate for ${stx.id}: ${gate.ok ? "PASSED" : `FAILED at ${gate.failedAt}`}`)
+		this.parentTask.taskLogger?.logSafetyGate(
+			stx.id,
+			!!gate.ok,
+			body.checks ?? (body.clause ? [JSON.stringify(body.clause)] : []),
+		)
+		if (gate.ok) return { ok: true }
+		return { ok: false, reason: String(gate.reason ?? gate.error ?? gate.failedAt ?? "safety gate failed") }
 	}
 
-	/**
-	 * P1 FIX: Persist the generated plan to Control-Plane
-	 *
-	 * Plans must survive restarts and be queryable for:
-	 * - Auditability: "What plan was executed?"
-	 * - Reproducibility: "Can we re-execute this plan?"
-	 * - Correlation: "Which sub-transactions came from this plan?"
-	 */
+	/** Persist the generated plan to the CP for auditability (best effort). */
 	private async persistPlan(parentTxId: string, plan: Plan): Promise<void> {
-		const provider = this.parentTask.providerRef.deref()
-		const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
-
-		if (!cpPort) {
-			provider?.log("[PlanExecutor] Warning: Cannot persist plan - no Control-Plane port")
-			return
-		}
-
 		try {
-			const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${parentTxId}/plan`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"X-Actor-Id": "human",
-				},
-				body: JSON.stringify({
-					title: plan.title,
-					summary: plan.summary,
-					plan_json: plan,
-					sub_tx_count: plan.subTransactions?.length ?? 0,
-				}),
+			const res = await cpTx.persistPlan(this.port!, parentTxId, {
+				title: plan.title,
+				summary: plan.summary,
+				plan_json: plan,
+				sub_tx_count: plan.subTransactions?.length ?? 0,
 			})
-
-			if (!res.ok) {
-				const errorText = await res.text()
-				provider?.log(`[PlanExecutor] Warning: Failed to persist plan: ${errorText}`)
-			} else {
-				provider?.log(`[PlanExecutor] Plan persisted for transaction ${parentTxId}`)
-			}
+			if (!res.ok) this.log(`Warning: Failed to persist plan: ${cpErrorMessage(res)}`)
 		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : String(error)
-			provider?.log(`[PlanExecutor] Warning: Could not persist plan: ${errorMessage}`)
-			// Don't throw - plan persistence is important but shouldn't block execution
+			if (isControlPlaneUnavailableError(error)) throw error
+			this.log(`Warning: Could not persist plan: ${error instanceof Error ? error.message : String(error)}`)
 		}
 	}
 
 	/**
-	 * Merge a sequential chain's shared worktree into the parent transaction.
-	 * The chain's first sub-tx owns the git branch; all subsequent tasks in the
-	 * chain committed to that same branch, so one merge captures all their work.
+	 * Merge gated sub-transactions through the CP merge-pipeline. Every id the
+	 * pipeline did not merge (rolled_back_ids, failed_ids, or missing) is a
+	 * failure; there is no individual-merge fallback. Returns the merged ids.
 	 */
-	private async mergeChainWorktree(firstSubTxId: string, parentTxId: string): Promise<void> {
-		const provider = this.parentTask.providerRef.deref()
-		const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
-
-		if (!cpPort) {
-			return
+	private async mergeWorktrees(gated: SubTransaction[], failures: Map<string, string>): Promise<string[]> {
+		const ids = gated.map((s) => s.id)
+		const dependsOn: Record<string, string[]> = {}
+		for (const stx of gated) {
+			if (stx.dependsOn?.length) dependsOn[stx.id] = stx.dependsOn
 		}
 
-		try {
-			const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${parentTxId}/sub-tx/${firstSubTxId}/merge`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"X-Actor-Id": "human",
-				},
-				body: JSON.stringify({}),
-			})
-
-			if (!res.ok) {
-				const errorText = await res.text()
-				provider?.log(`[PlanExecutor] Chain merge failed for ${firstSubTxId}: ${errorText}`)
-			} else {
-				provider?.log(`[PlanExecutor] Sequential chain merged via ${firstSubTxId}`)
-			}
-		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : String(error)
-			provider?.log(`[PlanExecutor] Chain merge error for ${firstSubTxId}: ${errorMessage}`)
-		}
-	}
-
-	/**
-	 * Merge successful sub-transaction worktrees into parent
-	 *
-	 * CRITICAL: The merge endpoint REQUIRES a passing SafetyGate if safetyChecks were defined.
-	 * This ensures that untested code cannot be merged.
-	 */
-	private async mergeWorktrees(
-		group: SubTransaction[],
-		results: Map<string, ChildResult>,
-		parentTxId: string,
-		safetyResults: Map<string, SafetyGate>,
-	): Promise<void> {
-		const provider = this.parentTask.providerRef.deref()
-		const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
-
-		if (!cpPort) {
-			return
+		const res = await cpTx.mergePipeline(this.port!, this.parentTxId!, {
+			sub_tx_ids: ids,
+			...(Object.keys(dependsOn).length > 0 ? { depends_on: dependsOn } : {}),
+		})
+		if (!res.ok) {
+			const reason = `MERGE_PIPELINE_ERROR: ${cpErrorMessage(res)}`
+			for (const id of ids) failures.set(id, reason)
+			await this.rollbackFailedSubTransactions(ids, "MERGE_CONFLICT")
+			return []
 		}
 
-		// Merge each successful sub-transaction
-		for (const subTx of group) {
-			const result = results.get(subTx.id)
-			if (!result || !result.success) {
+		const pipeline = res.data
+		const rel = (id: string | undefined) => (id ? id.split(":").pop()! : "")
+		const byId = new Map<string, cpTx.MergePipelineResult>()
+		for (const r of pipeline.results ?? []) byId.set(rel(r.subTxId ?? r.sub_tx_id), r)
+		const mergedIds = new Set((pipeline.merged_ids ?? []).map(rel))
+		for (const r of pipeline.results ?? []) {
+			if (r.status === "merged" || (r.status === undefined && r.merged))
+				mergedIds.add(rel(r.subTxId ?? r.sub_tx_id))
+		}
+		const notMerged = new Set([...(pipeline.rolled_back_ids ?? []), ...(pipeline.failed_ids ?? [])].map(rel))
+
+		const merged: string[] = []
+		for (const id of ids) {
+			const r = byId.get(id)
+			if (mergedIds.has(id) && !notMerged.has(id)) {
+				merged.push(id)
+				this.parentTask.taskLogger?.logSubTxEvent(id, "committed", r?.merge_commit)
 				continue
 			}
-
-			// Get the safety gate result for this sub-transaction
-			const safetyGate = safetyResults.get(subTx.id)
-
-			// CRITICAL: Do not attempt merge if safety gate failed
-			if (safetyGate && !safetyGate.ok) {
-				provider?.log(`[PlanExecutor] Skipping merge for ${subTx.id} - safety gate failed`)
-				continue
-			}
-
-			try {
-				const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${parentTxId}/sub-tx/${subTx.id}/merge`, {
-					method: "POST",
-					headers: {
-						"Content-Type": "application/json",
-						"X-Actor-Id": "human",
-					},
-					body: JSON.stringify({
-						// Pass the safety gate result to the merge endpoint
-						// The endpoint will verify this matches what it expects
-						safetyGate: safetyGate,
-					}),
-				})
-
-				if (!res.ok) {
-					const errorText = await res.text()
-					// Check for safety gate enforcement
-					if (res.status === 403) {
-						provider?.log(
-							`[PlanExecutor] Merge BLOCKED for ${subTx.id} - safety gate enforcement: ${errorText}`,
-						)
-					} else {
-						throw new Error(`Failed to merge sub-transaction: ${errorText}`)
-					}
-					continue
-				}
-
-				provider?.log(`[PlanExecutor] Successfully merged sub-transaction ${subTx.id}`)
-			} catch (error) {
-				const errorMessage = error instanceof Error ? error.message : String(error)
-				provider?.log(`[PlanExecutor] Failed to merge ${subTx.id}: ${errorMessage}`)
-				// Continue with other merges even if one fails
-			}
+			this.parentTask.taskLogger?.logSubTxEvent(id, "aborted")
+			const conflictsWith = Array.isArray(r?.conflicts_with) ? r?.conflicts_with.join(", ") : r?.conflicts_with
+			const reason =
+				`${(r?.status ?? "failed").toUpperCase()}: ${r?.reason ?? r?.error ?? "not merged by merge-pipeline"}` +
+				(conflictsWith ? ` (conflicts with ${conflictsWith})` : "")
+			failures.set(id, reason)
 		}
+		this.log(
+			`merge-pipeline: merged [${merged.join(", ")}], not merged [${ids.filter((i) => !merged.includes(i)).join(", ")}]`,
+		)
+		return merged
 	}
 
-	/**
-	 * Clean up parent transaction on failure
-	 * This method is idempotent - safe to call multiple times
-	 */
+	/** Reset the parent worktree to its base commit (idempotent, best effort). */
 	private async cleanupParentTransaction(parentTxId: string | undefined): Promise<void> {
-		if (!parentTxId) return
-
-		const provider = this.parentTask.providerRef.deref()
-		const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
-
-		if (!cpPort) return
-
-		// Check if transaction still exists (idempotent cleanup)
-		const currentTxId = provider?.context?.globalState.get<string>("roo.current_tx_id")
-		if (currentTxId !== parentTxId) {
-			// Transaction already cleaned up or changed
-			return
-		}
-
+		if (!parentTxId || !this.parentBaseCommit || !this.port) return
 		try {
-			// Rollback parent transaction to base commit if we have it
-			if (this.parentBaseCommit) {
-				const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${parentTxId}/rollback`, {
-					method: "POST",
-					headers: { "Content-Type": "application/json", "X-Actor-Id": "human" },
-					body: JSON.stringify({ hash: this.parentBaseCommit }),
-				})
-
-				if (!res.ok) {
-					const errorText = await res.text()
-					provider?.log(`[PlanExecutor] Failed to rollback parent transaction: ${errorText}`)
-				}
-			}
-
-			// Clear transaction ID from global state
-			await provider?.context?.globalState.update("roo.current_tx_id", undefined)
-			provider?.log(`[PlanExecutor] Cleaned up parent transaction ${parentTxId}`)
+			const res = await cpTx.rollback(this.port, parentTxId, this.parentBaseCommit)
+			if (!res.ok) this.log(`Failed to rollback parent transaction: ${cpErrorMessage(res)}`)
 		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : String(error)
-			provider?.log(`[PlanExecutor] Failed to cleanup parent transaction: ${errorMessage}`)
+			this.log(`Failed to rollback parent transaction: ${error instanceof Error ? error.message : String(error)}`)
 		}
 	}
 
-	/**
-	 * Rollback failed sub-transactions
-	 */
-	private async rollbackFailedSubTransactions(
-		group: SubTransaction[],
-		results: Map<string, ChildResult>,
-		parentTxId: string,
-	): Promise<void> {
-		const provider = this.parentTask.providerRef.deref()
-		const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
-
-		if (!cpPort) {
-			return
-		}
-
-		// Rollback each failed sub-transaction
-		for (const subTx of group) {
-			const result = results.get(subTx.id)
-			if (result && !result.success) {
-				try {
-					const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${parentTxId}/sub-tx/${subTx.id}/rollback`, {
-						method: "POST",
-						headers: {
-							"Content-Type": "application/json",
-							"X-Actor-Id": "human",
-						},
-					})
-
-					if (!res.ok) {
-						const errorText = await res.text()
-						throw new Error(`Failed to rollback sub-transaction: ${errorText}`)
-					}
-
-					provider?.log(`[PlanExecutor] Successfully rolled back sub-transaction ${subTx.id}`)
-				} catch (error) {
-					const errorMessage = error instanceof Error ? error.message : String(error)
-					provider?.log(`[PlanExecutor] Failed to rollback ${subTx.id}: ${errorMessage}`)
-				}
+	/** Roll back the given sub-transactions (runtime failures, failed gates, merge rejections). */
+	private async rollbackFailedSubTransactions(ids: string[], kind: string): Promise<void> {
+		const parentTxId = this.parentTxId
+		if (!parentTxId || !this.port) return
+		for (const id of ids) {
+			try {
+				const res = await cpTx.subTxRollback(this.port, parentTxId, id, {
+					reason: `sub-transaction failed (${kind})`,
+					failureKind: kind,
+				})
+				if (!res.ok && res.status !== 404) this.log(`Failed to rollback ${id}: ${cpErrorMessage(res)}`)
+			} catch (error) {
+				this.log(`Failed to rollback ${id}: ${error instanceof Error ? error.message : String(error)}`)
 			}
 		}
 	}
 
 	/**
-	 * Rollback ALL sub-transactions from a plan (used when planner fails catastrophically)
-	 * This ensures all worktrees are cleaned up even if execution didn't complete
+	 * Roll back ALL sub-transactions of a plan (planner failure). 404s are fine:
+	 * a sub-transaction may never have been created.
 	 */
 	async rollbackAllSubTransactions(plan: Plan, parentTxId: string): Promise<void> {
-		const provider = this.parentTask.providerRef.deref()
-		const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
-
-		if (!cpPort || !plan.subTransactions || plan.subTransactions.length === 0) {
-			return
-		}
-
-		provider?.log(
-			`[PlanExecutor] Rolling back all ${plan.subTransactions.length} sub-transactions due to planner failure`,
-		)
-
-		// Rollback all sub-transactions in parallel (faster cleanup)
+		const port = this.port ?? getCpPort(this.parentTask.providerRef.deref()?.context)
+		if (!port || !plan.subTransactions || plan.subTransactions.length === 0) return
+		this.log(`Rolling back all ${plan.subTransactions.length} sub-transactions`)
 		await Promise.all(
-			plan.subTransactions.map(async (subTx) => {
+			plan.subTransactions.map(async (stx) => {
 				try {
-					const res = await fetch(`http://127.0.0.1:${cpPort}/tx/${parentTxId}/sub-tx/${subTx.id}/rollback`, {
-						method: "POST",
-						headers: {
-							"Content-Type": "application/json",
-							"X-Actor-Id": "human",
-						},
-						body: JSON.stringify({
-							reason: "Planner mode failed - cleaning up all sub-transactions",
-							failureKind: "RUNTIME_ERROR",
-						}),
+					const res = await cpTx.subTxRollback(port, parentTxId, stx.id, {
+						reason: "Planner failed - cleaning up all sub-transactions",
+						failureKind: "RUNTIME_ERROR",
 					})
-
-					// 404 is OK - sub-transaction may not have been created yet
-					if (!res.ok && res.status !== 404) {
-						const errorText = await res.text()
-						provider?.log(`[PlanExecutor] Failed to rollback ${subTx.id}: ${errorText}`)
-					} else {
-						provider?.log(`[PlanExecutor] Rolled back sub-transaction ${subTx.id}`)
-					}
+					if (!res.ok && res.status !== 404) this.log(`Failed to rollback ${stx.id}: ${cpErrorMessage(res)}`)
 				} catch (error) {
-					const errorMessage = error instanceof Error ? error.message : String(error)
-					provider?.log(`[PlanExecutor] Error rolling back ${subTx.id}: ${errorMessage}`)
-					// Continue with other rollbacks even if one fails
+					this.log(`Error rolling back ${stx.id}: ${error instanceof Error ? error.message : String(error)}`)
 				}
 			}),
 		)
 	}
 
 	/**
-	 * Record execution metrics for parallel vs serial comparison
+	 * Record execution metrics: `total_duration_ms` is the SUM of child run
+	 * times, `wall_clock_ms` the elapsed time (their ratio estimates speedup).
 	 */
 	private async recordExecutionMetrics(
 		parentTxId: string,
 		executionMode: "parallel" | "serial",
 		subTxCount: number,
+		totalDurationMs: number,
 		wallClockMs: number,
 	): Promise<void> {
-		const provider = this.parentTask.providerRef.deref()
-		const cpPort = provider?.context?.globalState.get<number>("roo.cpPort")
-
-		if (!cpPort) {
-			return
-		}
-
+		if (!this.port) return
 		try {
-			await fetch(`http://127.0.0.1:${cpPort}/tx/${parentTxId}/metric/execution`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"X-Actor-Id": "human",
-				},
-				body: JSON.stringify({
-					execution_mode: executionMode,
-					sub_tx_count: subTxCount,
-					total_duration_ms: wallClockMs, // In parallel mode, wall clock ≈ total
-					wall_clock_ms: wallClockMs,
-				}),
+			await cpTx.metricExecution(this.port, parentTxId, {
+				execution_mode: executionMode,
+				sub_tx_count: subTxCount,
+				total_duration_ms: totalDurationMs,
+				wall_clock_ms: wallClockMs,
 			})
-			provider?.log(
-				`[PlanExecutor] Recorded execution metrics: ${executionMode}, ${subTxCount} sub-txns, ${wallClockMs}ms`,
+			this.log(
+				`Recorded execution metrics: ${executionMode}, ${subTxCount} sub-txns, Σ ${totalDurationMs}ms / wall ${wallClockMs}ms`,
 			)
 		} catch {
-			// Ignore metrics errors - they're best-effort
+			// best effort
 		}
 	}
 }

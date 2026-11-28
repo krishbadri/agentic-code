@@ -25,6 +25,7 @@ import { IpcServer } from "@roo-code/ipc"
 import { Package } from "../shared/package"
 import { ClineProvider } from "../core/webview/ClineProvider"
 import { openClineInNewTab } from "../activate/registerCommands"
+import { isCpHealthy } from "../core/control-plane/client"
 
 export class API extends EventEmitter<RooCodeEvents> implements RooCodeAPI {
 	private readonly outputChannel: vscode.OutputChannel
@@ -203,19 +204,7 @@ export class API extends EventEmitter<RooCodeEvents> implements RooCodeAPI {
 	}
 
 	private async isControlPlaneHealthy(port: number, timeoutMs = 1500): Promise<boolean> {
-		if (typeof (globalThis as any).fetch !== "function") {
-			return false
-		}
-		const controller = new AbortController()
-		const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
-		try {
-			const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal })
-			return res.ok
-		} catch {
-			return false
-		} finally {
-			clearTimeout(timeoutId)
-		}
+		return isCpHealthy(port, timeoutMs)
 	}
 
 	private async isPortInUse(port: number, host = "127.0.0.1", timeoutMs = 500): Promise<boolean> {
@@ -260,10 +249,10 @@ export class API extends EventEmitter<RooCodeEvents> implements RooCodeAPI {
 		// VS Code globalState can be async in ways that make immediate reads return stale data
 		// Retry with small delays to ensure persistence
 		for (let attempt = 0; attempt < 5; attempt++) {
-			await this.context.globalState.update("roo.cpPort", port)
+			await this.context.workspaceState.update("roo.cpPort", port)
 			// Small delay to let the write persist
 			await new Promise((resolve) => setTimeout(resolve, 100))
-			const storedPort = this.context.globalState.get<number>("roo.cpPort")
+			const storedPort = this.context.workspaceState.get<number>("roo.cpPort")
 			console.log(`[API#setCpPort] Attempt ${attempt + 1}: Set port to ${port}, read back: ${storedPort}`)
 			if (storedPort === port) {
 				return

@@ -201,7 +201,7 @@ function repairFunctionCallSyntax(text: string): RepairResult {
  * - Missing args wrapper: <read_file><path>...</path> → <read_file><args><file><path>...</path></file></args></read_file>
  * - Malformed structure
  */
-function repairXmlToolCalls(text: string): RepairResult {
+function repairXmlToolCalls(text: string, partial = false): RepairResult {
 	const repairs: string[] = []
 	let repaired = false
 	let result = text
@@ -209,10 +209,25 @@ function repairXmlToolCalls(text: string): RepairResult {
 	// Pattern to find XML opening tool tags (case-insensitive)
 	const xmlTagPattern = /<(\w+)(?:\s[^>]*)?>/gi
 
+	// `command` is both a loose alias for execute_command AND the name of its parameter:
+	// <execute_command><command>ls</command></execute_command>. Inside an execute_command
+	// (canonical or an alias such as <bash>) it is the parameter and must be left alone.
+	let sawExecuteCommandOpener = false
+	let commandParamTags = 0
+
 	result = result.replace(xmlTagPattern, (match, tagName) => {
 		const normalized = normalizeToolName(tagName)
 		if (!normalized) {
 			return match // Not a tool tag
+		}
+
+		if (tagName.toLowerCase() === "command") {
+			if (sawExecuteCommandOpener) {
+				commandParamTags++
+				return match // parameter of the enclosing execute_command
+			}
+		} else if (normalized === "execute_command") {
+			sawExecuteCommandOpener = true
 		}
 
 		if (tagName !== normalized) {
@@ -233,6 +248,11 @@ function repairXmlToolCalls(text: string): RepairResult {
 			return match // Not a tool tag
 		}
 
+		if (tagName.toLowerCase() === "command" && commandParamTags > 0) {
+			commandParamTags--
+			return match // closes the parameter left alone above
+		}
+
 		if (tagName !== normalized) {
 			repaired = true
 			repairs.push(`Fixed closing tag: </${tagName}> → </${normalized}>`)
@@ -242,66 +262,70 @@ function repairXmlToolCalls(text: string): RepairResult {
 		return match
 	})
 
-	// Fix missing </read_file> closing tags
-	// Pattern: <read_file>...<path>...</path> (no closing tag)
-	const readFilePattern = /<read_file>([\s\S]*?)(?=<\/read_file>|$)/gi
-	result = result.replace(readFilePattern, (match, content) => {
-		if (!match.includes("</read_file>")) {
-			// Check if it has proper structure
-			if (content.includes("<path>") && !content.includes("<args>")) {
-				// Missing args wrapper - add it
-				const pathMatch = content.match(/<path>([^<]+)<\/path>/)
-				if (pathMatch) {
+	// "Missing closing tag" repairs need the whole message: on a streamed chunk the tag is
+	// simply not there *yet*, and adding it would end the tool call early.
+	if (!partial) {
+		// Fix missing </read_file> closing tags
+		// Pattern: <read_file>...<path>...</path> (no closing tag)
+		const readFilePattern = /<read_file>([\s\S]*?)(?=<\/read_file>|$)/gi
+		result = result.replace(readFilePattern, (match, content) => {
+			if (!match.includes("</read_file>")) {
+				// Check if it has proper structure
+				if (content.includes("<path>") && !content.includes("<args>")) {
+					// Missing args wrapper - add it
+					const pathMatch = content.match(/<path>([^<]+)<\/path>/)
+					if (pathMatch) {
+						repaired = true
+						repairs.push("Added missing <args> wrapper for read_file")
+						return `<read_file><args>\n  <file>\n    <path>${pathMatch[1]}</path>\n  </file>\n</args></read_file>`
+					}
+				}
+
+				// Add closing tag if missing
+				if (!match.endsWith("</read_file>")) {
 					repaired = true
-					repairs.push("Added missing <args> wrapper for read_file")
-					return `<read_file><args>\n  <file>\n    <path>${pathMatch[1]}</path>\n  </file>\n</args></read_file>`
+					repairs.push("Added missing </read_file> closing tag")
+					return match + "</read_file>"
 				}
 			}
+			return match
+		})
 
-			// Add closing tag if missing
-			if (!match.endsWith("</read_file>")) {
-				repaired = true
-				repairs.push("Added missing </read_file> closing tag")
-				return match + "</read_file>"
-			}
-		}
-		return match
-	})
+		// Fix missing </search_files> closing tags
+		const searchFilesPattern = /<search_files>([\s\S]*?)(?=<\/search_files>|$)/gi
+		result = result.replace(searchFilesPattern, (match, content) => {
+			if (!match.includes("</search_files>")) {
+				// Check if path is missing
+				if (!content.includes("<path>")) {
+					// Try to infer path from context or use "."
+					repaired = true
+					repairs.push("Added missing <path> parameter to search_files (defaulting to '.')")
+					const regexMatch = content.match(/<regex>([^<]+)<\/regex>/)
+					const filePatternMatch = content.match(/<file_pattern>([^<]+)<\/file_pattern>/)
 
-	// Fix missing </search_files> closing tags
-	const searchFilesPattern = /<search_files>([\s\S]*?)(?=<\/search_files>|$)/gi
-	result = result.replace(searchFilesPattern, (match, content) => {
-		if (!match.includes("</search_files>")) {
-			// Check if path is missing
-			if (!content.includes("<path>")) {
-				// Try to infer path from context or use "."
-				repaired = true
-				repairs.push("Added missing <path> parameter to search_files (defaulting to '.')")
-				const regexMatch = content.match(/<regex>([^<]+)<\/regex>/)
-				const filePatternMatch = content.match(/<file_pattern>([^<]+)<\/file_pattern>/)
-
-				let fixed = "<search_files>\n<path>.</path>\n"
-				if (regexMatch) {
-					fixed += `<regex>${regexMatch[1]}</regex>\n`
-				} else {
-					fixed += "<regex>.*</regex>\n"
+					let fixed = "<search_files>\n<path>.</path>\n"
+					if (regexMatch) {
+						fixed += `<regex>${regexMatch[1]}</regex>\n`
+					} else {
+						fixed += "<regex>.*</regex>\n"
+					}
+					if (filePatternMatch) {
+						fixed += `<file_pattern>${filePatternMatch[1]}</file_pattern>\n`
+					}
+					fixed += "</search_files>"
+					return fixed
 				}
-				if (filePatternMatch) {
-					fixed += `<file_pattern>${filePatternMatch[1]}</file_pattern>\n`
-				}
-				fixed += "</search_files>"
-				return fixed
-			}
 
-			// Add closing tag if missing
-			if (!match.endsWith("</search_files>")) {
-				repaired = true
-				repairs.push("Added missing </search_files> closing tag")
-				return match + "</search_files>"
+				// Add closing tag if missing
+				if (!match.endsWith("</search_files>")) {
+					repaired = true
+					repairs.push("Added missing </search_files> closing tag")
+					return match + "</search_files>"
+				}
 			}
-		}
-		return match
-	})
+			return match
+		})
+	} // end of whole-message-only repairs
 
 	// Fix read_file missing args structure: <read_file><path>...</path></read_file>
 	// Should be: <read_file><args><file><path>...</path></file></args></read_file>
@@ -419,7 +443,7 @@ function repairEmbeddedToolCalls(text: string): RepairResult {
 /**
  * Main repair function - applies all repair strategies
  */
-export function repairToolCalls(text: string): RepairResult {
+export function repairToolCalls(text: string, opts: { partial?: boolean } = {}): RepairResult {
 	let current = text
 	const allRepairs: string[] = []
 	let anyRepaired = false
@@ -441,7 +465,7 @@ export function repairToolCalls(text: string): RepairResult {
 	}
 
 	// Strategy 3: Repair XML tool calls
-	const xmlResult = repairXmlToolCalls(current)
+	const xmlResult = repairXmlToolCalls(current, !!opts.partial)
 	if (xmlResult.repaired) {
 		current = xmlResult.text
 		allRepairs.push(...xmlResult.repairs)
@@ -476,4 +500,77 @@ export function validateRepairedToolCalls(text: string): boolean {
 		}
 	}
 	return false
+}
+
+/**
+ * Repairer for a STREAMED assistant message.
+ *
+ * `repairToolCalls` rewrites anything that looks like a mistyped tool call. Applied
+ * blindly to every chunk it also rewrites the *contents* of a valid tool call:
+ * the `<command>` parameter of execute_command, or file content that happens to
+ * contain `run_tests()`, `<Terminal>`, `<lines>`, ... — silently corrupting the
+ * command or the file being written.
+ *
+ * This wrapper repairs only text that precedes the first valid tool call of the
+ * message. Once a valid opening tag has been seen (in the model's output, or
+ * produced by a repair) everything after it is passed through verbatim; the only
+ * exception is the closing tag of an alias that was repaired (`<bash>` →
+ * `<execute_command>` needs `</bash>` → `</execute_command>`).
+ *
+ * Create one per assistant message.
+ */
+export function createStreamingToolCallRepairer(): (chunk: string) => RepairResult {
+	const validOpener = new RegExp(`<(${toolNames.join("|")})>`)
+	const longestOpener = Math.max(...toolNames.map((n) => n.length)) + 2
+	let insideTool = false
+	let tail = "" // end of the raw text seen so far (an opening tag can span two chunks)
+	let closingAliases: Array<{ from: RegExp; to: string }> = []
+
+	const fixAliasClosers = (chunk: string): RepairResult => {
+		let text = chunk
+		const repairs: string[] = []
+		for (const alias of closingAliases) {
+			if (alias.from.test(text)) {
+				text = text.replace(alias.from, alias.to)
+				repairs.push(`Fixed closing tag → ${alias.to}`)
+			}
+		}
+		return { repaired: repairs.length > 0, text, repairs }
+	}
+
+	return (chunk: string): RepairResult => {
+		if (insideTool) return fixAliasClosers(chunk)
+
+		// A valid opener that started in the previous chunk and completes in this one.
+		const joined = tail + chunk
+		const spanning = validOpener.exec(joined)
+		tail = joined.slice(-longestOpener)
+		if (spanning && spanning.index < joined.length - chunk.length) {
+			insideTool = true
+			return { repaired: false, text: chunk, repairs: [] }
+		}
+
+		const opener = validOpener.exec(chunk)
+		if (opener) {
+			// Repair only what precedes the valid tool call.
+			insideTool = true
+			const before = repairToolCalls(chunk.slice(0, opener.index), { partial: true })
+			return { ...before, text: before.text + chunk.slice(opener.index) }
+		}
+
+		const result = repairToolCalls(chunk, { partial: true })
+		if (result.repaired && validOpener.test(result.text)) {
+			insideTool = true
+			// Remember which alias tags were renamed so their closers can follow.
+			const aliasPattern = /<(\w+)(?:\s[^>]*)?>/g
+			let m: RegExpExecArray | null
+			while ((m = aliasPattern.exec(chunk))) {
+				const normalized = normalizeToolName(m[1]!)
+				if (normalized && normalized !== m[1] && m[1]!.toLowerCase() !== "command") {
+					closingAliases.push({ from: new RegExp("</" + m[1] + "\\s*>", "gi"), to: `</${normalized}>` })
+				}
+			}
+		}
+		return result
+	}
 }

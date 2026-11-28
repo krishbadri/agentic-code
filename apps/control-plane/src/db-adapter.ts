@@ -1,6 +1,6 @@
 /**
  * Database Adapter - Unified interface for PostgreSQL and SQLite
- * 
+ *
  * Provides a Pool-compatible interface so existing store functions work with both database types.
  */
 
@@ -57,7 +57,15 @@ export class SqlitePool implements DbPool {
 				if (index < params.length) {
 					// Serialize JSON objects/arrays to strings for SQLite
 					const param = params[index]
-					if (param && typeof param === "object" && !(param instanceof Date) && !Buffer.isBuffer(param)) {
+					if (param === undefined) {
+						// better-sqlite3 cannot bind undefined
+						sqliteParams.push(null)
+					} else if (typeof param === "boolean") {
+						// better-sqlite3 cannot bind booleans
+						sqliteParams.push(param ? 1 : 0)
+					} else if (param instanceof Date) {
+						sqliteParams.push(param.toISOString())
+					} else if (param && typeof param === "object" && !Buffer.isBuffer(param)) {
 						sqliteParams.push(JSON.stringify(param))
 					} else {
 						sqliteParams.push(param)
@@ -83,17 +91,21 @@ export class SqlitePool implements DbPool {
 		sql = sql.replace(/\bUUID\b/gi, "TEXT")
 		// Replace BOOLEAN with INTEGER (SQLite uses INTEGER for booleans)
 		sql = sql.replace(/\bBOOLEAN\b/gi, "INTEGER")
+		// GREATEST/LEAST don't exist in SQLite; multi-argument MAX/MIN are the scalar equivalents
+		sql = sql.replace(/\bGREATEST\s*\(/gi, "MAX(").replace(/\bLEAST\s*\(/gi, "MIN(")
+		// Strip PostgreSQL casts (e.g. COUNT(*)::int, ...::float) — SQLite rejects them
+		sql = sql.replace(/::(int|integer|bigint|float|real|double precision|numeric|text)\b/gi, "")
 
 		// Handle RETURNING clause (SQLite doesn't support RETURNING, need to query separately)
 		const hasReturning = /RETURNING\s+(\w+)/i.test(sql)
 		let returningColumn: string | null = null
 		let tableName: string | null = null
-		
+
 		if (hasReturning) {
 			const match = sql.match(/RETURNING\s+(\w+)/i)
-			returningColumn = (match && match[1]) ? match[1] : null
+			returningColumn = match && match[1] ? match[1] : null
 			const tableMatch = sql.match(/INSERT\s+INTO\s+(\w+)/i)
-			tableName = (tableMatch && tableMatch[1]) ? tableMatch[1] : null
+			tableName = tableMatch && tableMatch[1] ? tableMatch[1] : null
 			// Remove RETURNING clause for SQLite
 			sql = sql.replace(/\s+RETURNING\s+[\w, ]+/i, "")
 		}
@@ -111,10 +123,10 @@ export class SqlitePool implements DbPool {
 
 		// Execute single statement query
 		const stmt = this.db.prepare(sql)
-		
+
 		// Determine if it's a SELECT (returns rows) or mutation (returns changes)
 		const isSelect = sql.trim().toUpperCase().startsWith("SELECT")
-		
+
 		if (isSelect) {
 			const rows = stmt.all(...sqliteParams) as any[]
 			// Parse JSON fields
@@ -139,18 +151,18 @@ export class SqlitePool implements DbPool {
 			}
 		} else {
 			const result = stmt.run(...sqliteParams)
-			
+
 			// If RETURNING was requested, query the inserted row
 			if (hasReturning && returningColumn && tableName) {
 				// For INSERT with RETURNING, get the last inserted row
 				// SQLite uses lastInsertRowid for INTEGER PRIMARY KEY AUTOINCREMENT
 				// For TEXT primary keys (UUIDs), we need to extract from params or query by a unique field
-				
+
 				if (result.lastInsertRowid && result.lastInsertRowid > 0) {
 					// INTEGER primary key (call_id, id, etc.)
 					const selectStmt = this.db.prepare(`SELECT ${returningColumn} FROM ${tableName} WHERE rowid = ?`)
 					const row = selectStmt.get(result.lastInsertRowid) as any
-					
+
 					return {
 						rows: row ? [row] : [],
 						rowCount: row ? 1 : 0,
@@ -162,11 +174,13 @@ export class SqlitePool implements DbPool {
 					if (columnMatch && columnMatch[1] && returningColumn && tableName) {
 						const columns = columnMatch[1].split(",").map((c) => c.trim())
 						const columnIndex = columns.findIndex((col) => col === returningColumn)
-						
+
 						if (columnIndex >= 0 && columnIndex < sqliteParams.length) {
-							const selectStmt = this.db.prepare(`SELECT ${returningColumn} FROM ${tableName} WHERE ${returningColumn} = ?`)
+							const selectStmt = this.db.prepare(
+								`SELECT ${returningColumn} FROM ${tableName} WHERE ${returningColumn} = ?`,
+							)
 							const row = selectStmt.get(sqliteParams[columnIndex]) as any
-							
+
 							return {
 								rows: row ? [row] : [],
 								rowCount: row ? 1 : 0,
@@ -175,7 +189,7 @@ export class SqlitePool implements DbPool {
 					}
 				}
 			}
-			
+
 			return {
 				rows: [],
 				rowCount: result.changes || 0,
@@ -191,10 +205,7 @@ export class SqlitePool implements DbPool {
 /**
  * Create Pool-compatible adapter from database URL or use SQLite fallback
  */
-export async function createDbPool(
-	databaseUrl?: string,
-	sqlitePath?: string,
-): Promise<DbPool | null> {
+export async function createDbPool(databaseUrl?: string, sqlitePath?: string): Promise<DbPool | null> {
 	if (databaseUrl && databaseUrl.startsWith("postgresql://")) {
 		// Use PostgreSQL
 		const { Pool } = await import("pg")
@@ -204,22 +215,19 @@ export async function createDbPool(
 		// Use SQLite as fallback
 		const { default: Database } = await import("better-sqlite3")
 		const db = new Database(sqlitePath)
-		
+
 		// Enable foreign keys and WAL mode for better concurrency
 		db.pragma("foreign_keys = ON")
 		db.pragma("journal_mode = WAL")
-		
+
 		return new SqlitePool(db)
 	}
-	
+
 	return null
 }
 
 // Legacy alias for backward compatibility
 export type DbAdapter = DbPool
-export async function createDbAdapter(
-	databaseUrl?: string,
-	sqlitePath?: string,
-): Promise<DbAdapter | null> {
+export async function createDbAdapter(databaseUrl?: string, sqlitePath?: string): Promise<DbAdapter | null> {
 	return createDbPool(databaseUrl, sqlitePath)
 }

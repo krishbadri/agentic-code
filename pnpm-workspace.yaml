@@ -3,3 +3,9 @@ packages:
     - "webview-ui" # Should be apps/vscode-webview
     - "apps/*"
     - "packages/*"
+
+# pnpm 10 skips dependency build scripts unless they are listed here. Without its native
+# binding better-sqlite3 cannot load, and the Control-Plane silently runs without a
+# database (no metrics, no replay log, no transaction metadata across restarts).
+onlyBuiltDependencies:
+    - better-sqlite3

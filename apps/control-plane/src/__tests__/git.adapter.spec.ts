@@ -10,6 +10,8 @@ const pexec = promisify(execFile)
 async function initRepo(tmp: string) {
 	await fs.mkdir(tmp, { recursive: true })
 	await pexec("git", ["init"], { cwd: tmp })
+	await pexec("git", ["config", "user.name", "cp-test"], { cwd: tmp })
+	await pexec("git", ["config", "user.email", "cp-test@example.invalid"], { cwd: tmp })
 	await fs.writeFile(path.join(tmp, "README.md"), "hello\n")
 	await pexec("git", ["add", "."], { cwd: tmp })
 	await pexec("git", ["commit", "-m", "init"], { cwd: tmp })
