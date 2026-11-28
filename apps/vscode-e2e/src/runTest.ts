@@ -151,6 +151,15 @@ async function main() {
 			process.env.TEST_TORTURE_REPO_WORKSPACE = tortureRepoRoot
 			testWorkspace = tortureRepoRoot
 
+			// Both torture prompts ask the agent to add new test files. Tests are otherwise
+			// "given" (R31/R32), so name exactly those files on the Control-Plane's server-side allowlist.
+			// The extension passes its environment to the Control-Plane it starts.
+			if (!process.env.CP_TEST_MODIFY_ALLOWLIST) {
+				process.env.CP_TEST_MODIFY_ALLOWLIST =
+					process.env.TEST_TORTURE_STAGE === "1" ? "tests/test_sqlite_store.py" : "tests/test_projects*.py"
+			}
+			console.log(`[runTest] CP_TEST_MODIFY_ALLOWLIST=${process.env.CP_TEST_MODIFY_ALLOWLIST}`)
+
 			console.log(`[runTest] Torture repo test mode enabled`)
 			console.log(`[runTest] TEST_TORTURE_REPO=${process.env.TEST_TORTURE_REPO}`)
 			console.log(`[runTest] TEST_TORTURE_REPO_WORKSPACE=${process.env.TEST_TORTURE_REPO_WORKSPACE}`)

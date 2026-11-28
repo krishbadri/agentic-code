@@ -79,15 +79,15 @@ row below cites:
 
 ## R31–R39: correctness, progress, action surface
 
-| ID                                 | Verdict    | Runtime call site                                                                                                                                                                                                                                          | Evidence                                                                   |
-| ---------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| R31/R32 tests are given            | PASS       | Action-safety blocks writes, creation and deletion of test files for every write tool. `/shell/exec` blocks parsed test-file writes before running and reverts any after. `/write` refuses new test files. The only override is the server-side allowlist. | `gates.unit.test.ts`, `strict-merge`, `occ-acceptance` Scenario 10         |
-| R33 progress monotonic             | PASS       | `/checkpoint` with order-independent parsers (Jest, Vitest, pytest, mocha, node:test, TAP, go) and an exit-code fallback.                                                                                                                                  | `gates.unit.test.ts` (parser table), `txn-pipeline` T3, `commit-lifecycle` |
-| R34 termination = all tests pass   | PASS (MAY) | Liveness at `/commit`                                                                                                                                                                                                                                      | `txn-pipeline` T4                                                          |
-| R35/R36 files and dirs             | PASS       | `write_to_file`, `execute_command`                                                                                                                                                                                                                         | —                                                                          |
-| R37 bash with guardrails           | PASS       | All commands, including planner children's, go through `/shell/exec`, which runs action-safety on every parsed simple command (nested shells too). Upstream approval prompts still apply.                                                                  | `executeCommandTool.cp.spec.ts`, `strict-merge` shell tests                |
-| R38 env without permanent override | PARTIAL    | `/shell/exec` env is per call and not persisted. Nothing stops a command from editing shell rc files outside the worktree, except containment rules for paths that action-safety can parse.                                                                | —                                                                          |
-| R39 install deps                   | PASS       | `execute_command`                                                                                                                                                                                                                                          | —                                                                          |
+| ID                                 | Verdict    | Runtime call site                                                                                                                                                                                                                                                                      | Evidence                                                                   |
+| ---------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| R31/R32 tests are given            | PASS       | Action-safety blocks writes, creation and deletion of test files for every write tool. `/shell/exec` blocks parsed test-file writes before running and reverts any after. `/write` refuses new test files. The only override is the server-side allowlist (`--test-modify-allowlist`). | `gates.unit.test.ts`, `strict-merge`, `occ-acceptance` Scenario 10         |
+| R33 progress monotonic             | PASS       | `/checkpoint` with order-independent parsers (Jest, Vitest, pytest, mocha, node:test, TAP, go) and an exit-code fallback.                                                                                                                                                              | `gates.unit.test.ts` (parser table), `txn-pipeline` T3, `commit-lifecycle` |
+| R34 termination = all tests pass   | PASS (MAY) | Liveness at `/commit`                                                                                                                                                                                                                                                                  | `txn-pipeline` T4                                                          |
+| R35/R36 files and dirs             | PASS       | `write_to_file`, `execute_command`                                                                                                                                                                                                                                                     | —                                                                          |
+| R37 bash with guardrails           | PASS       | All commands, including planner children's, go through `/shell/exec`, which runs action-safety on every parsed simple command (nested shells too). Upstream approval prompts still apply.                                                                                              | `executeCommandTool.cp.spec.ts`, `strict-merge` shell tests                |
+| R38 env without permanent override | PARTIAL    | `/shell/exec` env is per call and not persisted. Nothing stops a command from editing shell rc files outside the worktree, except containment rules for paths that action-safety can parse.                                                                                            | —                                                                          |
+| R39 install deps                   | PASS       | `execute_command`                                                                                                                                                                                                                                                                      | —                                                                          |
 
 ## Policies
 
@@ -148,11 +148,29 @@ Bugs this suite found that unit and contract tests could not:
 - A task whose folder is not the one the Control-Plane manages (multi-root workspace, workspace override) now runs
   without a transaction instead of transacting in the other repository.
 
+### Found by CI (Linux and Windows runners)
+
+- **Symlink guard did nothing on Windows.** `checkSymlinkPath` split the relative path on the platform separator,
+  but paths arrive with `/`, so on Windows no directory component was ever checked and a write or read through a
+  link or junction inside a worktree could reach outside it. It now splits on both separators. The acceptance
+  test used to skip silently when symlinks needed admin rights; it now falls back to a junction and always runs.
+- **No database on a fresh install.** pnpm 10 does not run dependency build scripts unless allow-listed, so
+  `better-sqlite3` had no native binding and the Control-Plane silently ran DB-less (no metrics, no replay log).
+  `pnpm-workspace.yaml` now allow-lists it.
+- **Bundle failed on a clean checkout.** `src/esbuild.mjs` copied a stale `webview-ui/build` folder that exists
+  only on a developer machine. The copy step is removed.
+- **Unhandled rejection after cancel.** A transaction-setup notice could be sent after the task was aborted.
+  Setup notices now go through `sayIfActive`.
+
 ## Known limitations
 
 - **Dev-host `.env`.** `src/.env` is loaded by the extension in the development host. If it sets
   `TEST_TORTURE_REPO` / `TEST_TORTURE_REPO_WORKSPACE`, every task runs in the test-only "E2E mode" and uses the
-  torture repository as its working directory, whatever folder is open. Remove those lines for normal use.
+  torture repository as its working directory, whatever folder is open. Keep those lines out of `.env`; the
+  torture harness sets them itself (`pnpm --filter @roo-code/vscode-e2e test:torture`).
+- **Tasks that must add tests.** Tests are "given", so a task that asks the agent to write a new test file is
+  blocked unless the operator names that file in `--test-modify-allowlist` / `CP_TEST_MODIFY_ALLOWLIST` when the
+  Control-Plane starts. The torture harness does this for the one file its prompt names.
 - **Shell analysis is best-effort.** It parses POSIX sh, PowerShell and cmd syntax; a sufficiently obfuscated command can still evade it. The post-exec test-file revert and worktree isolation are the backstop.
 - **Narrow conflict analysis.** Dependent-file analysis follows only relative JS/TS imports; other languages fall back to same-file detection.
 - **Liveness is absolute.** A test suite that was already failing before the task still blocks the commit (the user is warned when the transaction begins).

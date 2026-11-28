@@ -13,6 +13,9 @@ pnpm -C apps/control-plane run dev:oneshot --repo /path/to/workspace --port 0 --
 - Without `--db`, state is kept in SQLite at `<repo>/.cp/db.sqlite`; `--disableDb` keeps it in memory.
 - `--test-command` (or `CP_TEST_COMMAND`) is the default progress / liveness test command for
   transactions that do not pass their own.
+- `--test-modify-allowlist` (or `CP_TEST_MODIFY_ALLOWLIST`) lists test files the agent may create or change,
+  as comma-separated paths or globs relative to the repository (`tests/test_new.py,tests/gen/**`). Empty by
+  default: tests are "given". It is read once at start-up, so the agent cannot change it.
 - `CP_UNKNOWN_ACTION_POLICY=allow` relaxes action-safety for unrecognised actions (default: deny).
 - `.cp/` is added to `.git/info/exclude` automatically.
 - OpenAPI UI: `/docs`. (The MCP endpoint is not implemented; `mcp.ts` is a stub.)

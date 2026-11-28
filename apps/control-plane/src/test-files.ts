@@ -46,6 +46,18 @@ export function isTestFile(filePath: string): boolean {
 }
 
 /**
+ * Parse the operator-supplied allowlist (`--test-modify-allowlist` / `CP_TEST_MODIFY_ALLOWLIST`):
+ * comma- or semicolon-separated paths or globs, relative to the repository root.
+ */
+export function parseTestModifyAllowlist(raw: string | undefined): string[] {
+	if (!raw) return []
+	return raw
+		.split(/[,;]/)
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0)
+}
+
+/**
  * Check if test file modification is allowed via SERVER-SIDE allowlist.
  * An empty allowlist means no test modifications are allowed.
  */

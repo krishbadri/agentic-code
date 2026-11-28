@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { startServer } from "./server.js"
 import getPort from "get-port"
+import { parseTestModifyAllowlist } from "./test-files.js"
 
 function parseArgs(argv: string[]) {
 	const args: Record<string, string | boolean> = {}
@@ -60,6 +61,10 @@ async function main() {
 		const testTimeoutRaw = (args["test-timeout-ms"] as string) || process.env.CP_TEST_TIMEOUT_MS
 		const testTimeoutMs = testTimeoutRaw ? Number(testTimeoutRaw) : undefined
 		const unknownActionPolicy = process.env.CP_UNKNOWN_ACTION_POLICY === "allow" ? "allow" : "deny"
+		const allowlistArg = args["test-modify-allowlist"]
+		const testModifyAllowlist = parseTestModifyAllowlist(
+			typeof allowlistArg === "string" ? allowlistArg : process.env.CP_TEST_MODIFY_ALLOWLIST,
+		)
 		await startServer({
 			repoRoot: repo,
 			port,
@@ -69,6 +74,7 @@ async function main() {
 			testCommand,
 			testTimeoutMs: Number.isFinite(testTimeoutMs) ? testTimeoutMs : undefined,
 			unknownActionPolicy,
+			testModifyAllowlist,
 		})
 		// Output the actual port for child-process callers
 		console.log(JSON.stringify({ port }))

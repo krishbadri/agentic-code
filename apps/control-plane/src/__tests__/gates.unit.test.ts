@@ -10,7 +10,7 @@ import { checkActionSafety, normalizeTargetPath } from "../action-safety.js"
 import { parseTestOutput, effectivePassing, noTestsCollected } from "../progress-gate.js"
 import { checkLiveness } from "../liveness.js"
 import { splitArgv, splitCommands } from "../shell-lex.js"
-import { isTestFile } from "../test-files.js"
+import { isTestFile, isTestModifyAllowed, parseTestModifyAllowlist } from "../test-files.js"
 import { planMergeOrder } from "../merge-planner.js"
 import {
 	areChangesDisjoint,
@@ -177,6 +177,31 @@ describe("test-file detection", () => {
 		for (const p of ["src/app.ts", "contest.py", "latest.ts", "testing.md", "src/attest.go"]) {
 			expect(isTestFile(p), p).toBe(false)
 		}
+	})
+})
+
+describe("test-modify allowlist (operator-supplied)", () => {
+	it("parses comma- and semicolon-separated entries and drops blanks", () => {
+		expect(parseTestModifyAllowlist(undefined)).toEqual([])
+		expect(parseTestModifyAllowlist("")).toEqual([])
+		expect(parseTestModifyAllowlist(" tests/test_new.py , tests/gen/** ;; ")).toEqual([
+			"tests/test_new.py",
+			"tests/gen/**",
+		])
+	})
+
+	it("allows only the listed files", () => {
+		const list = parseTestModifyAllowlist("tests/test_projects.py")
+		expect(isTestModifyAllowed("tests/test_projects.py", list)).toBe(true)
+		expect(isTestModifyAllowed("tests/test_basic.py", list)).toBe(false)
+		expect(isTestModifyAllowed("tests/test_projects.py", [])).toBe(false)
+	})
+
+	it("applies to action-safety writes", () => {
+		const root = mkdtempSync(join(tmpdir(), "cp-allow-"))
+		const ctx = { worktreeRoot: root, testModifyAllowlist: ["tests/test_projects.py"] }
+		expect(checkActionSafety("write_to_file", { path: "tests/test_projects.py" }, ctx).allowed).toBe(true)
+		expect(checkActionSafety("write_to_file", { path: "tests/test_basic.py" }, ctx).allowed).toBe(false)
 	})
 })
 
