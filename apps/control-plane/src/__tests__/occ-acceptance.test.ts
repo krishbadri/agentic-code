@@ -1424,16 +1424,21 @@ line4
 			const { mkdir } = await import("node:fs/promises")
 			await mkdir(join(worktree_path, "symlink-dir"), { recursive: true })
 
-			// Try to create symlink - may fail on Windows without admin/dev mode
+			// The link points at a real directory OUTSIDE the worktree, so a missed check
+			// would actually write there. On Windows a plain symlink needs admin/dev mode;
+			// a junction does not, and is the same escape route.
+			const { mkdtempSync, existsSync } = await import("node:fs")
+			const { tmpdir } = await import("node:os")
+			const outside = mkdtempSync(join(tmpdir(), "cp-outside-"))
+			const linkPath = join(worktree_path, "symlink-dir", "link")
 			try {
-				await symlink("../../outside", join(worktree_path, "symlink-dir", "link"))
+				await symlink(outside, linkPath, "dir")
 			} catch (e: any) {
-				// On Windows, symlinks may require admin privileges
-				// Skip test if symlink creation fails (EPERM on Windows)
 				if (platform() === "win32" && (e.code === "EPERM" || e.code === "EACCES")) {
-					return // Skip test on Windows if symlinks aren't available
+					await symlink(outside, linkPath, "junction")
+				} else {
+					throw e
 				}
-				throw e // Re-throw if it's a different error
 			}
 
 			// Try to write through the symlink
@@ -1450,6 +1455,14 @@ line4
 			const data = await res.json()
 			expect(data.code).toBe("DENIED")
 			expect(data.message).toContain("Symlink path")
+			expect(existsSync(join(outside, "target.txt"))).toBe(false)
+
+			// Reading through the link is refused as well.
+			const read = await fetch(`${fixture.baseUrl}/tx/${tx_id}/read?file_path=symlink-dir/link/target.txt`, {
+				headers: fixture.headers,
+			})
+			expect(read.status).toBe(400)
+			expect((await read.json()).code).toBe("DENIED")
 		})
 
 		it("should handle rapid create-delete cycles without leaking resources", async () => {

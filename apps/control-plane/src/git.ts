@@ -152,7 +152,9 @@ export class Git {
 
 		// Build path segments from worktree root to target
 		const segments: string[] = [normalizedWt]
-		const relParts = rel.split(path.sep).filter(Boolean)
+		// Split on BOTH separators: callers send "a/b/c" on every platform, and splitting on
+		// path.sep alone left one un-split segment on Windows, so no directory was ever checked.
+		const relParts = rel.split(/[\\/]+/).filter(Boolean)
 
 		// Build each segment path
 		let current = normalizedWt
